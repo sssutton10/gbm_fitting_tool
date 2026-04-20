@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gbm_fitting"
+version = "0.1.0"
+description = "Polars-native GBM fitting library for insurance frequency and severity models"
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=0.20",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "optuna>=3.5",
+    "matplotlib>=3.8",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+lightgbm = ["lightgbm>=4.2"]
+xgboost = ["xgboost>=2.0"]
+catboost = ["catboost>=1.2"]
+explain = ["shap>=0.44"]
+umap = ["umap-learn>=0.5"]
+all = [
+    "lightgbm>=4.2",
+    "xgboost>=2.0",
+    "catboost>=1.2",
+    "shap>=0.44",
+    "umap-learn>=0.5",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
