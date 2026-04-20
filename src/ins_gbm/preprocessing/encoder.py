@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from gbm_fitting.data.schema import FeatureSchema
+from ins_gbm.data.schema import FeatureSchema
 
 
 _MISSING_LEVEL = "__missing__"

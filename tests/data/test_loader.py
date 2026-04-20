@@ -1,5 +1,5 @@
 import pytest
-from gbm_fitting.data.loader import load_model_data
+from ins_gbm.data.loader import load_model_data
 
 
 def test_load_poisson_from_parquet(poisson_parquet):

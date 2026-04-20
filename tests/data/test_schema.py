@@ -1,5 +1,5 @@
 import polars as pl
-from gbm_fitting.data.schema import FeatureSchema, infer_schema
+from ins_gbm.data.schema import FeatureSchema, infer_schema
 
 
 def test_feature_schema_defaults():

@@ -1,7 +1,7 @@
 import polars as pl
 import pytest
-from gbm_fitting.data.model_data import ModelData
-from gbm_fitting.data.schema import FeatureSchema
+from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.schema import FeatureSchema
 
 
 def test_model_data_poisson_valid(poisson_raw):

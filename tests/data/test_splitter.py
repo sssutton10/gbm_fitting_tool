@@ -1,6 +1,6 @@
 import pytest
-from gbm_fitting.data.loader import load_model_data
-from gbm_fitting.data.splitter import TrainTestSplit
+from ins_gbm.data.loader import load_model_data
+from ins_gbm.data.splitter import TrainTestSplit
 
 
 def _load_poisson(path):

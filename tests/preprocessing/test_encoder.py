@@ -1,7 +1,7 @@
 import polars as pl
 import pytest
-from gbm_fitting.data.schema import FeatureSchema
-from gbm_fitting.preprocessing.encoder import OneHotEncoder
+from ins_gbm.data.schema import FeatureSchema
+from ins_gbm.preprocessing.encoder import OneHotEncoder
 
 
 def _df():
