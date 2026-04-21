@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
+from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms
 from ins_gbm.pipeline import ModelRecipe
 
 
@@ -71,37 +72,9 @@ class CrossValidationReport:
             train_data = slice_model_data(clean_data, train_idx)
             held_data = slice_model_data(clean_data, held_idx)
 
-            current_train = train_data
-            current_held = held_data
-
-            if self.recipe.encoder is not None:
-                schema = getattr(current_train, "schema", None)
-                fitted_enc = self.recipe.encoder.fit(current_train.features, schema)
-                current_train = current_train.with_features(
-                    fitted_enc.transform(current_train.features)
-                )
-                current_held = current_held.with_features(
-                    fitted_enc.transform(current_held.features)
-                )
-
-            if self.recipe.selection is not None:
-                fitted_sel = self.recipe.selection.fit(current_train)
-                sel_feats = fitted_sel.selected_features()
-                current_train = current_train.with_features(
-                    current_train.features.select(sel_feats)
-                )
-                current_held = current_held.with_features(
-                    current_held.features.select(sel_feats)
-                )
-
-            for prep in self.recipe.preprocessing:
-                fitted_prep = prep.fit(current_train.features)
-                current_train = current_train.with_features(
-                    fitted_prep.transform(current_train.features)
-                )
-                current_held = current_held.with_features(
-                    fitted_prep.transform(current_held.features)
-                )
+            current_train, current_held = _apply_recipe_fold_transforms(
+                self.recipe, train_data, held_data
+            )
 
             fitted_model = self.recipe.model.fit(current_train)
             gbm_preds = fitted_model.predict(current_held, prediction_type="response")
@@ -129,6 +102,7 @@ class CrossValidationReport:
                     all_fold_rows.append({"fold": fold_id, "model": "benchmark", **row})
 
         fold_metrics = pl.DataFrame(all_fold_rows)
+        fold_metrics = fold_metrics.sort(["fold", "model", "metric"])
         summary = (
             fold_metrics
             .group_by(["model", "metric"])
