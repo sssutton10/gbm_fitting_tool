@@ -7,7 +7,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.splitter import TrainTestSplit
-from ins_gbm.models.base import FittedModel
+from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
 
@@ -45,6 +45,73 @@ class FittedPipeline:
     preprocessors: list
     metadata: ReproducibilityMetadata
 
+    def predict(
+        self,
+        data: ModelData,
+        prediction_type: PredictionType = "response",
+    ) -> pl.Series:
+        """Apply the fitted transform chain to *data* and return predictions.
+
+        Applies transforms in the same order as ModelPipeline.run():
+        encode → select → preprocess → model.predict().
+        Pass raw (pre-transform) data; the fitted transformers handle encoding.
+        """
+        current = data
+        if self.encoder is not None:
+            current = current.with_features(self.encoder.transform(current.features))
+        if self.selected_features is not None:
+            missing = [
+                f for f in self.selected_features if f not in current.features.columns
+            ]
+            if missing:
+                raise ValueError(
+                    f"Selected features missing after encoding: {missing}"
+                )
+            current = current.with_features(
+                current.features.select(self.selected_features)
+            )
+        for prep in self.preprocessors:
+            current = current.with_features(prep.transform(current.features))
+        return self.fitted_model.predict(current, prediction_type=prediction_type)
+
+    def predict_raw(
+        self,
+        features: pl.DataFrame,
+        exposure: Optional[pl.Series] = None,
+        weight: Optional[pl.Series] = None,
+        prediction_type: PredictionType = "response",
+    ) -> pl.Series:
+        """Score a raw feature DataFrame without a target column.
+
+        Constructs a ModelData with a placeholder target (never used for
+        prediction) so the full transform chain can be applied.
+        """
+        n = features.height
+        if exposure is not None and len(exposure) != n:
+            raise ValueError(
+                f"exposure length {len(exposure)} != features height {n}"
+            )
+        if weight is not None and len(weight) != n:
+            raise ValueError(
+                f"weight length {len(weight)} != features height {n}"
+            )
+        obj = self.fitted_model.objective
+        placeholder = (
+            pl.Series("_target", [0.0] * n)
+            if obj == "poisson"
+            else pl.Series("_target", [1.0] * n)
+        )
+        data = ModelData(
+            features=features,
+            target=placeholder,
+            exposure=exposure,
+            weight=weight,
+            feature_names=list(features.columns),
+            schema=self.train_data.schema,
+            objective=obj,
+        )
+        return self.predict(data, prediction_type=prediction_type)
+
 
 @dataclass
 class ModelPipeline:
@@ -68,10 +135,8 @@ class ModelPipeline:
         from ins_gbm.evaluation.report import EvaluationReport
         from ins_gbm.persistence.metadata import build_metadata
 
-        # ── 1. Split ──────────────────────────────────────────────────────────
         train_data, test_data = self.split.split(self.data)
 
-        # ── 2. Tune (optional) ────────────────────────────────────────────────
         tuning_history: Optional[pl.DataFrame] = None
         best_params: dict = {}
         if self.recipe.tuning is not None:
@@ -91,7 +156,6 @@ class ModelPipeline:
                 schema=getattr(train_data, "schema", None),
             )
 
-        # ── 3. Refit on full training data ────────────────────────────────────
         current_train = train_data
         current_test = test_data
         fitted_encoder: Optional[Any] = None
@@ -133,14 +197,12 @@ class ModelPipeline:
             params=best_params if best_params else None,
         )
 
-        # ── 4. Evaluate once on the test set ──────────────────────────────────
         report = EvaluationReport(
             fitted_model=fitted_model,
             test_data=current_test,
             train_data=current_train,
         )
 
-        # ── 5. Capture reproducibility metadata ───────────────────────────────
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=selected_features,

@@ -93,3 +93,19 @@ def test_load_metadata_preserved(poisson_parquet, tmp_path):
     loaded = load_pipeline(out)
     assert loaded.metadata.objective == "poisson"
     assert loaded.metadata.feature_names == result.metadata.feature_names
+
+
+def test_load_pipeline_and_predict_raw(poisson_parquet, poisson_raw, tmp_path):
+    """Loaded pipeline can score new raw data via predict_raw()."""
+    result = _build_pipeline(poisson_parquet)
+    out = str(tmp_path / "pipeline_out")
+    save_pipeline(result, out)
+    loaded = load_pipeline(out)
+
+    preds = loaded.predict_raw(
+        features=poisson_raw.select(["x1", "x3"]),
+        exposure=poisson_raw["exposure"],
+    )
+    assert isinstance(preds, pl.Series)
+    assert preds.len() == poisson_raw.height
+    assert (preds > 0).all()
