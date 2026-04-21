@@ -29,26 +29,13 @@ class EvaluationReport:
         return self._single_metrics()
 
     def _single_metrics(self) -> pl.DataFrame:
-        actual = self.test_data.target
-        predicted = self.fitted_model.predict(self.test_data, prediction_type="response")
-        exposure = self.test_data.exposure
-        weight = self.test_data.weight
-        obj = self.fitted_model.objective
-
-        rows: list[dict] = []
-        if obj == "poisson":
-            rows.append({"metric": "poisson_deviance",
-                         "value": _m.poisson_deviance(actual, predicted, weights=exposure)})
-        else:
-            rows.append({"metric": "gamma_deviance",
-                         "value": _m.gamma_deviance(actual, predicted, weights=weight)})
-
-        gini_weights = exposure if exposure is not None else weight
-        rows.append({"metric": "gini",
-                     "value": _m.normalized_gini(actual, predicted, weights=gini_weights)})
-        rows.append({"metric": "rmse", "value": _m.rmse(actual, predicted)})
-        rows.append({"metric": "mae", "value": _m.mae(actual, predicted)})
-        return pl.DataFrame(rows)
+        return _m.compute_metrics(
+            objective=self.fitted_model.objective,
+            actual=self.test_data.target,
+            predicted=self.fitted_model.predict(self.test_data, prediction_type="response"),
+            exposure=self.test_data.exposure,
+            weight=self.test_data.weight,
+        )
 
     def plot_lift(self, output_path: Optional[str] = None):
         actual = self.test_data.target

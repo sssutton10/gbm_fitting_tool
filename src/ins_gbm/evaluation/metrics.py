@@ -1,5 +1,5 @@
 """Actuarial evaluation metrics for Poisson frequency and Gamma severity models."""
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import polars as pl
@@ -121,3 +121,69 @@ def mae(
         w = _to_numpy(weights)
         return float(np.sum(w * residuals) / np.sum(w))
     return float(np.mean(residuals))
+
+
+Objective = Literal["poisson", "gamma"]
+
+METRIC_DIRECTIONS: dict[str, str] = {
+    "gini": "higher",
+    "poisson_deviance": "lower",
+    "gamma_deviance": "lower",
+    "rmse": "lower",
+    "mae": "lower",
+}
+
+
+def compute_metrics(
+    *,
+    objective: Objective,
+    actual: pl.Series,
+    predicted: pl.Series,
+    exposure: Optional[pl.Series] = None,
+    weight: Optional[pl.Series] = None,
+) -> pl.DataFrame:
+    """Compute all standard metrics for a given objective.
+
+    Returns a DataFrame with columns ['metric', 'value'].
+
+    Parameters
+    ----------
+    objective : Objective
+        Either "poisson" or "gamma".
+    actual : pl.Series
+        Actual target values.
+    predicted : pl.Series
+        Model predictions.
+    exposure : Optional[pl.Series]
+        Exposure weights for Poisson models. Used for deviance and Gini.
+    weight : Optional[pl.Series]
+        Observation weights for Gamma models. Used for deviance and Gini.
+
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with columns ['metric', 'value'] containing four metrics:
+        - objective-specific deviance (poisson_deviance or gamma_deviance)
+        - gini (normalized Gini coefficient)
+        - rmse (root mean squared error)
+        - mae (mean absolute error)
+    """
+    rows: list[dict] = []
+    if objective == "poisson":
+        rows.append({
+            "metric": "poisson_deviance",
+            "value": poisson_deviance(actual, predicted, weights=exposure),
+        })
+    else:
+        rows.append({
+            "metric": "gamma_deviance",
+            "value": gamma_deviance(actual, predicted, weights=weight),
+        })
+    gini_weights = exposure if exposure is not None else weight
+    rows.append({
+        "metric": "gini",
+        "value": normalized_gini(actual, predicted, weights=gini_weights)
+    })
+    rows.append({"metric": "rmse", "value": rmse(actual, predicted)})
+    rows.append({"metric": "mae", "value": mae(actual, predicted)})
+    return pl.DataFrame(rows)
