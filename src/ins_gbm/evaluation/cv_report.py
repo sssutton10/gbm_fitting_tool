@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import polars as pl
@@ -9,7 +9,9 @@ import polars as pl
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms
-from ins_gbm.pipeline import ModelRecipe
+
+if TYPE_CHECKING:
+    from ins_gbm.pipeline import ModelRecipe
 
 
 @dataclass
