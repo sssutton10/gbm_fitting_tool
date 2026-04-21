@@ -19,11 +19,11 @@ def compare_reports(
     CV values are formatted as 'mean +/- std'; single test-set values as 'mean'.
     """
     from ins_gbm.evaluation.report import EvaluationReport
-    from ins_gbm.evaluation.cv_report import CVResult
+    from ins_gbm.evaluation.cv_report import CVResult, GBM_MODEL_LABEL
     from ins_gbm.evaluation.metrics import METRIC_DIRECTIONS
 
     for name, report in reports.items():
-        if isinstance(report, EvaluationReport) and report._comparison_models is not None:
+        if isinstance(report, EvaluationReport) and report.is_comparison_mode:
             raise ValueError(
                 f"Report {name!r} is a comparison-mode EvaluationReport and cannot be "
                 "used with compare_reports(). Pass individual single-model reports or "
@@ -35,7 +35,7 @@ def compare_reports(
 
     for name, report in reports.items():
         if isinstance(report, CVResult):
-            gbm_rows = report.summary.filter(pl.col("model") == "gbm")
+            gbm_rows = report.summary.filter(pl.col("model") == GBM_MODEL_LABEL)
             d: dict[str, tuple[float, float | None]] = {}
             for row in gbm_rows.iter_rows(named=True):
                 d[row["metric"]] = (row["mean"], row["std"])

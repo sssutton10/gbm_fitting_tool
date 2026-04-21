@@ -13,6 +13,8 @@ from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms
 if TYPE_CHECKING:
     from ins_gbm.pipeline import ModelRecipe
 
+GBM_MODEL_LABEL: str = "gbm"
+
 
 @dataclass
 class CVResult:
@@ -89,7 +91,7 @@ class CrossValidationReport:
                 weight=current_held.weight,
             )
             for row in gbm_metrics.iter_rows(named=True):
-                all_fold_rows.append({"fold": fold_id, "model": "gbm", **row})
+                all_fold_rows.append({"fold": fold_id, "model": GBM_MODEL_LABEL, **row})
 
             if benchmark_preds is not None:
                 bench_held = benchmark_preds.gather(held_idx.tolist())

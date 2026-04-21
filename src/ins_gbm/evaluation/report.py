@@ -21,6 +21,10 @@ class EvaluationReport:
     train_data: ModelData
     _comparison_models: Optional[dict[str, tuple[FittedModel, ModelData, ModelData]]] = None
 
+    @property
+    def is_comparison_mode(self) -> bool:
+        return self._comparison_models is not None
+
     # ── Single-model API ──────────────────────────────────────────────────────
 
     def metrics(self) -> pl.DataFrame:
