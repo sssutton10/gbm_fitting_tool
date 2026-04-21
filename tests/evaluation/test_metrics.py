@@ -176,6 +176,17 @@ def test_compute_metrics_matches_individual_functions():
     assert abs(row - expected_deviance) < 1e-10
 
 
+def test_compute_metrics_no_weights():
+    actual = pl.Series([1.0, 2.0, 3.0])
+    predicted = pl.Series([1.1, 1.9, 3.2])
+    result = compute_metrics(
+        objective="poisson",
+        actual=actual,
+        predicted=predicted,
+    )
+    assert set(result["metric"].to_list()) == {"poisson_deviance", "gini", "rmse", "mae"}
+
+
 def test_metric_directions_has_all_keys():
     assert METRIC_DIRECTIONS["gini"] == "higher"
     assert METRIC_DIRECTIONS["poisson_deviance"] == "lower"

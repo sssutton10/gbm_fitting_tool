@@ -4,6 +4,8 @@ from typing import Literal, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.model_data import Objective
+
 
 def _to_numpy(s: pl.Series) -> np.ndarray:
     return s.to_numpy().astype(np.float64)
@@ -123,9 +125,8 @@ def mae(
     return float(np.mean(residuals))
 
 
-Objective = Literal["poisson", "gamma"]
-
-METRIC_DIRECTIONS: dict[str, str] = {
+Direction = Literal["higher", "lower"]
+METRIC_DIRECTIONS: dict[str, Direction] = {
     "gini": "higher",
     "poisson_deviance": "lower",
     "gamma_deviance": "lower",
