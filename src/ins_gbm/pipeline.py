@@ -135,8 +135,10 @@ class ModelPipeline:
         from ins_gbm.evaluation.report import EvaluationReport
         from ins_gbm.persistence.metadata import build_metadata
 
+        # ── 1. Split ──────────────────────────────────────────────────────────
         train_data, test_data = self.split.split(self.data)
 
+        # ── 2. Tune (optional) ────────────────────────────────────────────────
         tuning_history: Optional[pl.DataFrame] = None
         best_params: dict = {}
         if self.recipe.tuning is not None:
@@ -156,6 +158,7 @@ class ModelPipeline:
                 schema=getattr(train_data, "schema", None),
             )
 
+        # ── 3. Refit on full training data ────────────────────────────────────
         current_train = train_data
         current_test = test_data
         fitted_encoder: Optional[Any] = None
@@ -197,12 +200,14 @@ class ModelPipeline:
             params=best_params if best_params else None,
         )
 
+        # ── 4. Evaluate once on the test set ──────────────────────────────────
         report = EvaluationReport(
             fitted_model=fitted_model,
             test_data=current_test,
             train_data=current_train,
         )
 
+        # ── 5. Capture reproducibility metadata ───────────────────────────────
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=selected_features,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import warnings
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,7 +41,6 @@ def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
             os.path.join(output_dir, "metrics.csv")
         )
     except Exception as exc:
-        import warnings
         warnings.warn(f"Could not write metrics.csv: {exc}", stacklevel=2)
 
     if fitted_pipeline.tuning_history is not None:
