@@ -6,7 +6,7 @@ from typing import Any, Optional
 import numpy as np
 import polars as pl
 
-from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.evaluation.metrics import poisson_deviance, gamma_deviance, rmse, mae
 
 
@@ -28,18 +28,6 @@ def _suggest_from_distribution(trial: Any, name: str, dist: Any) -> Any:
         return trial.suggest_categorical(name, dist.choices)
     else:
         raise ValueError(f"Unsupported distribution type: {type(dist)}")
-
-
-def _slice_model_data(data: ModelData, indices: np.ndarray) -> ModelData:
-    return ModelData(
-        features=data.features[indices],
-        target=data.target[indices],
-        exposure=data.exposure[indices] if data.exposure is not None else None,
-        weight=data.weight[indices] if data.weight is not None else None,
-        feature_names=data.feature_names,
-        schema=data.schema,
-        objective=data.objective,
-    )
 
 
 @dataclass
@@ -106,9 +94,8 @@ class HyperparameterTuner:
             pruner=optuna.pruners.MedianPruner(),
         )
 
-        indices = np.arange(data.n_rows)
         kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
-        fold_splits = list(kf.split(indices))
+        fold_splits = list(kf.split(range(data.n_rows)))
 
         def objective(trial: Any) -> float:
             params = {
@@ -118,10 +105,9 @@ class HyperparameterTuner:
 
             fold_scores: list[float] = []
             for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
-                train_data = _slice_model_data(data, train_idx)
-                val_data = _slice_model_data(data, val_idx)
+                train_data = slice_model_data(data, train_idx)
+                val_data = slice_model_data(data, val_idx)
 
-                # Encoder: fit on train fold only
                 if encoder is not None:
                     fitted_enc = encoder.fit(train_data.features, schema)
                     train_data = train_data.with_features(
@@ -131,7 +117,6 @@ class HyperparameterTuner:
                         fitted_enc.transform(val_data.features)
                     )
 
-                # Selector: fit on train fold only
                 if selector is not None:
                     fitted_sel = selector.fit(train_data)
                     selected = fitted_sel.selected_features()
@@ -142,7 +127,6 @@ class HyperparameterTuner:
                         val_data.features.select(selected)
                     )
 
-                # Preprocessor: fit on train fold only
                 if preprocessor is not None:
                     fitted_pre = preprocessor.fit(train_data.features)
                     train_data = train_data.with_features(
@@ -152,11 +136,9 @@ class HyperparameterTuner:
                         fitted_pre.transform(val_data.features)
                     )
 
-                # Fit model and predict
                 fitted_model = model.fit(train_data, params=params)
                 preds = fitted_model.predict(val_data, prediction_type="response")
 
-                # Compute metric (metrics.py expects pl.Series)
                 weights = (
                     val_data.exposure
                     if val_data.exposure is not None
@@ -169,7 +151,6 @@ class HyperparameterTuner:
                 )
                 fold_scores.append(score)
 
-                # Report intermediate value for pruning
                 trial.report(float(np.mean(fold_scores)), fold_idx)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
@@ -178,7 +159,6 @@ class HyperparameterTuner:
 
         study.optimize(objective, n_trials=self.n_trials)
 
-        # Build trial history — one row per completed trial
         rows = []
         for t in study.trials:
             if t.value is not None:

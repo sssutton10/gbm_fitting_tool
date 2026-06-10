@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
 Objective = Literal["poisson", "gamma"]
@@ -20,6 +21,15 @@ _LGB_OBJECTIVE = {
 
 @dataclass
 class LightGBMModel:
+    """LightGBM wrapper for Poisson (frequency) and Gamma (severity) objectives.
+
+    Missing values
+    --------------
+    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    Before constructing the ``Dataset``, the wrapper converts that sentinel back
+    to ``NaN`` so LightGBM can apply its native missing-value branch logic
+    (learns the optimal direction at each split).
+    """
     objective: Objective = "poisson"
 
     def capabilities(self) -> ModelCapabilities:
@@ -56,6 +66,7 @@ class LightGBMModel:
         p.setdefault("verbose", -1)
 
         X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
+        X[X == _NUMERIC_FILL] = np.nan
         y = data.target.to_numpy().astype(np.float64)
 
         init_score: Optional[np.ndarray] = None
@@ -88,6 +99,7 @@ class LightGBMModel:
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
+            X_pred[X_pred == _NUMERIC_FILL] = np.nan
             raw_scores = booster.predict(X_pred)
 
             if objective == "poisson":

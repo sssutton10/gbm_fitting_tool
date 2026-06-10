@@ -5,12 +5,28 @@ import polars as pl
 from ins_gbm.data.schema import FeatureSchema
 
 
-_MISSING_LEVEL = "__missing__"
+_NUMERIC_FILL: float = -999_999_999.0  # sentinel for missing numeric/ordinal values
+_MISSING_LEVEL: str = "-999999999"     # sentinel for missing categorical values
 
 
 @dataclass
 class OneHotEncoder:
-    """Fit-then-transform one-hot encoder for categorical columns."""
+    """Fit-then-transform one-hot encoder for categorical columns.
+
+    Missing value convention
+    -----------------------
+    The encoder expects missing values to be pre-filled by the caller before
+    ``fit()`` is invoked:
+
+    - Numeric/ordinal columns: ``_NUMERIC_FILL`` (``-999_999_999.0``).
+      ``transform()`` passes these through unchanged.  Model wrappers that
+      support native missing-value handling (LightGBM, CatBoost) convert this
+      sentinel back to ``NaN``; XGBoost declares it via ``missing=_NUMERIC_FILL``
+      on ``DMatrix``.
+    - Categorical columns: ``_MISSING_LEVEL`` (``"-999999999"``).
+      Treated as an explicit level during ``fit()`` so it gets its own indicator
+      column, just like any observed category.
+    """
 
     def fit(self, features: pl.DataFrame, schema: FeatureSchema) -> "FittedOneHotEncoder":
         levels: dict[str, list[str]] = {}
@@ -62,9 +78,9 @@ class FittedOneHotEncoder:
         parts: list[pl.Series] = []
 
         for col in self.numeric_cols:
-            parts.append(features[col])
+            parts.append(features[col].fill_null(_NUMERIC_FILL))
         for col in self.ordinal_cols:
-            parts.append(features[col])
+            parts.append(features[col].fill_null(_NUMERIC_FILL))
         for col in self.passthrough_cols:
             parts.append(features[col])
 

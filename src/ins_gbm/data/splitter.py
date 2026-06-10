@@ -51,4 +51,7 @@ class TrainTestSplit:
             target=data.target.filter(s),
             exposure=data.exposure.filter(s) if data.exposure is not None else None,
             weight=data.weight.filter(s) if data.weight is not None else None,
+            offset=data.offset.filter(s) if data.offset is not None else None,
+            cv_fold=data.cv_fold.filter(s) if data.cv_fold is not None else None,
+            comparisons=data.comparisons.filter(s) if data.comparisons is not None else None,
         )

@@ -1,34 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Optional
 
 import numpy as np
 import polars as pl
 
-from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.model_data import ModelData, slice_model_data
+from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms, _predict_from_pipeline
 
 if TYPE_CHECKING:
     from ins_gbm.pipeline import FittedPipeline
-
-
-def _apply_pipeline_transforms(pipeline: "FittedPipeline", data: ModelData) -> ModelData:
-    """Apply a pipeline's fitted encoder, selector, and preprocessors to *data*."""
-    current = data
-    if pipeline.encoder is not None:
-        current = current.with_features(pipeline.encoder.transform(current.features))
-    if pipeline.selected_features is not None:
-        current = current.with_features(
-            current.features.select(pipeline.selected_features)
-        )
-    for prep in pipeline.preprocessors:
-        current = current.with_features(prep.transform(current.features))
-    return current
-
-
-def _predict_from_pipeline(pipeline: "FittedPipeline", data: ModelData) -> np.ndarray:
-    transformed = _apply_pipeline_transforms(pipeline, data)
-    return pipeline.fitted_model.predict(transformed, prediction_type="response").to_numpy()
 
 
 @dataclass
@@ -43,8 +25,7 @@ class FittedBlendingEnsemble:
             [_predict_from_pipeline(p, data) for p in self.fitted_pipelines],
             axis=1,
         )
-        blended = stacked @ np.array(self.weights)
-        return pl.Series(blended)
+        return pl.Series(stacked @ np.array(self.weights))
 
 
 @dataclass
@@ -95,8 +76,6 @@ class BlendingEnsemble:
         else:
             raise ValueError(f"Unknown mode: {self.mode!r}. Choose from 'fixed', 'validation', 'oof'.")
 
-    # ── Fixed ─────────────────────────────────────────────────────────────────
-
     def _fit_fixed(self, pipelines) -> FittedBlendingEnsemble:
         if self.weights is None:
             raise ValueError(
@@ -118,118 +97,64 @@ class BlendingEnsemble:
             fitted_pipelines=list(pipelines),
         )
 
-    # ── Validation ────────────────────────────────────────────────────────────
-
     def _fit_validation(self, pipelines, validation_data: Optional[ModelData]) -> FittedBlendingEnsemble:
         if validation_data is None:
             raise ValueError(
                 "validation_data is required when mode='validation'. "
                 "Supply a held-out blend set that is not the final test set."
             )
-        # Build matrix of base model predictions on validation data
         preds = np.stack(
             [_predict_from_pipeline(p, validation_data) for p in pipelines],
             axis=1,
         )
         actual = validation_data.target.to_numpy().astype(np.float64)
-        optimized_weights = _optimize_weights(preds, actual)
         return FittedBlendingEnsemble(
-            weights=optimized_weights.tolist(),
+            weights=_optimize_weights(preds, actual).tolist(),
             fitted_pipelines=list(pipelines),
         )
-
-    # ── OOF ──────────────────────────────────────────────────────────────────
 
     def _fit_oof(self, pipelines) -> FittedBlendingEnsemble:
         """Re-fit each pipeline's recipe inside CV folds to get OOF predictions."""
         from sklearn.model_selection import KFold
-        from ins_gbm.pipeline import ModelPipeline
 
-        kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
-
-        # Use the first pipeline's training data as the reference
         ref_train = pipelines[0].train_data
         n = ref_train.n_rows
-        indices = np.arange(n)
-
+        kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
         oof_preds = np.zeros((n, len(pipelines)))
 
         for p_idx, pipeline in enumerate(pipelines):
-            recipe = pipeline.recipe
-            train_data = pipeline.train_data
-
-            for train_idx, val_idx in kf.split(indices):
-                from ins_gbm.data.model_data import ModelData as _MD
-
-                def _slice(data, idx):
-                    return _MD(
-                        features=data.features[idx],
-                        target=data.target[idx],
-                        exposure=data.exposure[idx] if data.exposure is not None else None,
-                        weight=data.weight[idx] if data.weight is not None else None,
-                        feature_names=data.feature_names,
-                        schema=data.schema,
-                        objective=data.objective,
-                    )
-
-                fold_train = _slice(train_data, train_idx)
-                fold_val = _slice(train_data, val_idx)
-
-                # Apply encoder
-                current_train = fold_train
-                current_val = fold_val
-                if recipe.encoder is not None:
-                    schema = getattr(current_train, "schema", None)
-                    fitted_enc = recipe.encoder.fit(current_train.features, schema)
-                    current_train = current_train.with_features(fitted_enc.transform(current_train.features))
-                    current_val = current_val.with_features(fitted_enc.transform(current_val.features))
-
-                # Apply selector
-                if recipe.selection is not None:
-                    fitted_sel = recipe.selection.fit(current_train)
-                    sel_feats = fitted_sel.selected_features()
-                    current_train = current_train.with_features(current_train.features.select(sel_feats))
-                    current_val = current_val.with_features(current_val.features.select(sel_feats))
-
-                # Apply preprocessors
-                for prep in recipe.preprocessing:
-                    fitted_prep = prep.fit(current_train.features)
-                    current_train = current_train.with_features(fitted_prep.transform(current_train.features))
-                    current_val = current_val.with_features(fitted_prep.transform(current_val.features))
-
-                # Fit and predict
-                fitted_model = recipe.model.fit(current_train)
-                fold_preds = fitted_model.predict(current_val, "response").to_numpy()
-                oof_preds[val_idx, p_idx] = fold_preds
+            for train_idx, val_idx in kf.split(range(n)):
+                fold_train = slice_model_data(pipeline.train_data, train_idx)
+                fold_val = slice_model_data(pipeline.train_data, val_idx)
+                current_train, current_val = _apply_recipe_fold_transforms(
+                    pipeline.recipe, fold_train, fold_val
+                )
+                fitted_model = pipeline.recipe.model.fit(current_train)
+                oof_preds[val_idx, p_idx] = fitted_model.predict(current_val, "response").to_numpy()
 
         actual = ref_train.target.to_numpy().astype(np.float64)
-        optimized_weights = _optimize_weights(oof_preds, actual)
         return FittedBlendingEnsemble(
-            weights=optimized_weights.tolist(),
+            weights=_optimize_weights(oof_preds, actual).tolist(),
             fitted_pipelines=list(pipelines),
         )
 
 
 def _optimize_weights(preds: np.ndarray, actual: np.ndarray) -> np.ndarray:
-    """Scipy-optimize blend weights (sum to 1, non-negative) to minimize MSE."""
+    """Scipy-optimize blend weights (sum to 1, non-negative) to minimise MSE."""
     from scipy.optimize import minimize
 
     n_models = preds.shape[1]
     x0 = np.ones(n_models) / n_models
 
     def objective(w):
-        blended = preds @ w
-        return np.mean((actual - blended) ** 2)
-
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
-    bounds = [(0.0, 1.0)] * n_models
+        return np.mean((actual - preds @ w) ** 2)
 
     result = minimize(
         objective,
         x0,
         method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
+        bounds=[(0.0, 1.0)] * n_models,
+        constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}],
         options={"ftol": 1e-9},
     )
     return result.x

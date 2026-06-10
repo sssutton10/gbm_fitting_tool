@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
 Objective = Literal["poisson", "gamma"]
@@ -33,6 +34,14 @@ def _catboost_supports_offset() -> bool:
 
 @dataclass
 class CatBoostModel:
+    """CatBoost wrapper for Poisson (frequency) and Gamma (severity) objectives.
+
+    Missing values
+    --------------
+    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    Before constructing the ``Pool``, the wrapper converts that sentinel back to
+    ``NaN`` so CatBoost can apply its native missing-value handling.
+    """
     objective: Objective = "poisson"
 
     def capabilities(self) -> ModelCapabilities:
@@ -68,6 +77,7 @@ class CatBoostModel:
         p.setdefault("allow_writing_files", False)
 
         X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
+        X[X == _NUMERIC_FILL] = np.nan
         y = data.target.to_numpy().astype(np.float64)
 
         baseline: Optional[np.ndarray] = None
@@ -96,6 +106,7 @@ class CatBoostModel:
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
+            X_pred[X_pred == _NUMERIC_FILL] = np.nan
 
             pred_baseline: Optional[np.ndarray] = None
             if objective == "poisson" and pred_data.exposure is not None and has_offset:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import polars as pl
@@ -63,7 +63,6 @@ class EnsemblePipeline:
         """
         from ins_gbm.evaluation.report import EvaluationReport
         from ins_gbm.models.base import FittedModel
-        import polars as pl
 
         if self.method == "blending":
             fitted_ensemble = self._run_blending()
@@ -74,22 +73,17 @@ class EnsemblePipeline:
                 f"Unknown method: {self.method!r}. Choose 'blending' or 'stacking'."
             )
 
-        # Evaluate on the test set of the first base pipeline
         test_data = self.fitted_pipelines[0].test_data
         objective = self.fitted_pipelines[0].fitted_model.objective
 
-        # Wrap the ensemble predict fn into a FittedModel-compatible interface
-        # so EvaluationReport can call .predict() and .feature_importance()
-        ensemble_ref = fitted_ensemble
-
+        # Proxy FittedModel so EvaluationReport can call .predict() and .feature_importance()
         def _predict_fn(data: ModelData, prediction_type: str) -> pl.Series:
-            return ensemble_ref.predict(data)
+            return fitted_ensemble.predict(data)
 
         def _importance_fn():
             return pl.DataFrame({"feature": pl.Series([], dtype=pl.Utf8),
                                   "importance": pl.Series([], dtype=pl.Float64)})
 
-        from ins_gbm.models.base import FittedModel
         proxy_model = FittedModel(
             model=fitted_ensemble,
             params={},

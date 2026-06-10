@@ -46,7 +46,7 @@ def test_missing_category_treated_as_explicit_level():
     schema = FeatureSchema(numeric=["num"], categorical=["cat"])
     fitted = OneHotEncoder().fit(df, schema)
     names = fitted.output_feature_names()
-    assert any("__null" in n or "__missing" in n or "null" in n.lower() for n in names)
+    assert any("-999999999" in n for n in names)
 
 
 def test_numeric_passthrough():

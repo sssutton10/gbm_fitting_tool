@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
 Objective = Literal["poisson", "gamma"]
@@ -20,6 +21,15 @@ _XGB_OBJECTIVE = {
 
 @dataclass
 class XGBoostModel:
+    """XGBoost wrapper for Poisson (frequency) and Gamma (severity) objectives.
+
+    Missing values
+    --------------
+    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    Both ``DMatrix`` calls (train and predict) declare ``missing=_NUMERIC_FILL``
+    so XGBoost treats that sentinel as missing and applies its sparse-aware
+    split-finding rather than treating it as a real value.
+    """
     objective: Objective = "poisson"
 
     def capabilities(self) -> ModelCapabilities:
@@ -74,6 +84,7 @@ class XGBoostModel:
             base_margin=base_margin,
             weight=sample_weight,
             feature_names=list(data.feature_names),
+            missing=_NUMERIC_FILL,
         )
 
         booster = xgb.train(
@@ -93,7 +104,7 @@ class XGBoostModel:
             if objective == "poisson" and pred_data.exposure is not None:
                 pred_margin = np.log(pred_data.exposure.to_numpy().astype(np.float64))
 
-            dtest = xgb.DMatrix(X_pred, base_margin=pred_margin, feature_names=feature_names)
+            dtest = xgb.DMatrix(X_pred, base_margin=pred_margin, feature_names=feature_names, missing=_NUMERIC_FILL)
             raw = booster.predict(dtest)
 
             if objective == "poisson":

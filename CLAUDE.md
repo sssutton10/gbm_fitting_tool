@@ -52,6 +52,19 @@ src/ins_gbm/
 - **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). Cloneable; used by tuner and stacking for CV re-fits.
 - **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` and `test_data` are **transformed** (post-encoder/selector/preprocessor), ready for the model.
 
+## Missing Value Convention
+
+The library expects missing values to arrive **pre-filled** before `OneHotEncoder.fit()` is called — upstream data preparation is responsible for this, not the library.
+
+| Column type | Expected sentinel | How the library handles it |
+|---|---|---|
+| Numeric / ordinal | `-999999999.0` | Passed through by `OneHotEncoder`; converted back to `NaN` before LightGBM/CatBoost training so those frameworks use their native missing-value branch logic; declared as `missing=` in XGBoost `DMatrix` for the same effect |
+| Categorical | `"-999999999"` | Treated as an explicit level during `OneHotEncoder.fit()`; gets its own indicator column like any other category |
+
+`_NUMERIC_FILL = -999_999_999.0` and `_MISSING_LEVEL = "-999999999"` are the authoritative constants in `src/ins_gbm/preprocessing/encoder.py`. Import them in model wrappers rather than hard-coding the value.
+
+Random Forest (sklearn) has no native missing-value support, so it receives the filled sentinel as a real number — this is a known limitation documented in `RandomForestModel`.
+
 ## Objectives & Prediction
 
 - `"poisson"`: frequency. Requires positive `exposure`. LightGBM uses `init_score=log(exposure)`, XGBoost uses `base_margin=log(exposure)`. `prediction_type="rate"` is invalid for gamma.
