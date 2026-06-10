@@ -72,7 +72,7 @@ class ModelData:
                 raise ValueError(
                     f"offset row count {self.offset.len()} != features row count {n}"
                 )
-            if type(self.offset.dtype) not in _NUMERIC_DTYPES and self.offset.dtype not in _NUMERIC_DTYPES:
+            if self.offset.dtype not in _NUMERIC_DTYPES:
                 raise ValueError(
                     f"offset must have a numeric dtype, got {self.offset.dtype!r}"
                 )
@@ -87,7 +87,7 @@ class ModelData:
                 raise ValueError(
                     f"cv_fold row count {self.cv_fold.len()} != features row count {n}"
                 )
-            if type(self.cv_fold.dtype) not in _INTEGER_DTYPES and self.cv_fold.dtype not in _INTEGER_DTYPES:
+            if self.cv_fold.dtype not in _INTEGER_DTYPES:
                 raise ValueError(
                     f"cv_fold must have an integer dtype, got {self.cv_fold.dtype!r}"
                 )
@@ -106,7 +106,7 @@ class ModelData:
                 )
             for col in self.comparisons.columns:
                 col_series = self.comparisons[col]
-                if type(col_series.dtype) not in _NUMERIC_DTYPES and col_series.dtype not in _NUMERIC_DTYPES:
+                if col_series.dtype not in _NUMERIC_DTYPES:
                     raise ValueError(
                         f"comparisons column '{col}' must be numeric, got {col_series.dtype!r}"
                     )
@@ -128,7 +128,6 @@ class ModelData:
 
 def slice_model_data(data: "ModelData", indices) -> "ModelData":
     """Return a new ModelData containing only the rows at *indices*."""
-    idx_series = pl.Series("_idx", indices)
     return ModelData(
         features=data.features[indices],
         target=data.target[indices],
@@ -137,7 +136,7 @@ def slice_model_data(data: "ModelData", indices) -> "ModelData":
         feature_names=data.feature_names,
         schema=data.schema,
         objective=data.objective,
-        offset=data.offset.gather(idx_series) if data.offset is not None else None,
-        cv_fold=data.cv_fold.gather(idx_series) if data.cv_fold is not None else None,
+        offset=data.offset[indices] if data.offset is not None else None,
+        cv_fold=data.cv_fold[indices] if data.cv_fold is not None else None,
         comparisons=data.comparisons[indices] if data.comparisons is not None else None,
     )

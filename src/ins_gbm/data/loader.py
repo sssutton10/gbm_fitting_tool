@@ -16,6 +16,9 @@ def load_model_data(
     objective: Optional[Objective] = None,
     cv_fold: Optional[str] = None,
     comparison_cols: Optional[list[str]] = None,
+    # Note: `offset` is intentionally absent here. It is not a load-time parameter
+    # because it is computed after loading (e.g. from a base model's predictions)
+    # and set via ModelData.with_offset().
 ) -> ModelData:
     df = pl.read_parquet(path)
 

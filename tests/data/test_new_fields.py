@@ -22,7 +22,7 @@ from ins_gbm.data.splitter import TrainTestSplit
 def base_data():
     """Minimal ModelData (10 rows, no optional fields) for field-level tests."""
     n = 10
-    features = pl.DataFrame({"x": list(range(n, dtype=float) if False else [float(i) for i in range(n)])})
+    features = pl.DataFrame({"x": [float(i) for i in range(n)]})
     target = pl.Series("target", [float(i + 1) for i in range(n)])
     return ModelData(
         features=features,
@@ -85,7 +85,7 @@ class TestValidateOffset:
     def test_offset_non_numeric_raises(self, base_data):
         str_offset = pl.Series("offset", ["a"] * base_data.n_rows)
         data = replace(base_data, offset=str_offset)
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError):
             data.validate()
 
 
