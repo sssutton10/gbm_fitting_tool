@@ -201,10 +201,17 @@ class ModelPipeline:
         )
 
         # ── 4. Evaluate once on the test set ──────────────────────────────────
+        comp_preds = None
+        if current_test.comparisons is not None:
+            comp_preds = {
+                col: current_test.comparisons[col]
+                for col in current_test.comparisons.columns
+            }
         report = EvaluationReport(
             fitted_model=fitted_model,
             test_data=current_test,
             train_data=current_train,
+            comparison_predictions=comp_preds,
         )
 
         # ── 5. Capture reproducibility metadata ───────────────────────────────

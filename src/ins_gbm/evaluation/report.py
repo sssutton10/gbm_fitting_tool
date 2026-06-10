@@ -20,6 +20,7 @@ class EvaluationReport:
     test_data: ModelData
     train_data: ModelData
     _comparison_models: Optional[dict[str, tuple[FittedModel, ModelData, ModelData]]] = None
+    comparison_predictions: Optional[dict[str, pl.Series]] = None
 
     @property
     def is_comparison_mode(self) -> bool:
@@ -30,6 +31,8 @@ class EvaluationReport:
     def metrics(self) -> pl.DataFrame:
         if self._comparison_models is not None:
             return self._comparison_metrics()
+        if self.comparison_predictions is not None:
+            return self._predictions_comparison_metrics()
         return self._single_metrics()
 
     def _single_metrics(self) -> pl.DataFrame:
@@ -39,6 +42,49 @@ class EvaluationReport:
             predicted=self.fitted_model.predict(self.test_data, prediction_type="response"),
             exposure=self.test_data.exposure,
             weight=self.test_data.weight,
+        )
+
+    def _predictions_comparison_metrics(self) -> pl.DataFrame:
+        rows = []
+        gbm_preds = self.fitted_model.predict(self.test_data, prediction_type="response")
+        for row in _m.compute_metrics(
+            objective=self.fitted_model.objective,
+            actual=self.test_data.target,
+            predicted=gbm_preds,
+            exposure=self.test_data.exposure,
+            weight=self.test_data.weight,
+        ).iter_rows(named=True):
+            rows.append({"model": "GBM", **row})
+        for name, preds in self.comparison_predictions.items():
+            for row in _m.compute_metrics(
+                objective=self.fitted_model.objective,
+                actual=self.test_data.target,
+                predicted=preds,
+                exposure=self.test_data.exposure,
+                weight=self.test_data.weight,
+            ).iter_rows(named=True):
+                rows.append({"model": name, **row})
+        return pl.DataFrame(rows)
+
+    def plot_double_lift(self, name: str, output_path: Optional[str] = None):
+        if self.comparison_predictions is None or name not in self.comparison_predictions:
+            raise KeyError(
+                f"No comparison prediction named {name!r}. "
+                f"Available: {list(self.comparison_predictions or {})}"
+            )
+        gbm_preds = self.fitted_model.predict(self.test_data, prediction_type="response")
+        weights = (
+            self.test_data.exposure
+            if self.test_data.exposure is not None
+            else self.test_data.weight
+        )
+        return _p.plot_double_lift(
+            self.test_data.target,
+            gbm_preds,
+            self.comparison_predictions[name],
+            weights=weights,
+            labels=("GBM", name),
+            output_path=output_path,
         )
 
     def plot_lift(self, output_path: Optional[str] = None):
@@ -75,6 +121,10 @@ class EvaluationReport:
         self.plot_calibration(output_path=os.path.join(output_dir, "calibration.png"))
         self.plot_feature_importance(
             output_path=os.path.join(output_dir, "feature_importance.png"))
+        if self.comparison_predictions:
+            for name in self.comparison_predictions:
+                path = os.path.join(output_dir, f"double_lift_GBM_vs_{name}.png")
+                self.plot_double_lift(name, output_path=path)
 
     # ── Comparison mode ───────────────────────────────────────────────────────
 
