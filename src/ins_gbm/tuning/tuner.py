@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.evaluation.metrics import poisson_deviance, gamma_deviance, rmse, mae
+from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 
 
 _METRIC_FN = {
@@ -51,6 +52,9 @@ class HyperparameterTuner:
         selector: Optional[Any] = None,
         preprocessor: Optional[Any] = None,
         schema: Optional[Any] = None,
+        *,
+        progress: Optional[ProgressCallback] = None,
+        should_stop: Optional[Any] = None,
     ) -> tuple[dict, pl.DataFrame]:
         """Run hyperparameter search and return (best_params, trial_history).
 
@@ -116,6 +120,9 @@ class HyperparameterTuner:
 
             fold_scores: list[float] = []
             for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
+                if should_stop is not None and should_stop():
+                    raise PipelineCancelled("cancelled during CV fold")
+
                 train_data = slice_model_data(data, train_idx)
                 val_data = slice_model_data(data, val_idx)
 
@@ -168,7 +175,28 @@ class HyperparameterTuner:
 
             return float(np.mean(fold_scores))
 
-        study.optimize(objective, n_trials=self.n_trials)
+        optuna_callbacks = []
+        if progress is not None or should_stop is not None:
+            def _on_trial(study: Any, trial: Any) -> None:
+                if progress is not None and trial.value is not None:
+                    progress(ProgressEvent(
+                        stage="tuning",
+                        message=f"trial {trial.number} complete",
+                        current=len(study.trials),
+                        total=self.n_trials,
+                        payload={
+                            "trial_value": trial.value,
+                            "best_value": study.best_value,
+                        },
+                    ))
+                if should_stop is not None and should_stop():
+                    study.stop()
+            optuna_callbacks.append(_on_trial)
+
+        try:
+            study.optimize(objective, n_trials=self.n_trials, callbacks=optuna_callbacks)
+        except PipelineCancelled:
+            raise
 
         rows = []
         for t in study.trials:

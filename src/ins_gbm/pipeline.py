@@ -10,6 +10,7 @@ from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
+from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 
 
 @dataclass
@@ -130,18 +131,34 @@ class ModelPipeline:
     data: ModelData
     split: TrainTestSplit
     recipe: ModelRecipe
+    progress: Optional[ProgressCallback] = None
+    should_stop: Optional[Any] = None
+
+    def _emit(self, stage: str, message: str, **kwargs) -> None:
+        if self.progress is not None:
+            self.progress(ProgressEvent(stage=stage, message=message, **kwargs))
+
+    def _check_cancel(self) -> None:
+        if self.should_stop is not None and self.should_stop():
+            raise PipelineCancelled("pipeline cancelled by caller")
 
     def run(self) -> FittedPipeline:
         from ins_gbm.evaluation.report import EvaluationReport
         from ins_gbm.persistence.metadata import build_metadata
 
         # ── 1. Split ──────────────────────────────────────────────────────────
+        self._emit("split", "splitting data into train/test")
         train_data, test_data = self.split.split(self.data)
+        self._check_cancel()
 
         # ── 2. Tune (optional) ────────────────────────────────────────────────
         tuning_history: Optional[pl.DataFrame] = None
         best_params: dict = {}
         if self.recipe.tuning is not None:
+            self._emit(
+                "tuning", "starting hyperparameter tuning",
+                total=self.recipe.tuning.n_trials,
+            )
             # Pass only the first preprocessor to the tuner; multiple-preprocessor
             # chains are handled in the full refit step below.
             single_prep = (
@@ -156,7 +173,10 @@ class ModelPipeline:
                 selector=self.recipe.selection,
                 preprocessor=single_prep,
                 schema=getattr(train_data, "schema", None),
+                progress=self.progress,
+                should_stop=self.should_stop,
             )
+            self._check_cancel()
 
         # ── 3. Refit on full training data ────────────────────────────────────
         current_train = train_data
@@ -164,6 +184,8 @@ class ModelPipeline:
         fitted_encoder: Optional[Any] = None
 
         if self.recipe.encoder is not None:
+            self._emit("encode", "fitting encoder on full training data")
+            self._check_cancel()
             schema = getattr(current_train, "schema", None)
             fitted_encoder = self.recipe.encoder.fit(current_train.features, schema)
             current_train = current_train.with_features(
@@ -175,6 +197,8 @@ class ModelPipeline:
 
         selected_features: Optional[list[str]] = None
         if self.recipe.selection is not None:
+            self._emit("select", "running feature selection")
+            self._check_cancel()
             fitted_sel = self.recipe.selection.fit(current_train)
             selected_features = fitted_sel.selected_features()
             current_train = current_train.with_features(
@@ -186,6 +210,8 @@ class ModelPipeline:
 
         fitted_preprocessors: list = []
         for prep in self.recipe.preprocessing:
+            self._emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
+            self._check_cancel()
             fitted_prep = prep.fit(current_train.features)
             current_train = current_train.with_features(
                 fitted_prep.transform(current_train.features)
@@ -195,12 +221,15 @@ class ModelPipeline:
             )
             fitted_preprocessors.append(fitted_prep)
 
+        self._emit("fit", "fitting model on full training data")
+        self._check_cancel()
         fitted_model = self.recipe.model.fit(
             current_train,
             params=best_params if best_params else None,
         )
 
         # ── 4. Evaluate once on the test set ──────────────────────────────────
+        self._emit("evaluate", "evaluating on test set")
         comp_preds = None
         if current_test.comparisons is not None:
             comp_preds = {
