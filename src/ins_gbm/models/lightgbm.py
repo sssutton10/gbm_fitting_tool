@@ -69,9 +69,12 @@ class LightGBMModel:
         X[X == _NUMERIC_FILL] = np.nan
         y = data.target.to_numpy().astype(np.float64)
 
-        init_score: Optional[np.ndarray] = None
+        init_score_parts: list[np.ndarray] = []
         if self.objective == "poisson" and data.exposure is not None:
-            init_score = np.log(data.exposure.to_numpy().astype(np.float64))
+            init_score_parts.append(np.log(data.exposure.to_numpy().astype(np.float64)))
+        if data.offset is not None:
+            init_score_parts.append(data.offset.to_numpy().astype(np.float64))
+        init_score: Optional[np.ndarray] = np.sum(init_score_parts, axis=0) if init_score_parts else None
 
         sample_weight: Optional[np.ndarray] = None
         if data.weight is not None:
@@ -102,20 +105,36 @@ class LightGBMModel:
             X_pred[X_pred == _NUMERIC_FILL] = np.nan
             raw_scores = booster.predict(X_pred)
 
+            offset = (
+                pred_data.offset.to_numpy().astype(np.float64)
+                if pred_data.offset is not None
+                else None
+            )
+
             if objective == "poisson":
-                # raw_scores are log(rate) without offset; add log(exposure) for expected count
+                # raw_scores = log(rate) on link scale; exposure and offset add on link scale
+                link = raw_scores if offset is None else raw_scores + offset
                 if prediction_type == "response":
-                    if pred_data.exposure is not None:
-                        exp_count = np.exp(raw_scores) * pred_data.exposure.to_numpy()
-                    else:
-                        exp_count = np.exp(raw_scores)
-                    return pl.Series(exp_count)
+                    exposure = (
+                        pred_data.exposure.to_numpy()
+                        if pred_data.exposure is not None
+                        else 1.0
+                    )
+                    return pl.Series(np.exp(link) * exposure)
                 elif prediction_type == "rate":
-                    return pl.Series(np.exp(raw_scores))
+                    return pl.Series(np.exp(link))
                 else:  # link
+                    return pl.Series(link)
+            else:  # gamma — raw_scores are on response scale (log link used internally)
+                if prediction_type == "response":
+                    if offset is not None:
+                        return pl.Series(raw_scores * np.exp(offset))
                     return pl.Series(raw_scores)
-            else:  # gamma — raw_scores are already on response scale
-                return pl.Series(raw_scores)
+                else:  # link = log(response) + offset
+                    link = np.log(raw_scores)
+                    if offset is not None:
+                        link = link + offset
+                    return pl.Series(link)
 
         def _importance() -> pl.DataFrame:
             names = booster.feature_name()
