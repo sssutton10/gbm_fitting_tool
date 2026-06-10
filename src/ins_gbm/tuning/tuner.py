@@ -41,6 +41,7 @@ class HyperparameterTuner:
     cv_folds: int = 5
     metric: str = "poisson_deviance"
     seed: int = 42
+    use_data_folds: bool = False
 
     def tune(
         self,
@@ -94,8 +95,18 @@ class HyperparameterTuner:
             pruner=optuna.pruners.MedianPruner(),
         )
 
-        kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
-        fold_splits = list(kf.split(range(data.n_rows)))
+        if self.use_data_folds:
+            if data.cv_fold is None:
+                raise ValueError("use_data_folds=True but data.cv_fold is None")
+            folds_arr = data.cv_fold.to_numpy()
+            unique_folds = np.unique(folds_arr)
+            fold_splits = [
+                (np.where(folds_arr != f)[0], np.where(folds_arr == f)[0])
+                for f in unique_folds
+            ]
+        else:
+            kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
+            fold_splits = list(kf.split(range(data.n_rows)))
 
         def objective(trial: Any) -> float:
             params = {

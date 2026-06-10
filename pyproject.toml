@@ -41,3 +41,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+
+[dependency-groups]
+dev = [
+    "lightgbm>=4.6.0",
+]

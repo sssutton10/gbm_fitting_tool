@@ -462,6 +462,11 @@ xgboost = [
     { name = "xgboost" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "lightgbm" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "catboost", marker = "extra == 'all'", specifier = ">=1.2" },
@@ -485,6 +490,9 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'xgboost'", specifier = ">=2.0" },
 ]
 provides-extras = ["lightgbm", "xgboost", "catboost", "explain", "umap", "all", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "lightgbm", specifier = ">=4.6.0" }]
 
 [[package]]
 name = "joblib"
