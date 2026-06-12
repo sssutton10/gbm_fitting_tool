@@ -25,6 +25,9 @@ class ModelRecipe:
     selection: Optional[Any] = None
     preprocessing: list = field(default_factory=list)
     tuning: Optional[HyperparameterTuner] = None
+    # Manual hyperparameters used when ``tuning`` is None. Ignored when tuning
+    # is enabled (the tuned best params take precedence).
+    params: Optional[dict] = None
 
 
 @dataclass
@@ -212,7 +215,9 @@ class ModelPipeline:
         for prep in self.recipe.preprocessing:
             self._emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
             self._check_cancel()
-            fitted_prep = prep.fit(current_train.features)
+            # Pass target so supervised reducers (e.g. PLS) can fit; unsupervised
+            # reducers accept and ignore it (fit(features, target=None)).
+            fitted_prep = prep.fit(current_train.features, current_train.target)
             current_train = current_train.with_features(
                 fitted_prep.transform(current_train.features)
             )
@@ -225,7 +230,7 @@ class ModelPipeline:
         self._check_cancel()
         fitted_model = self.recipe.model.fit(
             current_train,
-            params=best_params if best_params else None,
+            params=best_params if best_params else self.recipe.params,
         )
 
         # ── 4. Evaluate once on the test set ──────────────────────────────────

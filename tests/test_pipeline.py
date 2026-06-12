@@ -23,6 +23,43 @@ def test_pipeline_run_returns_fitted_pipeline(poisson_parquet):
     assert isinstance(result, FittedPipeline)
 
 
+def test_pipeline_manual_params_reach_model(poisson_parquet):
+    """Recipe.params are forwarded to model.fit when tuning is disabled."""
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    manual = {"n_estimators": 7, "learning_rate": 0.123}
+    result = ModelPipeline(
+        data=data,
+        split=TrainTestSplit(seed=42),
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params=manual),
+    ).run()
+    # The fitted model records the params it was trained with.
+    assert result.fitted_model.params.get("learning_rate") == 0.123
+
+
+def test_pipeline_with_supervised_pls_preprocessor(poisson_parquet):
+    """A supervised PLS reducer fits through the pipeline (target is forwarded)."""
+    from ins_gbm.preprocessing.pls import PLSReducer
+
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    result = ModelPipeline(
+        data=data,
+        split=TrainTestSplit(seed=42),
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            preprocessing=[PLSReducer(n_components=1)],
+        ),
+    ).run()
+    assert isinstance(result, FittedPipeline)
+    # The model was trained on the reduced feature space.
+    assert result.train_data.features.columns == ["pls_1"]
+
+
 def test_pipeline_result_has_train_and_test(poisson_parquet):
     data = load_model_data(
         path=str(poisson_parquet), target="claim_count",

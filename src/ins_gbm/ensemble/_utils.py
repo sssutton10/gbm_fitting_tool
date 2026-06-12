@@ -56,7 +56,9 @@ def _apply_recipe_fold_transforms(
         current_val = current_val.with_features(current_val.features.select(sel_feats))
 
     for prep in recipe.preprocessing:
-        fitted_prep = prep.fit(current_train.features)
+        # Pass target so supervised reducers (e.g. PLS) can fit; unsupervised
+        # reducers accept and ignore it (fit(features, target=None)).
+        fitted_prep = prep.fit(current_train.features, current_train.target)
         current_train = current_train.with_features(fitted_prep.transform(current_train.features))
         current_val = current_val.with_features(fitted_prep.transform(current_val.features))
 
