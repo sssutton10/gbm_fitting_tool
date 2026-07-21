@@ -103,6 +103,7 @@ src/ins_gbm/
     preprocessing/
         __init__.py
         encoder.py
+        steps.py
         pca.py
         pls.py
         umap.py
@@ -416,10 +417,8 @@ Defined in `preprocessing/pls.py`.
 - returns components named `pls_1`, `pls_2`, and so on.
 
 Pitfall: because PLS is supervised, it must only be fit on training data inside
-each split or fold. `ModelPipeline.run()` and ensemble fold helpers pass the
-target. `HyperparameterTuner` currently calls `preprocessor.fit(features)`
-without the target, so `PLSReducer` is not compatible with tuning as currently
-implemented.
+each split or fold. `ModelPipeline.run()`, `HyperparameterTuner`, and ensemble
+fold helpers pass the fold-training target to the reducer.
 
 ### UMAP Reducer
 
@@ -434,6 +433,25 @@ Defined in `preprocessing/umap.py`.
 
 Pitfall: reducers expect numeric input. Categorical columns should usually be
 encoded first.
+
+### Multiple Preprocessing Steps
+
+`ModelRecipe.preprocessing` accepts a list of preprocessors. The pipeline fits
+and applies every item in that ordered chain after encoding and selection; the
+same complete chain is refit on each training fold during tuning, cross-
+validation, blending, and stacking. This preserves leakage isolation for every
+step, including supervised reducers such as PLS.
+
+`PreprocessingStep` in `preprocessing/steps.py` is the preferred wrapper when
+a reducer should affect only selected columns. It replaces its input columns
+with name-prefixed outputs while passing all other columns through. Multiple
+targeted steps can be supplied in one recipe, provided their step names are
+unique.
+
+The current chain is sequential, not concurrently fit: a later preprocessor
+receives the output of the preceding one. Use independent
+`PreprocessingStep`s for separate feature groups; overlapping or dependent
+steps should be ordered deliberately.
 
 ## Feature Selection
 
@@ -467,6 +485,48 @@ The fitted selector exposes:
 
 This selector fits the pipeline selector contract because `fit(data)` returns an
 object with `selected_features()`.
+
+### Staged Importance Selection
+
+Defined in `selection/importance.py` and exported from `ins_gbm.selection`.
+
+`StagedImportanceSelector` accepts an ordered list of
+`ImportanceSelectionStage` objects. Every stage declares:
+
+- an unfitted importance-capable model;
+- fixed model parameters for that stage;
+- `max_features`, the maximum number of encoded model columns to retain;
+- an optional framework-native `importance_type`; and
+- an optional audit name.
+
+Each stage fits on the columns retained by the prior stage, ranks importance in
+descending order, and keeps at most `max_features` columns. Equal scores retain
+incoming feature order. Selection runs after one-hot encoding, so feature caps
+refer to encoded columns rather than original source fields.
+
+The usual pattern is a shallow, fast screening learner followed by a more
+realistic tree configuration for final pruning. Stage learner parameters remain
+fixed during hyperparameter tuning; Optuna tunes only the final recipe model.
+The selector is refit independently on fold-training data in tuning,
+cross-validation, blending, and stacking.
+
+`FittedStagedImportanceSelector` exposes every stage's ranking DataFrame with
+`feature`, `importance`, `rank`, and `selected` columns. `FittedPipeline` keeps
+this audit information in `selection_results`; its existing `selected_features`
+field remains the final stage's retained columns. Reproducibility metadata
+contains concise stage configuration and retained-column records.
+
+Native scalar importance types supported by the wrappers are:
+
+- LightGBM: `gain`, `split`.
+- XGBoost: `weight`, `gain`, `cover`, `total_gain`, `total_cover`.
+- CatBoost: `FeatureImportance`, `PredictionValuesChange`,
+  `LossFunctionChange`.
+- Random Forest: `impurity`.
+
+Unsupported types, non-finite scores, and models without feature-importance
+support raise `ValueError`; interaction and SHAP outputs are intentionally not
+ranked as one score per feature.
 
 ### Importance Pruner
 
@@ -672,7 +732,13 @@ ModelRecipe(
     model=LightGBMModel(objective="poisson"),
     encoder=OneHotEncoder(),
     selection=BorutaSelector(...),
-    preprocessing=[PCAReducer(n_components=3)],
+    preprocessing=[
+        PreprocessingStep(
+            name="numeric_pca",
+            preprocessor=PCAReducer(n_components=3),
+            feature_names=["x1", "x3", "vehicle_age"],
+        ),
+    ],
     tuning=HyperparameterTuner(...),
     params={"n_estimators": 100},
 )
@@ -683,7 +749,8 @@ Fields:
 - `model`: required model wrapper.
 - `encoder`: optional encoder.
 - `selection`: optional selector.
-- `preprocessing`: optional list of preprocessors.
+- `preprocessing`: optional ordered list of preprocessors or
+  `PreprocessingStep` wrappers.
 - `tuning`: optional `HyperparameterTuner`.
 - `params`: optional manual params used when tuning is not enabled.
 
@@ -695,7 +762,8 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 `ModelPipeline.run()` executes in this order:
 
 1. Optionally tune hyperparameters with fold-local cross-validation fitting.
-2. Fit encoder, feature selection, preprocessors, and model on all supplied data.
+2. Fit encoder, feature selection, the full ordered preprocessing chain, and
+   model on all supplied data.
 3. Build reproducibility metadata and return `FittedPipeline`.
 
 Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
@@ -712,22 +780,22 @@ self.recipe.tuning.tune(
     self.recipe.model,
     encoder=self.recipe.encoder,
     selector=self.recipe.selection,
-    preprocessor=single_prep,
+    preprocessors=self.recipe.preprocessing,
     schema=train_data.schema,
     progress=self.progress,
     should_stop=self.should_stop,
 )
 ```
 
-Only the first preprocessor is passed into tuning. The full list of
-preprocessors is still used during the final full-train refit.
+The full preprocessing chain is fit and applied on each fold's training data,
+then applied to that fold's validation data.
 
 Pitfalls:
 
-- Multiple-preprocessor chains are not fully represented during tuning.
-- PLS preprocessing is not compatible with tuning in current code because the
-  tuner does not pass the target into `preprocessor.fit()`.
-- `ImportancePruner` does not match the tuner selector signature.
+- Preprocessors are an ordered transform chain, not concurrent jobs.
+- `ImportancePruner` requires an already-fitted model and does not match the
+  pipeline selector signature. Use `StagedImportanceSelector` for in-pipeline
+  importance pruning.
 
 ### FittedPipeline
 
@@ -739,6 +807,8 @@ Important fields:
 - `recipe`: the original `ModelRecipe` object.
 - `train_data`: transformed training data as seen by the fitted model.
 - `selected_features`: selected feature names, if selection was used.
+- `selection_results`: per-stage importance rankings and selected columns for a
+  staged importance selector.
 - `tuning_history`: Optuna history DataFrame, if tuning was used.
 - `report`: `EvaluationReport`.
 - `encoder`: fitted encoder, if used.
@@ -802,7 +872,8 @@ For each Optuna trial:
 3. Slice training and validation `ModelData`.
 4. Fit encoder on fold training data and transform fold validation data.
 5. Fit selector on fold training data and apply selected columns to validation.
-6. Fit preprocessor on fold training features and transform validation.
+6. Fit each preprocessor in the ordered chain on fold training features and
+   transform both training and validation data.
 7. Fit model on fold training data.
 8. Predict validation response.
 9. Score validation predictions.
@@ -1393,7 +1464,9 @@ selected = fitted.selected_features()
 ```
 
 If the selector requires a fitted model, it currently needs an adapter or a
-pipeline change.
+pipeline change. `StagedImportanceSelector` is the built-in model-driven
+selector: its stages fit their own declared learners and then return the final
+selected columns through this same interface.
 
 ## Common Pitfalls
 
@@ -1462,19 +1535,21 @@ that is intentional.
 ### Using `ImportancePruner` Directly in `ModelRecipe.selection`
 
 `ImportancePruner` requires a fitted model. The pipeline selector hook does not
-provide one. `BorutaSelector` matches the current hook; `ImportancePruner` is
-best used manually after fitting a model.
+provide one. `BorutaSelector` and `StagedImportanceSelector` match the current
+hook; `ImportancePruner` is best used manually after fitting a model.
 
 ### Tuning with PLS
 
-`PLSReducer` requires target at fit time. The main pipeline passes target during
-the final fit, but the tuner currently does not pass target to preprocessors.
-Avoid `PLSReducer` inside tuned recipes unless the tuner is updated.
+`PLSReducer` requires target at fit time. The pipeline, tuner, and fold helpers
+pass the fold-training target to every preprocessing step, so it is safe to use
+in a tuned recipe. As with any supervised transformation, it is deliberately
+refit independently on each fold.
 
 ### Tuning with Multiple Preprocessors
 
-`ModelPipeline.run()` passes only the first preprocessor into the tuner. The
-final full-training refit still applies the full preprocessor list.
+The full ordered preprocessor list participates in tuning and the final
+full-training refit. Steps are sequential: each receives the transformed frame
+from the preceding step, so they are not fitted concurrently.
 
 ### Relying on Custom Offset Outside LightGBM
 
