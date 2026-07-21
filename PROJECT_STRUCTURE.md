@@ -17,13 +17,10 @@ At a high level, the tool does this:
 
 1. Load a policy-level parquet file into a `ModelData` object.
 2. Validate basic target, exposure, weight, offset, fold, and comparison fields.
-3. Split data into train and test sets.
-4. Optionally tune model hyperparameters with cross-validation on training data.
-5. Fit feature preparation steps on training data only.
-6. Fit a model on the transformed training data.
-7. Transform the test data with the fitted feature preparation artifacts.
-8. Evaluate the fitted model once on the transformed test data.
-9. Optionally export reports, persist the fitted pipeline, or combine fitted
+3. Optionally tune model hyperparameters with fold-local cross-validation.
+4. Fit feature preparation steps and the model on all supplied training rows.
+5. Evaluate an explicitly supplied holdout with the fitted artifacts.
+6. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
 
 The main package is:
@@ -103,7 +100,6 @@ src/ins_gbm/
         loader.py
         model_data.py
         schema.py
-        splitter.py
     preprocessing/
         __init__.py
         encoder.py
@@ -336,30 +332,9 @@ computed after loading and added with `ModelData.with_offset()`.
 
 ### Explicit holdout data
 
-The library does not create train/test splits. Supply all training rows to
+The library does not create holdout partitions. Supply all training rows to
 `ModelPipeline`, then construct and retain any final holdout in caller code.
 Evaluate it explicitly with `fitted_pipeline.evaluate(holdout_data)`.
-
-Supported split modes:
-
-- random row split, controlled by `seed`.
-- group split, if `group_col` is supplied and exists in `data.features`.
-
-The splitter propagates all optional `ModelData` fields:
-
-- `offset`
-- `cv_fold`
-- `comparisons`
-
-Pitfalls:
-
-- `train_ratio` must be strictly between 0 and 1.
-- `group_col` must be present in `features`.
-- Group splitting does not automatically remove the group column from model
-  features. If the group identifier should not be used as a predictor, remove it
-  or keep it out of `feature_cols`.
-- This splitter does not implement stratified or exposure-balanced splits in
-  the current `ins_gbm` code.
 
 ## Preprocessing
 
@@ -375,7 +350,8 @@ Classes:
 - `FittedOneHotEncoder`
 
 The pipeline uses the unfitted `OneHotEncoder` from `ModelRecipe`. It is fit on
-training data and then used to transform both train and test.
+all supplied training rows, or on each fold's training rows during tuning, and
+the fitted encoder is reused for evaluation and prediction.
 
 Output order:
 
@@ -720,17 +696,11 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 1. Optionally tune hyperparameters with fold-local cross-validation fitting.
 2. Fit encoder, feature selection, preprocessors, and model on all supplied data.
-4. Fit selector on transformed training data and select the same columns from
-   train and test.
-5. Fit each preprocessor on training features and target, then transform train
-   and test.
-6. Fit model on transformed training data.
-7. Build `EvaluationReport` on transformed test data.
-8. Build reproducibility metadata.
-9. Return `FittedPipeline`.
+3. Build reproducibility metadata and return `FittedPipeline`.
 
-The final test set is not passed into tuning, selector fitting, preprocessor
-fitting, or model fitting.
+Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
+caller-provided final holdout. That holdout is never used for tuning, selector
+fitting, preprocessor fitting, or model fitting.
 
 ### Tuning Inside Pipeline
 
@@ -929,8 +899,8 @@ Primary methods:
 - `feature_importance.png`
 - double-lift plots when comparison predictions exist
 
-External comparison predictions can come from `ModelData.comparisons`. The main
-pipeline passes test-set comparison columns into `EvaluationReport` as named
+External comparison predictions can come from `ModelData.comparisons`. The
+caller-provided holdout supplies those columns to `EvaluationReport` as named
 prediction series.
 
 ### CrossValidationReport
@@ -1030,7 +1000,8 @@ pipeline predictions.
 Pitfalls:
 
 - Fixed weights must sum to 1.
-- Validation data must not be the final test set. The code trusts the caller.
+- Validation data must not be the final evaluation holdout. The code trusts the
+  caller.
 - OOF mode refits each base pipeline recipe inside folds.
 
 ### StackingEnsemble
@@ -1054,11 +1025,12 @@ Predictions are clipped to be positive.
 
 Pitfalls:
 
-- Base pipelines should have the same objective, compatible train/test rows, and
+- Base pipelines should have the same objective, compatible raw input rows, and
   compatible row order. The code does not perform deep compatibility checks.
 - OOF refits call `pipeline.recipe.model.fit(current_train)` without explicitly
   passing tuned best params or `recipe.params`.
-- The final report uses the first base pipeline's test data.
+- Ensemble evaluation uses the caller-provided holdout; the first base
+  pipeline's transformed training data is retained as report context.
 
 ### EnsemblePipeline
 
@@ -1348,8 +1320,8 @@ Tests live under `tests/`.
 
 Major areas:
 
-- `tests/data/`: schema inference, model data validation, loader behavior,
-  splitter behavior, optional fields.
+- `tests/data/`: schema inference, model data validation, loader behavior, and
+  optional fields.
 - `tests/preprocessing/`: one-hot encoding and reducers.
 - `tests/models/`: base contracts and model wrapper behavior.
 - `tests/tuning/`: Optuna tuning and predefined folds.
@@ -1526,17 +1498,17 @@ be handled explicitly upstream if present.
 weights; it does not optimize a Poisson likelihood with a native log exposure
 offset.
 
-### Optimizing Blends on the Final Test Set
+### Optimizing Blends on the Final Holdout
 
 The code supports validation-mode blending but cannot know whether the
-validation data is actually the final test set. The caller is responsible for
-keeping final test data untouched.
+validation data is actually the final evaluation holdout. The caller is
+responsible for keeping that holdout untouched.
 
 ### Assuming Ensemble Inputs Are Validated Deeply
 
 The ensemble code expects fitted pipelines to be compatible. It uses the first
-pipeline's train and test data as the reference. Make sure base pipelines share
-the same objective, row basis, and intended evaluation split.
+pipeline's training data as report context. Make sure base pipelines share the
+same objective, row basis, and intended evaluation holdout.
 
 ### Expecting Tuned Params in Ensemble OOF Refits
 
@@ -1554,12 +1526,11 @@ or Python version changes.
 
 The main invariant to preserve is leakage control:
 
-- fit encoders on training data only.
-- fit selectors on training data only.
-- fit reducers on training data only.
-- tune only on the training split.
-- optimize blend weights or stacking meta-learners without final test data.
-- evaluate once on the final test set.
+- fit encoders, selectors, and reducers only on the rows available to the
+  current fit or CV training fold.
+- tune only with fold-local training transformations.
+- optimize blend weights or stacking meta-learners without the final holdout.
+- evaluate once on a caller-provided final holdout.
 
 The second invariant is data shape consistency:
 
