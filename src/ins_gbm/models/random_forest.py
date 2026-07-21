@@ -90,7 +90,12 @@ class RandomForestModel:
             else:  # gamma
                 return pl.Series(np.maximum(raw, 1e-10))
 
-        def _importance() -> pl.DataFrame:
+        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+            importance_type = importance_type or "impurity"
+            if importance_type != "impurity":
+                raise ValueError(
+                    "RandomForest importance_type must be 'impurity'"
+                )
             return pl.DataFrame({
                 "feature": feature_names,
                 "importance": rf.feature_importances_.astype(float).tolist(),

@@ -4,6 +4,8 @@ from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.selection.importance import ImportancePruner
+from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
+from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
 
 # ── Boruta ─────────────────────────────────────────────────────────────────────
@@ -99,3 +101,73 @@ def test_importance_pruner_threshold(poisson_parquet):
     pruner = ImportancePruner(threshold=0.0)
     fitted_pruner = pruner.fit(data, fitted_model)
     assert len(fitted_pruner.selected_features()) == 2
+
+
+# ── StagedImportanceSelector ──────────────────────────────────────────────────
+
+def test_staged_importance_selector_prunes_and_records_rankings(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    selector = StagedImportanceSelector(stages=[
+        ImportanceSelectionStage(
+            name="screen",
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 5, "verbose": -1, "num_leaves": 4},
+            max_features=2,
+            importance_type="split",
+        ),
+        ImportanceSelectionStage(
+            name="prune",
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 10, "verbose": -1, "num_leaves": 8},
+            max_features=1,
+            importance_type="gain",
+        ),
+    ])
+
+    fitted = selector.fit(data)
+
+    assert len(fitted.selected_features()) == 1
+    assert [stage.name for stage in fitted.stage_results()] == ["screen", "prune"]
+    ranking = fitted.stage_results()[1].ranking
+    assert ranking.columns == ["feature", "importance", "rank", "selected"]
+    assert ranking["rank"].to_list() == list(range(1, ranking.height + 1))
+    assert ranking.filter(pl.col("selected")).height == 1
+
+
+def test_staged_importance_selection_integrates_with_pipeline(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    selector = StagedImportanceSelector(stages=[
+        ImportanceSelectionStage(
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 5, "verbose": -1},
+            max_features=1,
+        ),
+    ])
+    result = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            selection=selector,
+            params={"n_estimators": 5, "verbose": -1},
+        ),
+    ).run()
+
+    assert len(result.selected_features) == 1
+    assert result.train_data.feature_names == result.selected_features
+    assert result.selection_results is not None
+    assert result.metadata.selection_stages[0]["selected_features"] == result.selected_features
+    assert result.predict(data).len() == data.n_rows
+
+
+def test_staged_importance_selector_rejects_invalid_stage_list():
+    with pytest.raises(ValueError, match="at least one"):
+        StagedImportanceSelector(stages=[])
+
+    with pytest.raises(ValueError, match="positive integer"):
+        ImportanceSelectionStage(model=LightGBMModel(), max_features=0)

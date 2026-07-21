@@ -30,7 +30,7 @@ class FittedModel:
     objective: Objective
     feature_names: list[str]
     predict_fn: Callable[["ModelData", PredictionType], pl.Series]
-    importance_fn: Callable[[], pl.DataFrame]
+    importance_fn: Callable[..., pl.DataFrame]
 
     def predict(
         self,
@@ -43,9 +43,18 @@ class FittedModel:
             )
         return self.predict_fn(data, prediction_type)
 
-    def feature_importance(self) -> pl.DataFrame:
-        """Returns DataFrame with columns: feature (str), importance (float)."""
-        return self.importance_fn()
+    def feature_importance(self, importance_type: Optional[str] = None) -> pl.DataFrame:
+        """Return feature scores, optionally using a framework-native importance type.
+
+        The accepted names are deliberately model-framework specific.  Passing
+        an unsupported name raises ``ValueError`` rather than silently using a
+        different importance measure.
+        """
+        # Keep existing no-argument importance callbacks working for callers
+        # that do not request a framework-specific measure.
+        if importance_type is None:
+            return self.importance_fn()
+        return self.importance_fn(importance_type)
 
 
 @runtime_checkable

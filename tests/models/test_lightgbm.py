@@ -73,6 +73,19 @@ def test_lgb_feature_importance(poisson_parquet):
     assert len(imp) == len(data.feature_names)
 
 
+def test_lgb_feature_importance_accepts_native_type(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
+    fitted = LightGBMModel(objective="poisson").fit(
+        data, params={"n_estimators": 5, "verbose": -1}
+    )
+    assert fitted.feature_importance("split").height == 2
+    with pytest.raises(ValueError, match="importance_type"):
+        fitted.feature_importance("not-a-lightgbm-importance")
+
+
 def test_lgb_capabilities():
     caps = LightGBMModel(objective="poisson").capabilities()
     assert caps.supports_poisson

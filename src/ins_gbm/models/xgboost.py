@@ -119,8 +119,15 @@ class XGBoostModel:
             else:  # gamma
                 return pl.Series(raw)
 
-        def _importance() -> pl.DataFrame:
-            scores_dict = booster.get_score(importance_type="gain")
+        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+            importance_type = importance_type or "gain"
+            allowed = {"weight", "gain", "cover", "total_gain", "total_cover"}
+            if importance_type not in allowed:
+                raise ValueError(
+                    "XGBoost importance_type must be one of: "
+                    "'weight', 'gain', 'cover', 'total_gain', 'total_cover'"
+                )
+            scores_dict = booster.get_score(importance_type=importance_type)
             names = feature_names
             scores = [float(scores_dict.get(n, 0.0)) for n in names]
             return pl.DataFrame({"feature": names, "importance": scores})

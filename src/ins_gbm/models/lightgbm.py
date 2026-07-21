@@ -136,9 +136,14 @@ class LightGBMModel:
                         link = link + offset
                     return pl.Series(link)
 
-        def _importance() -> pl.DataFrame:
+        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+            importance_type = importance_type or "gain"
+            if importance_type not in {"gain", "split"}:
+                raise ValueError(
+                    "LightGBM importance_type must be one of: 'gain', 'split'"
+                )
             names = booster.feature_name()
-            scores = booster.feature_importance(importance_type="gain").astype(float)
+            scores = booster.feature_importance(importance_type=importance_type).astype(float)
             return pl.DataFrame({"feature": names, "importance": scores})
 
         return FittedModel(

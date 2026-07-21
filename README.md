@@ -52,3 +52,39 @@ recipe.preprocessing = [
     ),
 ]
 ```
+
+## Staged importance selection
+
+Use `StagedImportanceSelector` to prune encoded model columns in one or more
+fits before the final model is trained. Each stage owns its learner and fixed
+parameters, so a shallow screen can be followed by a more realistic pruning
+fit. Importance names are native to the selected framework.
+
+```python
+from ins_gbm.models.lightgbm import LightGBMModel
+from ins_gbm.pipeline import ModelPipeline, ModelRecipe
+from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
+
+recipe = ModelRecipe(
+    model=LightGBMModel(objective="poisson"),
+    selection=StagedImportanceSelector(stages=[
+        ImportanceSelectionStage(
+            name="screen",
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 40, "num_leaves": 8},
+            max_features=100,
+            importance_type="gain",
+        ),
+        ImportanceSelectionStage(
+            name="final_prune",
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 250, "num_leaves": 32},
+            max_features=30,
+            importance_type="split",
+        ),
+    ]),
+)
+
+fitted = ModelPipeline(data=training_data, recipe=recipe).run()
+fitted.selection_results[0].ranking  # feature, importance, rank, selected
+```

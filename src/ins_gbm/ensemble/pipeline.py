@@ -29,7 +29,7 @@ class EnsembleResult:
         def _predict_fn(data: ModelData, prediction_type: str) -> pl.Series:
             return self.ensemble.predict(data)
 
-        def _importance_fn():
+        def _importance_fn(_importance_type: Optional[str] = None):
             return pl.DataFrame({"feature": pl.Series([], dtype=pl.Utf8),
                                  "importance": pl.Series([], dtype=pl.Float64)})
 

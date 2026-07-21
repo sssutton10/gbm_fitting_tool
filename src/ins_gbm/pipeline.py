@@ -43,6 +43,7 @@ class FittedPipeline:
     raw_train_data: ModelData
     train_data: ModelData
     selected_features: Optional[list[str]]
+    selection_results: Optional[list[Any]]
     tuning_history: Optional[pl.DataFrame]
     encoder: Optional[Any]
     preprocessors: list
@@ -219,11 +220,19 @@ class ModelPipeline:
             )
 
         selected_features: Optional[list[str]] = None
+        selection_results: Optional[list[Any]] = None
+        selection_metadata: Optional[list[dict]] = None
         if self.recipe.selection is not None:
             self._emit("select", "running feature selection")
             self._check_cancel()
             fitted_sel = self.recipe.selection.fit(current_train)
             selected_features = fitted_sel.selected_features()
+            stage_results = getattr(fitted_sel, "stage_results", None)
+            if callable(stage_results):
+                selection_results = stage_results()
+            get_selection_metadata = getattr(fitted_sel, "selection_metadata", None)
+            if callable(get_selection_metadata):
+                selection_metadata = get_selection_metadata()
             current_train = current_train.with_features(
                 current_train.features.select(selected_features)
             )
@@ -258,6 +267,7 @@ class ModelPipeline:
                 if self.recipe.tuning is not None
                 else None
             ),
+            selection_stages=selection_metadata,
         )
 
         return FittedPipeline(
@@ -267,6 +277,7 @@ class ModelPipeline:
             raw_train_data=raw_train_data,
             train_data=current_train,
             selected_features=selected_features,
+            selection_results=selection_results,
             tuning_history=tuning_history,
             encoder=fitted_encoder,
             preprocessors=fitted_preprocessors,

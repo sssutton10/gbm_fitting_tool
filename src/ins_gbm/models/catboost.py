@@ -127,8 +127,26 @@ class CatBoostModel:
             else:
                 return pl.Series(raw)
 
-        def _importance() -> pl.DataFrame:
-            scores = model.get_feature_importance()
+        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+            # These types produce one scalar per input feature.  Interaction
+            # and SHAP outputs are intentionally excluded because they are not
+            # rankable 1:1 here.
+            importance_type = importance_type or "PredictionValuesChange"
+            allowed = {
+                "FeatureImportance",
+                "PredictionValuesChange",
+                "LossFunctionChange",
+            }
+            if importance_type not in allowed:
+                raise ValueError(
+                    "CatBoost importance_type must be one of: "
+                    "'FeatureImportance', 'PredictionValuesChange', "
+                    "'LossFunctionChange'"
+                )
+            scores = model.get_feature_importance(
+                data=pool if importance_type == "LossFunctionChange" else None,
+                type=importance_type,
+            )
             return pl.DataFrame({"feature": feature_names, "importance": scores.astype(float).tolist()})
 
         return FittedModel(
