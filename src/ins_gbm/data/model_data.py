@@ -121,6 +121,37 @@ class ModelData:
         """Return a copy with replaced features and updated feature_names."""
         return replace(self, features=features, feature_names=list(features.columns))
 
+    def select_features(self, feature_names: list[str]) -> "ModelData":
+        """Return a copy restricted to an ordered subset of feature columns.
+
+        Row-level fields are deliberately retained so one loaded ``ModelData``
+        can be reused for several fits with different predictor sets.
+        """
+        selected = list(feature_names)
+        if not selected:
+            raise ValueError("feature_names must contain at least one feature")
+        if len(set(selected)) != len(selected):
+            raise ValueError("feature_names must be unique")
+        missing = [name for name in selected if name not in self.features.columns]
+        if missing:
+            raise ValueError(f"features DataFrame missing columns: {missing}")
+
+        schema = self.schema
+        if schema is not None:
+            selected_set = set(selected)
+            schema = FeatureSchema(
+                numeric=[name for name in schema.numeric if name in selected_set],
+                categorical=[name for name in schema.categorical if name in selected_set],
+                ordinal=[name for name in schema.ordinal if name in selected_set],
+                passthrough=[name for name in schema.passthrough if name in selected_set],
+            )
+        return replace(
+            self,
+            features=self.features.select(selected),
+            feature_names=selected,
+            schema=schema,
+        )
+
     def with_offset(self, offset: pl.Series) -> "ModelData":
         """Return a copy with the given offset Series set."""
         return replace(self, offset=offset)

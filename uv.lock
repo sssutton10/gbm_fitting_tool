@@ -423,6 +423,7 @@ name = "ins-gbm"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cloudpickle" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "optuna" },
@@ -471,6 +472,7 @@ dev = [
 requires-dist = [
     { name = "catboost", marker = "extra == 'all'", specifier = ">=1.2" },
     { name = "catboost", marker = "extra == 'catboost'", specifier = ">=1.2" },
+    { name = "cloudpickle", specifier = ">=3.0" },
     { name = "lightgbm", marker = "extra == 'all'", specifier = ">=4.2" },
     { name = "lightgbm", marker = "extra == 'lightgbm'", specifier = ">=4.2" },
     { name = "matplotlib", specifier = ">=3.8" },

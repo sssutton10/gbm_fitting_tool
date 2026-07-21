@@ -12,6 +12,7 @@ class ReproducibilityMetadata:
     random_seeds: dict[str, int]
     model_params: dict
     feature_names: list[str]
+    input_feature_names: list[str]
     selected_features: Optional[list[str]]
     objective: Literal["poisson", "gamma"]
     prediction_scale: str
@@ -29,6 +30,7 @@ def build_metadata(
     selected_features: Optional[list[str]],
     split_seed: Optional[int] = None,
     tuning_seed: Optional[int] = None,
+    input_feature_names: Optional[list[str]] = None,
 ) -> ReproducibilityMetadata:
     packages = ["ins_gbm", "polars", "numpy", "scikit-learn", "optuna",
                 "lightgbm", "xgboost", "catboost"]
@@ -45,6 +47,11 @@ def build_metadata(
         random_seeds=seeds,
         model_params=dict(fitted_model.params),
         feature_names=list(fitted_model.feature_names),
+        input_feature_names=(
+            list(input_feature_names)
+            if input_feature_names is not None
+            else list(fitted_model.feature_names)
+        ),
         selected_features=selected_features,
         objective=fitted_model.objective,
         prediction_scale="response",

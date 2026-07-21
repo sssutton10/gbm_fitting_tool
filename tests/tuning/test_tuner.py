@@ -2,6 +2,8 @@ import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
+from ins_gbm.preprocessing.pca import PCAReducer
+from ins_gbm.preprocessing.steps import PreprocessingStep
 from ins_gbm.tuning.tuner import HyperparameterTuner
 
 
@@ -104,3 +106,25 @@ def test_tuner_runs_with_encoder(poisson_parquet):
                                       encoder=encoder, schema=schema)
     assert best_params is not None
     assert len(history) == 2
+
+
+def test_tuner_applies_full_targeted_preprocessing_chain(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    tuner = HyperparameterTuner(n_trials=1, cv_folds=2, seed=42)
+
+    _, history = tuner.tune(
+        data,
+        LightGBMModel(objective="poisson"),
+        preprocessors=[
+            PreprocessingStep(
+                name="x1_pca",
+                preprocessor=PCAReducer(n_components=1),
+                feature_names=["x1"],
+            ),
+        ],
+    )
+
+    assert len(history) == 1

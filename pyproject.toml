@@ -15,6 +15,7 @@ dependencies = [
     "optuna>=3.5",
     "matplotlib>=3.8",
     "pyarrow>=14.0",
+    "cloudpickle>=3.0",
 ]
 
 [project.optional-dependencies]

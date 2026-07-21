@@ -2,8 +2,9 @@ import numpy as np
 import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.xgboost import XGBoostModel
+
+pytest.importorskip("xgboost")
 
 
 def _poisson(poisson_parquet):
@@ -22,7 +23,7 @@ def _gamma(gamma_parquet):
 
 def test_xgb_poisson_fit_predict(poisson_parquet):
     data = _poisson(poisson_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = XGBoostModel(objective="poisson").fit(train, params={"n_estimators": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert isinstance(preds, pl.Series)
@@ -32,7 +33,7 @@ def test_xgb_poisson_fit_predict(poisson_parquet):
 
 def test_xgb_poisson_rate_prediction(poisson_parquet):
     data = _poisson(poisson_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = XGBoostModel(objective="poisson").fit(train, params={"n_estimators": 10})
     rate = fitted.predict(test, prediction_type="rate")
     response = fitted.predict(test, prediction_type="response")
@@ -42,7 +43,7 @@ def test_xgb_poisson_rate_prediction(poisson_parquet):
 
 def test_xgb_gamma_fit_predict(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = XGBoostModel(objective="gamma").fit(train, params={"n_estimators": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert (preds > 0).all()
@@ -50,7 +51,7 @@ def test_xgb_gamma_fit_predict(gamma_parquet):
 
 def test_xgb_gamma_rejects_rate(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = XGBoostModel(objective="gamma").fit(train, params={"n_estimators": 10})
     with pytest.raises(ValueError, match="(?i)rate.*gamma"):
         fitted.predict(test, prediction_type="rate")

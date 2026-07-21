@@ -1,7 +1,6 @@
 import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.random_forest import RandomForestModel
 
 
@@ -21,7 +20,7 @@ def _gamma(gamma_parquet):
 
 def test_rf_poisson_fit_predict(poisson_parquet):
     data = _poisson(poisson_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = RandomForestModel(objective="poisson").fit(train, params={"n_estimators": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert isinstance(preds, pl.Series)
@@ -31,7 +30,7 @@ def test_rf_poisson_fit_predict(poisson_parquet):
 
 def test_rf_gamma_fit_predict(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = RandomForestModel(objective="gamma").fit(train, params={"n_estimators": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert (preds > 0).all()
@@ -39,7 +38,7 @@ def test_rf_gamma_fit_predict(gamma_parquet):
 
 def test_rf_gamma_rejects_rate(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = RandomForestModel(objective="gamma").fit(train, params={"n_estimators": 10})
     with pytest.raises(ValueError, match="(?i)rate.*gamma"):
         fitted.predict(test, prediction_type="rate")

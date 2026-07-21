@@ -1,8 +1,9 @@
 import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.catboost import CatBoostModel
+
+pytest.importorskip("catboost")
 
 
 def _poisson(poisson_parquet):
@@ -21,7 +22,7 @@ def _gamma(gamma_parquet):
 
 def test_catboost_poisson_fit_predict(poisson_parquet):
     data = _poisson(poisson_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = CatBoostModel(objective="poisson").fit(train, params={"iterations": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert isinstance(preds, pl.Series)
@@ -31,7 +32,7 @@ def test_catboost_poisson_fit_predict(poisson_parquet):
 
 def test_catboost_gamma_fit_predict(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = CatBoostModel(objective="gamma").fit(train, params={"iterations": 10})
     preds = fitted.predict(test, prediction_type="response")
     assert (preds > 0).all()
@@ -39,7 +40,7 @@ def test_catboost_gamma_fit_predict(gamma_parquet):
 
 def test_catboost_gamma_rejects_rate(gamma_parquet):
     data = _gamma(gamma_parquet)
-    train, test = TrainTestSplit().split(data)
+    train = test = data
     fitted = CatBoostModel(objective="gamma").fit(train, params={"iterations": 10})
     with pytest.raises(ValueError, match="(?i)rate.*gamma"):
         fitted.predict(test, prediction_type="rate")

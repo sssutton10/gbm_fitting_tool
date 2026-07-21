@@ -11,7 +11,6 @@ import pytest
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
-from ins_gbm.data.splitter import TrainTestSplit
 
 
 # ---------------------------------------------------------------------------
@@ -208,10 +207,10 @@ class TestWithOffset:
 
 
 # ---------------------------------------------------------------------------
-# 6. TrainTestSplit partitions all three fields
+# 6. Explicit slicing preserves all three fields
 # ---------------------------------------------------------------------------
 
-class TestTrainTestSplitNewFields:
+class TestSliceModelDataNewFields:
     @pytest.fixture
     def rich_data(self):
         """200-row ModelData with all three new fields set."""
@@ -235,38 +234,22 @@ class TestTrainTestSplitNewFields:
             comparisons=comparisons,
         )
 
-    def test_split_propagates_offset(self, rich_data):
-        train, test = TrainTestSplit(seed=7).split(rich_data)
-        assert train.offset is not None
-        assert test.offset is not None
-        assert train.offset.len() == train.n_rows
-        assert test.offset.len() == test.n_rows
+    def test_slice_propagates_offset(self, rich_data):
+        holdout = slice_model_data(rich_data, range(100))
+        assert holdout.offset is not None
+        assert holdout.offset.len() == holdout.n_rows
 
-    def test_split_propagates_cv_fold(self, rich_data):
-        train, test = TrainTestSplit(seed=7).split(rich_data)
-        assert train.cv_fold is not None
-        assert test.cv_fold is not None
-        assert train.cv_fold.len() == train.n_rows
-        assert test.cv_fold.len() == test.n_rows
+    def test_slice_propagates_cv_fold(self, rich_data):
+        holdout = slice_model_data(rich_data, range(100))
+        assert holdout.cv_fold is not None
+        assert holdout.cv_fold.len() == holdout.n_rows
 
-    def test_split_propagates_comparisons(self, rich_data):
-        train, test = TrainTestSplit(seed=7).split(rich_data)
-        assert train.comparisons is not None
-        assert test.comparisons is not None
-        assert train.comparisons.shape[0] == train.n_rows
-        assert test.comparisons.shape[0] == test.n_rows
+    def test_slice_propagates_comparisons(self, rich_data):
+        holdout = slice_model_data(rich_data, range(100))
+        assert holdout.comparisons is not None
+        assert holdout.comparisons.shape[0] == holdout.n_rows
 
-    def test_split_roundtrip_offset(self, rich_data):
-        """Concatenating train + test offsets (sorted by original index) equals original."""
-        train, test = TrainTestSplit(seed=7).split(rich_data)
-        combined_len = train.offset.len() + test.offset.len()
-        assert combined_len == rich_data.offset.len()
-
-    def test_split_roundtrip_comparisons_rows(self, rich_data):
-        train, test = TrainTestSplit(seed=7).split(rich_data)
-        assert train.comparisons.shape[0] + test.comparisons.shape[0] == rich_data.n_rows
-
-    def test_split_none_fields_stay_none(self):
+    def test_slice_none_fields_stay_none(self):
         """When fields are None, they remain None after split."""
         n = 50
         features = pl.DataFrame({"x": [float(i) for i in range(n)]})
@@ -275,13 +258,10 @@ class TestTrainTestSplitNewFields:
             features=features, target=target, exposure=None, weight=None,
             feature_names=["x"],
         )
-        train, test = TrainTestSplit(seed=1).split(data)
-        assert train.offset is None
-        assert train.cv_fold is None
-        assert train.comparisons is None
-        assert test.offset is None
-        assert test.cv_fold is None
-        assert test.comparisons is None
+        holdout = slice_model_data(data, range(25))
+        assert holdout.offset is None
+        assert holdout.cv_fold is None
+        assert holdout.comparisons is None
 
 
 # ---------------------------------------------------------------------------

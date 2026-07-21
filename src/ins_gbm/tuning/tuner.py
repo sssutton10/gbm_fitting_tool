@@ -51,6 +51,7 @@ class HyperparameterTuner:
         encoder: Optional[Any] = None,
         selector: Optional[Any] = None,
         preprocessor: Optional[Any] = None,
+        preprocessors: Optional[list[Any]] = None,
         schema: Optional[Any] = None,
         *,
         progress: Optional[ProgressCallback] = None,
@@ -69,7 +70,10 @@ class HyperparameterTuner:
         selector : optional
             Unfitted feature selector. Fit on each fold's train split.
         preprocessor : optional
-            Unfitted dimensionality reducer. Fit on each fold's train split.
+            Deprecated singular preprocessor retained for compatibility.
+        preprocessors : optional
+            Unfitted preprocessing chain. Each item is fit on each fold's train
+            split and then applied to both train and validation data.
         schema : optional
             FeatureSchema passed to encoder.fit() when encoder is provided.
 
@@ -91,6 +95,16 @@ class HyperparameterTuner:
 
         metric_fn = _METRIC_FN[self.metric]
         search_space = model.default_search_space()
+        if preprocessors is not None and preprocessor is not None:
+            raise ValueError("Pass either preprocessor or preprocessors, not both")
+        preprocessing_chain = (
+            list(preprocessors)
+            if preprocessors is not None
+            else ([preprocessor] if preprocessor is not None else [])
+        )
+        from ins_gbm.preprocessing.steps import validate_preprocessing_steps
+
+        validate_preprocessing_steps(preprocessing_chain)
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
@@ -145,8 +159,8 @@ class HyperparameterTuner:
                         val_data.features.select(selected)
                     )
 
-                if preprocessor is not None:
-                    fitted_pre = preprocessor.fit(train_data.features)
+                for prep in preprocessing_chain:
+                    fitted_pre = prep.fit(train_data.features, train_data.target)
                     train_data = train_data.with_features(
                         fitted_pre.transform(train_data.features)
                     )

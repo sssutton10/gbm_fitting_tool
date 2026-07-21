@@ -119,3 +119,39 @@ def test_with_features(poisson_raw):
     updated = data.with_features(new_features)
     assert updated.feature_names == ["x1"]
     assert updated.target is data.target
+
+
+def test_select_features_preserves_row_fields_and_filters_schema():
+    data = ModelData(
+        features=pl.DataFrame({"a": [1.0, 2.0], "b": ["x", "y"], "c": [3.0, 4.0]}),
+        target=pl.Series("target", [1.0, 2.0]),
+        exposure=None,
+        weight=None,
+        feature_names=["a", "b", "c"],
+        schema=FeatureSchema(numeric=["a", "c"], categorical=["b"]),
+        objective="gamma",
+        cv_fold=pl.Series("fold", [0, 1]),
+    ).validate()
+
+    selected = data.select_features(["c", "b"])
+
+    assert selected.features.columns == ["c", "b"]
+    assert selected.feature_names == ["c", "b"]
+    assert selected.schema == FeatureSchema(numeric=["c"], categorical=["b"])
+    assert selected.target is data.target
+    assert selected.cv_fold is data.cv_fold
+
+
+@pytest.mark.parametrize("names", [[], ["x1", "x1"], ["missing"]])
+def test_select_features_rejects_invalid_names(poisson_raw, names):
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x3"]),
+        target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"],
+        weight=None,
+        feature_names=["x1", "x3"],
+        objective="poisson",
+    ).validate()
+
+    with pytest.raises(ValueError):
+        data.select_features(names)

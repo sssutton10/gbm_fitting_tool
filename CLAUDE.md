@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-**Always activate conda before any Python/pip/pytest command:**
+Use the project virtual environment for Python and tests:
 
 ```bash
-source /c/Users/sssut/anaconda3/etc/profile.d/conda.sh && conda activate base
+./.venv/bin/python -m pytest
 ```
 
 > **Warning:** A separate `gbm_fitting` package (the "GBM Fitting Codex") is already installed in this environment. This library is named `ins_gbm` to avoid collision. Never rename it back to `gbm_fitting`.
@@ -16,16 +16,16 @@ source /c/Users/sssut/anaconda3/etc/profile.d/conda.sh && conda activate base
 
 ```bash
 # Install (all model extras + dev)
-pip install -e ".[all,dev]"
+uv sync --all-extras --dev
 
 # Run all tests
-pytest
+./.venv/bin/python -m pytest
 
 # Run a single test
-pytest tests/models/test_lightgbm.py::test_lgb_poisson_fit_predict -v
+./.venv/bin/python -m pytest tests/models/test_lightgbm.py::test_lgb_poisson_fit_predict -v
 
 # Run a test module
-pytest tests/test_pipeline.py -v
+./.venv/bin/python -m pytest tests/test_pipeline.py -v
 ```
 
 ## Architecture
@@ -34,8 +34,8 @@ Layered library. Public API is Polars-native; numpy conversion happens only at t
 
 ```
 src/ins_gbm/
-  data/           — ModelData, FeatureSchema, loader, splitter
-  preprocessing/  — OneHotEncoder, PCAReducer, PLSReducer, UMAPReducer
+  data/           — ModelData, FeatureSchema, loader
+  preprocessing/  — OneHotEncoder, PreprocessingStep, PCAReducer, PLSReducer, UMAPReducer
   selection/      — BorutaSelector, ImportancePruner
   models/         — base Protocol + LightGBM, XGBoost, CatBoost, RandomForest wrappers
   tuning/         — HyperparameterTuner (Optuna + MedianPruner)
@@ -47,10 +47,16 @@ src/ins_gbm/
 
 ## Key Type Contracts
 
-- **`ModelData`** — central data container (`features`, `target`, `exposure`, `weight`, `feature_names`, `schema`, `objective`). Call `.validate()` after construction. `.with_features(df)` returns a copy with new features + updated feature_names.
+- **`ModelData`** — central data container (`features`, `target`, `exposure`, `weight`, `feature_names`, `schema`, `objective`). Call `.validate()` after construction. `.with_features(df)` returns a copy with new features + updated feature names; `.select_features(names)` returns a schema-filtered view while preserving all row-level fields.
 - **`FittedModel`** — wraps a trained model. Fields `predict_fn` and `importance_fn` are callables (NOT `_predict_fn` — leading underscore breaks dataclass `__init__`). `.predict(data, prediction_type)` where `prediction_type ∈ {"response", "rate", "link"}`.
-- **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). Cloneable; used by tuner and stacking for CV re-fits.
-- **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` and `test_data` are **transformed** (post-encoder/selector/preprocessor), ready for the model.
+- **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). `preprocessing` accepts either legacy whole-frame preprocessors or `PreprocessingStep(name, preprocessor, feature_names)` for column-targeted transforms with passthrough. Cloneable; used by tuner and stacking for CV re-fits.
+- **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` contains every supplied training row after encoding, selection, and preprocessing; `raw_train_data` retains the selected raw inputs for fold refits. Call `.evaluate(holdout_data)` for explicit holdout metrics and plots.
+
+## Reusable Fits and Targeted Preprocessing
+
+- Load the complete candidate feature pool once, then call `ModelPipeline(...).run(feature_names=[...])` for each model iteration. The subset is applied before tuning, encoding, selection, preprocessing, and fitting; fitted pipelines remember it for prediction and evaluation.
+- A `PreprocessingStep` fits only its `feature_names`, replaces those inputs with outputs prefixed by its unique `name`, and passes other columns through. Steps run sequentially, so later steps may target outputs of earlier ones.
+- Targeted names refer to the feature frame at that point in the chain (normally after encoding and selection). Keep step names unique; missing, duplicate, and colliding feature names are rejected.
 
 ## Missing Value Convention
 
@@ -75,7 +81,7 @@ Random Forest (sklearn) has no native missing-value support, so it receives the 
 - Encoder, selector, and preprocessor must be fit only on the **training fold** inside CV loops — never on the full dataset before splitting.
 - `PLSReducer` is supervised (requires target at fit time); never let it see validation target during CV.
 - Blend weights and stacking meta-learner are fit only on training/OOF data; test set is evaluation-only.
-- `ModelPipeline.run()` enforces this order: split → tune (CV only on train) → refit full train → evaluate once on test.
+- `ModelPipeline.run()` enforces this order: optional raw-feature subset → tune with fold-local transforms → refit on all supplied rows. The caller evaluates an explicit holdout afterward.
 
 ## Persistence
 

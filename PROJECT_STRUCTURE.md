@@ -334,14 +334,11 @@ If `feature_cols` is omitted, the loader uses all columns except:
 `offset` is intentionally not a load-time parameter. Offsets are expected to be
 computed after loading and added with `ModelData.with_offset()`.
 
-### `TrainTestSplit`
+### Explicit holdout data
 
-Defined in `data/splitter.py`.
-
-```python
-split = TrainTestSplit(train_ratio=0.7, seed=42)
-train, test = split.split(data)
-```
+The library does not create train/test splits. Supply all training rows to
+`ModelPipeline`, then construct and retain any final holdout in caller code.
+Evaluate it explicitly with `fitted_pipeline.evaluate(holdout_data)`.
 
 Supported split modes:
 
@@ -721,9 +718,8 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 `ModelPipeline.run()` executes in this order:
 
-1. Split data with `TrainTestSplit`.
-2. Optionally tune hyperparameters on the training split only.
-3. Fit encoder on the full training split and transform train and test.
+1. Optionally tune hyperparameters with fold-local cross-validation fitting.
+2. Fit encoder, feature selection, preprocessors, and model on all supplied data.
 4. Fit selector on transformed training data and select the same columns from
    train and test.
 5. Fit each preprocessor on training features and target, then transform train
@@ -772,7 +768,6 @@ Important fields:
 - `fitted_model`: the final `FittedModel`.
 - `recipe`: the original `ModelRecipe` object.
 - `train_data`: transformed training data as seen by the fitted model.
-- `test_data`: transformed test data as seen by the fitted model.
 - `selected_features`: selected feature names, if selection was used.
 - `tuning_history`: Optuna history DataFrame, if tuning was used.
 - `report`: `EvaluationReport`.
@@ -785,8 +780,8 @@ Important methods:
 - `predict(data, prediction_type="response")`
 - `predict_raw(features, exposure=None, weight=None, prediction_type="response")`
 
-Use `fitted_model.predict(result.test_data)` when you already have transformed
-model-ready data.
+Use `result.predict(holdout_data)` for raw holdout data, or
+`result.evaluate(holdout_data)` to produce metrics and plots.
 
 Use `result.predict(raw_model_data)` when you have a raw `ModelData` shaped like
 the original pre-transform data.
@@ -800,8 +795,8 @@ Pitfalls:
   was used, pass raw feature columns, not already encoded features.
 - `FittedPipeline.predict_raw()` creates a placeholder target. It does not
   replace the need to provide exposure for Poisson expected claim count scoring.
-- `train_data` and `test_data` are transformed data. The raw split rows are not
-  stored on `FittedPipeline`.
+- `train_data` is transformed data. Holdouts are never stored on
+  `FittedPipeline`; each call to `.evaluate()` returns an independent report.
 
 ## Hyperparameter Tuning
 
@@ -984,8 +979,8 @@ Defined in `evaluation/comparison.py`.
 
 ```python
 table = compare_reports({
-    "lightgbm": result_lgb.report,
-    "xgboost": result_xgb.report,
+    "lightgbm": result_lgb.evaluate(lightgbm_holdout),
+    "xgboost": result_xgb.evaluate(xgboost_holdout),
 })
 ```
 
@@ -1106,7 +1101,6 @@ Artifacts written:
 
 - `pipeline.pkl`: full fitted pipeline via `cloudpickle`.
 - `metadata.json`: `ReproducibilityMetadata` as JSON.
-- `metrics.csv`: report metrics, if they can be generated.
 - `tuning_history.parquet`: only when tuning history exists.
 
 ### Loading
@@ -1184,7 +1178,6 @@ provided.
 
 ```python
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
@@ -1203,19 +1196,18 @@ recipe = ModelRecipe(
 
 result = ModelPipeline(
     data=data,
-    split=TrainTestSplit(train_ratio=0.7, seed=42),
     recipe=recipe,
 ).run()
 
-metrics = result.report.metrics()
-preds = result.fitted_model.predict(result.test_data, prediction_type="response")
+report = result.evaluate(holdout_data)
+metrics = report.metrics()
+preds = result.predict(holdout_data, prediction_type="response")
 ```
 
 ### Basic Gamma Severity Pipeline
 
 ```python
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
@@ -1229,7 +1221,6 @@ data = load_model_data(
 
 result = ModelPipeline(
     data=data,
-    split=TrainTestSplit(seed=42),
     recipe=ModelRecipe(model=LightGBMModel(objective="gamma")),
 ).run()
 ```
@@ -1275,7 +1266,7 @@ recipe = ModelRecipe(
     ),
 )
 
-result = ModelPipeline(data=data, split=TrainTestSplit(seed=42), recipe=recipe).run()
+result = ModelPipeline(data=data, recipe=recipe).run()
 history = result.tuning_history
 ```
 
@@ -1337,7 +1328,7 @@ ensemble_result = EnsemblePipeline(
     blend_weights=[0.6, 0.4],
 ).run()
 
-ensemble_preds = ensemble_result.predict(result_lgb.test_data)
+ensemble_preds = ensemble_result.predict(holdout_data)
 ```
 
 ### Stacking
@@ -1453,7 +1444,7 @@ code. Import most classes from their concrete modules.
 
 ### Treating `FittedPipeline.train_data` as Raw Data
 
-`FittedPipeline.train_data` and `FittedPipeline.test_data` are transformed
+`FittedPipeline.train_data` is transformed
 model-ready frames. If an encoder, selector, or reducer was used, these are not
 the raw parquet features.
 
@@ -1484,9 +1475,11 @@ There are two fold mechanisms:
 
 They are not the same API.
 
-### Expecting Stratified Splits
+### Managing Holdouts
 
-The current `TrainTestSplit` supports random and group splits only.
+The caller owns holdout construction. Keep final holdout rows separate from
+the `ModelData` passed to `ModelPipeline.run()` and pass them only to
+`FittedPipeline.evaluate()`.
 
 ### Leaving Group IDs in Model Features
 

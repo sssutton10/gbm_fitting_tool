@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import warnings
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,7 +18,6 @@ def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
     -----------------
     - ``pipeline.pkl``     — full pipeline object via cloudpickle (handles closures)
     - ``metadata.json``    — human-readable ReproducibilityMetadata
-    - ``metrics.csv``      — evaluation metrics from the test set
     - ``tuning_history.parquet`` — trial history (if tuning was run)
     """
     import cloudpickle
@@ -35,13 +33,6 @@ def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
     meta_dict = dataclasses.asdict(meta)
     with open(os.path.join(output_dir, "metadata.json"), "w") as f:
         json.dump(meta_dict, f, indent=2)
-
-    try:
-        fitted_pipeline.report.metrics().write_csv(
-            os.path.join(output_dir, "metrics.csv")
-        )
-    except Exception as exc:
-        warnings.warn(f"Could not write metrics.csv: {exc}", stacklevel=2)
 
     if fitted_pipeline.tuning_history is not None:
         fitted_pipeline.tuning_history.write_parquet(

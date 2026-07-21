@@ -63,15 +63,15 @@ class StackingEnsemble:
         from sklearn.model_selection import KFold
 
         meta = self.meta_learner if self.meta_learner is not None else Ridge()
-        ref_train = fitted_pipelines[0].train_data
+        ref_train = fitted_pipelines[0].raw_train_data
         n = ref_train.n_rows
         fold_splits = list(KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed).split(range(n)))
         oof_matrix = np.zeros((n, len(fitted_pipelines)))
 
         for p_idx, pipeline in enumerate(fitted_pipelines):
             for train_idx, val_idx in fold_splits:
-                fold_train = slice_model_data(pipeline.train_data, train_idx)
-                fold_val = slice_model_data(pipeline.train_data, val_idx)
+                fold_train = slice_model_data(pipeline.raw_train_data, train_idx)
+                fold_val = slice_model_data(pipeline.raw_train_data, val_idx)
                 current_train, current_val = _apply_recipe_fold_transforms(
                     pipeline.recipe, fold_train, fold_val
                 )

@@ -1,7 +1,6 @@
 import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.selection.importance import ImportancePruner
@@ -51,7 +50,7 @@ def test_boruta_only_trained_on_given_data(poisson_parquet):
         path=str(poisson_parquet), target="claim_count",
         exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
     )
-    train, test = TrainTestSplit().split(data)
+    train = data
     selector = BorutaSelector(max_iter=3, seed=42)
     # Should fit without error on training data only
     fitted = selector.fit(train)

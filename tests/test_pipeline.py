@@ -1,210 +1,98 @@
 import polars as pl
 import pytest
+
 from ins_gbm.data.loader import load_model_data
-from ins_gbm.data.splitter import TrainTestSplit
+from ins_gbm.data.model_data import ModelData, slice_model_data
+from ins_gbm.data.schema import infer_schema
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.pipeline import FittedPipeline, ModelPipeline, ModelRecipe
+from ins_gbm.preprocessing.encoder import OneHotEncoder
+from ins_gbm.preprocessing.pca import PCAReducer
+from ins_gbm.preprocessing.steps import PreprocessingStep
 from ins_gbm.tuning.tuner import HyperparameterTuner
 
 
-# ── Basic pipeline ──────────────────────────────────────────────────────────────
+def _data(path):
+    return load_model_data(
+        path=str(path), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
 
-def test_pipeline_run_returns_fitted_pipeline(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    pipeline = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    )
-    result = pipeline.run()
+
+def test_pipeline_fits_all_supplied_rows(poisson_parquet):
+    data = _data(poisson_parquet)
+    result = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run()
     assert isinstance(result, FittedPipeline)
+    assert result.train_data.n_rows == data.n_rows
+    assert not hasattr(result, "test_data")
+    assert not hasattr(result, "report")
 
 
 def test_pipeline_manual_params_reach_model(poisson_parquet):
-    """Recipe.params are forwarded to model.fit when tuning is disabled."""
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    manual = {"n_estimators": 7, "learning_rate": 0.123}
     result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params=manual),
+        data=_data(poisson_parquet),
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params={"n_estimators": 7, "learning_rate": 0.123}),
     ).run()
-    # The fitted model records the params it was trained with.
     assert result.fitted_model.params.get("learning_rate") == 0.123
 
 
-def test_pipeline_with_supervised_pls_preprocessor(poisson_parquet):
-    """A supervised PLS reducer fits through the pipeline (target is forwarded)."""
-    from ins_gbm.preprocessing.pls import PLSReducer
-
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
+def test_explicit_evaluation_transforms_holdout_without_retaining_it(poisson_raw):
+    schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]), target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"], weight=None, feature_names=["x1", "x2", "x3"],
+        schema=schema, objective="poisson",
+    ).validate()
     result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(
-            model=LightGBMModel(objective="poisson"),
-            preprocessing=[PLSReducer(n_components=1)],
-        ),
+        data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder()),
     ).run()
-    assert isinstance(result, FittedPipeline)
-    # The model was trained on the reduced feature space.
-    assert result.train_data.features.columns == ["pls_1"]
+    holdout = slice_model_data(data, range(100))
+    report = result.evaluate(holdout)
+    assert report.evaluation_data.n_rows == holdout.n_rows
+    assert report.evaluation_data.features.columns != holdout.features.columns
+    assert not hasattr(result, "evaluation_data")
+    assert "metric" in report.metrics().columns
 
 
-def test_pipeline_result_has_train_and_test(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
+def test_predict_raw_matches_explicit_evaluation(poisson_raw):
+    schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]), target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"], weight=None, feature_names=["x1", "x2", "x3"],
+        schema=schema, objective="poisson",
+    ).validate()
+    result = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder())).run()
+    holdout = slice_model_data(data, range(100))
+    report = result.evaluate(holdout)
+    raw_predictions = result.predict_raw(holdout.features, exposure=holdout.exposure)
+    direct_predictions = result.fitted_model.predict(report.evaluation_data, "response")
+    assert raw_predictions.to_list() == pytest.approx(direct_predictions.to_list(), rel=1e-6)
+
+
+def test_tuning_still_uses_cv_and_stores_history(poisson_parquet):
     result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(train_ratio=0.7, seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    assert result.train_data.n_rows > 0
-    assert result.test_data.n_rows > 0
-
-
-def test_pipeline_split_proportions(poisson_parquet):
-    """70/30 split on 400 rows → 280 train, 120 test."""
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(train_ratio=0.7, seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    assert result.train_data.n_rows == 280
-    assert result.test_data.n_rows == 120
-
-
-# ── Report and metrics ──────────────────────────────────────────────────────────
-
-def test_pipeline_report_has_metrics(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    metrics = result.report.metrics()
-    assert isinstance(metrics, pl.DataFrame)
-    assert "metric" in metrics.columns
-    assert len(metrics) > 0
-
-
-def test_pipeline_fitted_model_predicts_on_test(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    preds = result.fitted_model.predict(result.test_data, "response")
-    assert len(preds) == result.test_data.n_rows
-
-
-# ── Tuning ──────────────────────────────────────────────────────────────────────
-
-def test_pipeline_with_tuning_stores_history(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
+        data=_data(poisson_parquet),
         recipe=ModelRecipe(
             model=LightGBMModel(objective="poisson"),
             tuning=HyperparameterTuner(n_trials=2, cv_folds=2, seed=42),
         ),
     ).run()
-    assert result.tuning_history is not None
+    assert result.train_data.n_rows == _data(poisson_parquet).n_rows
     assert len(result.tuning_history) == 2
 
 
-def test_pipeline_without_tuning_has_no_history(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    assert result.tuning_history is None
+def test_comparison_predictions_are_taken_from_holdout(poisson_raw):
+    data = _data_from_raw = ModelData(
+        features=poisson_raw.select(["x1", "x3"]), target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"], weight=None, feature_names=["x1", "x3"],
+        objective="poisson", comparisons=pl.DataFrame({"legacy": [1.0] * poisson_raw.height}),
+    ).validate()
+    result = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run()
+    report = result.evaluate(slice_model_data(data, range(100)))
+    assert set(report.metrics()["model"].unique()) == {"GBM", "legacy"}
 
 
-# ── Recipe stored in result ──────────────────────────────────────────────────────
-
-def test_pipeline_recipe_stored(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    recipe = ModelRecipe(model=LightGBMModel(objective="poisson"))
-    result = ModelPipeline(data=data, split=TrainTestSplit(seed=42), recipe=recipe).run()
-    assert result.recipe is recipe
-
-
-# ── Metadata ────────────────────────────────────────────────────────────────────
-
-def test_pipeline_metadata_is_populated(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(seed=42),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    assert result.metadata is not None
-    assert result.metadata.objective == "poisson"
-    assert len(result.metadata.feature_names) > 0
-
-
-# ── Prediction via FittedPipeline ───────────────────────────────────────────────
-
-def test_predict_no_transforms_matches_model_predict(poisson_parquet):
-    data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
-    )
-    result = ModelPipeline(
-        data=data,
-        split=TrainTestSplit(train_ratio=0.8, seed=0),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    ).run()
-    # No encoder/selector/preprocessors — predict() is a direct passthrough to the model
-    direct = result.fitted_model.predict(result.test_data, prediction_type="response")
-    via_predict = result.predict(result.test_data, prediction_type="response")
-    assert direct.to_list() == pytest.approx(via_predict.to_list(), rel=1e-6)
-
-
-def test_predict_raw_matches_pipeline_predictions(poisson_raw):
-    from ins_gbm.data.model_data import ModelData
-    from ins_gbm.data.schema import infer_schema
-    from ins_gbm.preprocessing.encoder import OneHotEncoder
-
+def test_pipeline_run_can_select_reusable_feature_subset(poisson_raw):
     schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
     data = ModelData(
         features=poisson_raw.select(["x1", "x2", "x3"]),
@@ -218,43 +106,43 @@ def test_predict_raw_matches_pipeline_predictions(poisson_raw):
 
     result = ModelPipeline(
         data=data,
-        split=TrainTestSplit(train_ratio=0.7, seed=42),
         recipe=ModelRecipe(
             model=LightGBMModel(objective="poisson"),
             encoder=OneHotEncoder(),
+            params={"n_estimators": 5},
         ),
-    ).run()
+    ).run(feature_names=["x1", "x2"])
 
-    # Recreate the exact same split to recover the raw test rows
-    _, raw_test = TrainTestSplit(train_ratio=0.7, seed=42).split(data)
-
-    via_predict_raw = result.predict_raw(
-        features=raw_test.features,
-        exposure=raw_test.exposure,
-    )
-    direct = result.fitted_model.predict(result.test_data, prediction_type="response")
-    assert via_predict_raw.to_list() == pytest.approx(direct.to_list(), rel=1e-6)
+    assert result.input_feature_names == ["x1", "x2"]
+    assert result.raw_train_data.features.columns == ["x1", "x2"]
+    assert result.metadata.input_feature_names == ["x1", "x2"]
+    assert result.predict(data).len() == data.n_rows
 
 
-def test_predict_raw_wrong_exposure_length_raises(poisson_raw):
-    from ins_gbm.data.model_data import ModelData
-    from ins_gbm.data.schema import infer_schema
-
-    schema = infer_schema(poisson_raw, ["x1", "x3"])
+def test_pipeline_targeted_preprocessor_retains_other_features(poisson_raw):
     data = ModelData(
         features=poisson_raw.select(["x1", "x3"]),
         target=poisson_raw["claim_count"],
         exposure=poisson_raw["exposure"],
         weight=None,
         feature_names=["x1", "x3"],
-        schema=schema,
         objective="poisson",
     ).validate()
+
     result = ModelPipeline(
         data=data,
-        split=TrainTestSplit(train_ratio=0.8, seed=0),
-        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            preprocessing=[
+                PreprocessingStep(
+                    name="x1_pca",
+                    preprocessor=PCAReducer(n_components=1),
+                    feature_names=["x1"],
+                ),
+            ],
+            params={"n_estimators": 5},
+        ),
     ).run()
-    bad_exposure = pl.Series([1.0, 2.0])  # wrong length
-    with pytest.raises(ValueError, match="exposure length"):
-        result.predict_raw(features=poisson_raw.select(["x1", "x3"]), exposure=bad_exposure)
+
+    assert result.train_data.features.columns == ["x1_pca__pca_1", "x3"]
+    assert result.predict(data).len() == data.n_rows

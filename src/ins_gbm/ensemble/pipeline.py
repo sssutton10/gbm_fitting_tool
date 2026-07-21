@@ -15,12 +15,46 @@ if TYPE_CHECKING:
 class EnsembleResult:
     """Result of running an :class:`EnsemblePipeline`."""
     ensemble: Any  # FittedBlendingEnsemble or FittedStackingEnsemble
-    report: Any    # EvaluationReport
     base_pipelines: list["FittedPipeline"]
 
     def predict(self, data: ModelData) -> pl.Series:
         """Generate ensemble predictions on *data*."""
         return self.ensemble.predict(data)
+
+    def evaluate(self, holdout_data: ModelData):
+        """Evaluate the fitted ensemble on separately supplied holdout data."""
+        from ins_gbm.evaluation.report import EvaluationReport
+        from ins_gbm.models.base import FittedModel
+
+        def _predict_fn(data: ModelData, prediction_type: str) -> pl.Series:
+            return self.ensemble.predict(data)
+
+        def _importance_fn():
+            return pl.DataFrame({"feature": pl.Series([], dtype=pl.Utf8),
+                                 "importance": pl.Series([], dtype=pl.Float64)})
+
+        first = self.base_pipelines[0]
+        proxy_model = FittedModel(
+            model=self.ensemble,
+            params={},
+            framework="ensemble",
+            objective=first.fitted_model.objective,
+            feature_names=first.fitted_model.feature_names,
+            predict_fn=_predict_fn,
+            importance_fn=_importance_fn,
+        )
+        comparison_predictions = None
+        if holdout_data.comparisons is not None:
+            comparison_predictions = {
+                name: holdout_data.comparisons[name]
+                for name in holdout_data.comparisons.columns
+            }
+        return EvaluationReport(
+            fitted_model=proxy_model,
+            evaluation_data=holdout_data,
+            train_data=first.train_data,
+            comparison_predictions=comparison_predictions,
+        )
 
 
 @dataclass
@@ -56,13 +90,7 @@ class EnsemblePipeline:
     meta_learner: Optional[Any] = None
 
     def run(self) -> EnsembleResult:
-        """Fit the ensemble and return an :class:`EnsembleResult` with an evaluation report.
-
-        The evaluation uses the test data from the first base pipeline.
-        The test set is never used for weight or meta-learner fitting.
-        """
-        from ins_gbm.evaluation.report import EvaluationReport
-        from ins_gbm.models.base import FittedModel
+        """Fit the ensemble using the base pipelines' complete training data."""
 
         if self.method == "blending":
             fitted_ensemble = self._run_blending()
@@ -73,36 +101,8 @@ class EnsemblePipeline:
                 f"Unknown method: {self.method!r}. Choose 'blending' or 'stacking'."
             )
 
-        test_data = self.fitted_pipelines[0].test_data
-        objective = self.fitted_pipelines[0].fitted_model.objective
-
-        # Proxy FittedModel so EvaluationReport can call .predict() and .feature_importance()
-        def _predict_fn(data: ModelData, prediction_type: str) -> pl.Series:
-            return fitted_ensemble.predict(data)
-
-        def _importance_fn():
-            return pl.DataFrame({"feature": pl.Series([], dtype=pl.Utf8),
-                                  "importance": pl.Series([], dtype=pl.Float64)})
-
-        proxy_model = FittedModel(
-            model=fitted_ensemble,
-            params={},
-            framework="ensemble",
-            objective=objective,
-            feature_names=self.fitted_pipelines[0].fitted_model.feature_names,
-            predict_fn=_predict_fn,
-            importance_fn=_importance_fn,
-        )
-
-        report = EvaluationReport(
-            fitted_model=proxy_model,
-            test_data=test_data,
-            train_data=self.fitted_pipelines[0].train_data,
-        )
-
         return EnsembleResult(
             ensemble=fitted_ensemble,
-            report=report,
             base_pipelines=list(self.fitted_pipelines),
         )
 

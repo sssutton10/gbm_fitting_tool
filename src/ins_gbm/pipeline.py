@@ -6,7 +6,6 @@ from typing import Any, Optional
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
-from ins_gbm.data.splitter import TrainTestSplit
 from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
@@ -34,33 +33,24 @@ class ModelRecipe:
 class FittedPipeline:
     """Result of running a ``ModelPipeline``.
 
-    ``train_data`` and ``test_data`` hold the *transformed* versions of each
-    split — i.e., the features as they were passed to the model.  The raw
-    parquet data is not stored here.
+    ``train_data`` holds the transformed full training data — i.e., the
+    features as they were passed to the model. Evaluation data is supplied
+    explicitly to :meth:`evaluate` and is never retained by this object.
     """
     fitted_model: FittedModel
     recipe: ModelRecipe
+    input_feature_names: list[str]
+    raw_train_data: ModelData
     train_data: ModelData
-    test_data: ModelData
     selected_features: Optional[list[str]]
     tuning_history: Optional[pl.DataFrame]
-    report: Any  # EvaluationReport — imported lazily to avoid circular imports
     encoder: Optional[Any]
     preprocessors: list
     metadata: ReproducibilityMetadata
 
-    def predict(
-        self,
-        data: ModelData,
-        prediction_type: PredictionType = "response",
-    ) -> pl.Series:
-        """Apply the fitted transform chain to *data* and return predictions.
-
-        Applies transforms in the same order as ModelPipeline.run():
-        encode → select → preprocess → model.predict().
-        Pass raw (pre-transform) data; the fitted transformers handle encoding.
-        """
-        current = data
+    def _prepare_data(self, data: ModelData) -> ModelData:
+        """Select fitted raw inputs and apply the fitted transform chain."""
+        current = data.select_features(self.input_feature_names)
         if self.encoder is not None:
             current = current.with_features(self.encoder.transform(current.features))
         if self.selected_features is not None:
@@ -76,6 +66,20 @@ class FittedPipeline:
             )
         for prep in self.preprocessors:
             current = current.with_features(prep.transform(current.features))
+        return current
+
+    def predict(
+        self,
+        data: ModelData,
+        prediction_type: PredictionType = "response",
+    ) -> pl.Series:
+        """Apply the fitted transform chain to *data* and return predictions.
+
+        Applies transforms in the same order as ModelPipeline.run():
+        encode → select → preprocess → model.predict().
+        Pass raw (pre-transform) data; the fitted transformers handle encoding.
+        """
+        current = self._prepare_data(data)
         return self.fitted_model.predict(current, prediction_type=prediction_type)
 
     def predict_raw(
@@ -116,23 +120,44 @@ class FittedPipeline:
         )
         return self.predict(data, prediction_type=prediction_type)
 
+    def evaluate(self, holdout_data: ModelData):
+        """Evaluate this fitted pipeline on separately supplied holdout data.
+
+        The fitted transform chain is applied to the holdout, but neither the
+        raw nor transformed holdout is stored on the fitted pipeline.
+        """
+        from ins_gbm.evaluation.report import EvaluationReport
+
+        current = self._prepare_data(holdout_data)
+
+        comparison_predictions = None
+        if current.comparisons is not None:
+            comparison_predictions = {
+                name: current.comparisons[name] for name in current.comparisons.columns
+            }
+        return EvaluationReport(
+            fitted_model=self.fitted_model,
+            evaluation_data=current,
+            train_data=self.train_data,
+            comparison_predictions=comparison_predictions,
+        )
+
 
 @dataclass
 class ModelPipeline:
-    """Full train → tune → fit → evaluate orchestrator.
+    """Full-data train → tune → fit orchestrator.
 
     Execution order
     ---------------
-    1. Split data into train and an untouched test set.
-    2. (Optional) Tune on training data: encoder, selector, and preprocessor
+    1. (Optional) Tune with cross-validation: encoder, selector, and preprocessor
        are refit independently on each CV fold to prevent leakage.
-    3. Refit encoder → selector → preprocessors → model on the *full*
-       training set using the best hyperparameters.
-    4. Apply the same fitted transformations to the test set.
-    5. Evaluate *once* on the untouched (now transformed) test set.
+    2. Fit encoder → selector → preprocessors → model on every supplied row
+       using the best hyperparameters.
+
+    Use :meth:`FittedPipeline.evaluate` to evaluate a separately supplied
+    holdout after fitting.
     """
     data: ModelData
-    split: TrainTestSplit
     recipe: ModelRecipe
     progress: Optional[ProgressCallback] = None
     should_stop: Optional[Any] = None
@@ -145,16 +170,22 @@ class ModelPipeline:
         if self.should_stop is not None and self.should_stop():
             raise PipelineCancelled("pipeline cancelled by caller")
 
-    def run(self) -> FittedPipeline:
-        from ins_gbm.evaluation.report import EvaluationReport
+    def run(self, feature_names: Optional[list[str]] = None) -> FittedPipeline:
+        """Fit the recipe, optionally using an ordered subset of raw features."""
         from ins_gbm.persistence.metadata import build_metadata
+        from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
-        # ── 1. Split ──────────────────────────────────────────────────────────
-        self._emit("split", "splitting data into train/test")
-        train_data, test_data = self.split.split(self.data)
+        validate_preprocessing_steps(self.recipe.preprocessing)
+        train_data = (
+            self.data.select_features(feature_names)
+            if feature_names is not None
+            else self.data
+        )
+        input_feature_names = list(train_data.feature_names)
+        raw_train_data = train_data
         self._check_cancel()
 
-        # ── 2. Tune (optional) ────────────────────────────────────────────────
+        # ── 1. Tune (optional) ────────────────────────────────────────────────
         tuning_history: Optional[pl.DataFrame] = None
         best_params: dict = {}
         if self.recipe.tuning is not None:
@@ -162,28 +193,20 @@ class ModelPipeline:
                 "tuning", "starting hyperparameter tuning",
                 total=self.recipe.tuning.n_trials,
             )
-            # Pass only the first preprocessor to the tuner; multiple-preprocessor
-            # chains are handled in the full refit step below.
-            single_prep = (
-                self.recipe.preprocessing[0]
-                if self.recipe.preprocessing
-                else None
-            )
             best_params, tuning_history = self.recipe.tuning.tune(
                 train_data,
                 self.recipe.model,
                 encoder=self.recipe.encoder,
                 selector=self.recipe.selection,
-                preprocessor=single_prep,
+                preprocessors=self.recipe.preprocessing,
                 schema=getattr(train_data, "schema", None),
                 progress=self.progress,
                 should_stop=self.should_stop,
             )
             self._check_cancel()
 
-        # ── 3. Refit on full training data ────────────────────────────────────
+        # ── 2. Fit on full training data ──────────────────────────────────────
         current_train = train_data
-        current_test = test_data
         fitted_encoder: Optional[Any] = None
 
         if self.recipe.encoder is not None:
@@ -194,9 +217,6 @@ class ModelPipeline:
             current_train = current_train.with_features(
                 fitted_encoder.transform(current_train.features)
             )
-            current_test = current_test.with_features(
-                fitted_encoder.transform(current_test.features)
-            )
 
         selected_features: Optional[list[str]] = None
         if self.recipe.selection is not None:
@@ -206,9 +226,6 @@ class ModelPipeline:
             selected_features = fitted_sel.selected_features()
             current_train = current_train.with_features(
                 current_train.features.select(selected_features)
-            )
-            current_test = current_test.with_features(
-                current_test.features.select(selected_features)
             )
 
         fitted_preprocessors: list = []
@@ -221,9 +238,6 @@ class ModelPipeline:
             current_train = current_train.with_features(
                 fitted_prep.transform(current_train.features)
             )
-            current_test = current_test.with_features(
-                fitted_prep.transform(current_test.features)
-            )
             fitted_preprocessors.append(fitted_prep)
 
         self._emit("fit", "fitting model on full training data")
@@ -232,27 +246,13 @@ class ModelPipeline:
             current_train,
             params=best_params if best_params else self.recipe.params,
         )
+        self._check_cancel()
 
-        # ── 4. Evaluate once on the test set ──────────────────────────────────
-        self._emit("evaluate", "evaluating on test set")
-        comp_preds = None
-        if current_test.comparisons is not None:
-            comp_preds = {
-                col: current_test.comparisons[col]
-                for col in current_test.comparisons.columns
-            }
-        report = EvaluationReport(
-            fitted_model=fitted_model,
-            test_data=current_test,
-            train_data=current_train,
-            comparison_predictions=comp_preds,
-        )
-
-        # ── 5. Capture reproducibility metadata ───────────────────────────────
+        # ── 3. Capture reproducibility metadata ───────────────────────────────
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=selected_features,
-            split_seed=getattr(self.split, "seed", None),
+            input_feature_names=input_feature_names,
             tuning_seed=(
                 getattr(self.recipe.tuning, "seed", None)
                 if self.recipe.tuning is not None
@@ -263,11 +263,11 @@ class ModelPipeline:
         return FittedPipeline(
             fitted_model=fitted_model,
             recipe=self.recipe,
+            input_feature_names=input_feature_names,
+            raw_train_data=raw_train_data,
             train_data=current_train,
-            test_data=current_test,
             selected_features=selected_features,
             tuning_history=tuning_history,
-            report=report,
             encoder=fitted_encoder,
             preprocessors=fitted_preprocessors,
             metadata=metadata,

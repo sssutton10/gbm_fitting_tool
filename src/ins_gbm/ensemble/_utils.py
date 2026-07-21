@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 def _apply_pipeline_transforms(pipeline: "FittedPipeline", data: ModelData) -> ModelData:
     """Apply a fitted pipeline's encoder, selector, and preprocessors to *data*."""
-    current = data
+    current = data.select_features(pipeline.input_feature_names)
     if pipeline.encoder is not None:
         current = current.with_features(pipeline.encoder.transform(current.features))
     if pipeline.selected_features is not None:
@@ -40,6 +40,9 @@ def _apply_recipe_fold_transforms(
     Used in stacking OOF generation and blending OOF mode to prevent leakage
     across fold boundaries.  Returns (transformed_train, transformed_val).
     """
+    from ins_gbm.preprocessing.steps import validate_preprocessing_steps
+
+    validate_preprocessing_steps(recipe.preprocessing)
     current_train = fold_train
     current_val = fold_val
 
