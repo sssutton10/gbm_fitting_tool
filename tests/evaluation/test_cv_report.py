@@ -61,6 +61,30 @@ def test_summary_has_mean_and_std(poisson_raw):
     assert gbm_summary["std"].null_count() == 0
 
 
+def test_run_passes_recipe_params_to_each_fold(poisson_raw, monkeypatch):
+    data = _poisson_data(poisson_raw)
+    params = {"n_estimators": 7, "learning_rate": 0.05}
+    received_params = []
+    original_fit = LightGBMModel.fit
+
+    def recording_fit(self, fold_data, params=None):
+        received_params.append(params)
+        return original_fit(self, fold_data, params=params)
+
+    monkeypatch.setattr(LightGBMModel, "fit", recording_fit)
+
+    CrossValidationReport(
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"), params=params
+        ),
+        data=data,
+        n_folds=3,
+        seed=0,
+    ).run()
+
+    assert received_params == [params, params, params]
+
+
 def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):
     fold_series = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(fold_series)

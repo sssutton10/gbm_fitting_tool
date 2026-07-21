@@ -25,7 +25,27 @@ def test_rf_poisson_fit_predict(poisson_parquet):
     preds = fitted.predict(test, prediction_type="response")
     assert isinstance(preds, pl.Series)
     assert len(preds) == test.n_rows
-    assert (preds >= 0).all()
+    assert (preds > 0).all()
+
+
+def test_rf_poisson_response_floors_zero_rate_predictions(poisson_parquet):
+    data = _poisson(poisson_parquet)
+    zero_target_data = data.__class__(
+        features=data.features,
+        target=pl.Series("claim_count", [0.0] * data.n_rows),
+        exposure=data.exposure,
+        weight=data.weight,
+        feature_names=data.feature_names,
+        schema=data.schema,
+        objective=data.objective,
+    ).validate()
+
+    fitted = RandomForestModel(objective="poisson").fit(
+        zero_target_data, params={"n_estimators": 10}
+    )
+    preds = fitted.predict(zero_target_data, prediction_type="response")
+
+    assert (preds == 1e-10).all()
 
 
 def test_rf_gamma_fit_predict(gamma_parquet):

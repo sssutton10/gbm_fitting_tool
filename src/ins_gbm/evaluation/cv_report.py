@@ -80,7 +80,10 @@ class CrossValidationReport:
                 self.recipe, train_data, held_data
             )
 
-            fitted_model = self.recipe.model.fit(current_train)
+            fitted_model = self.recipe.model.fit(
+                current_train,
+                params=self.recipe.params,
+            )
             gbm_preds = fitted_model.predict(current_held, prediction_type="response")
 
             gbm_metrics = compute_metrics(

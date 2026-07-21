@@ -81,8 +81,12 @@ class RandomForestModel:
             if objective == "poisson":
                 if prediction_type == "response":
                     if pred_data.exposure is not None:
-                        return pl.Series(raw * pred_data.exposure.to_numpy())
-                    return pl.Series(raw)
+                        response = raw * pred_data.exposure.to_numpy()
+                    else:
+                        response = raw
+                    # A zero-rate leaf is a valid random-forest estimate, but
+                    # Poisson deviance requires strictly positive means.
+                    return pl.Series(np.maximum(response, 1e-10))
                 elif prediction_type == "rate":
                     return pl.Series(raw)
                 else:  # link
