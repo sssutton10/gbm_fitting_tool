@@ -42,7 +42,11 @@ def compare_reports(
             report_data[name] = d
         else:
             d = {}
-            for row in report.metrics().iter_rows(named=True):
+            # ``metrics()`` includes both the fitted GBM and any benchmark
+            # predictions attached to the report.  Compare the fitted model,
+            # rather than allowing later benchmark rows to overwrite its
+            # values for the same metric.
+            for row in report._single_metrics().iter_rows(named=True):
                 d[row["metric"]] = (row["value"], None)
             report_data[name] = d
         all_metrics.update(report_data[name].keys())
