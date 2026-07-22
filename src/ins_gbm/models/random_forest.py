@@ -74,6 +74,11 @@ class RandomForestModel:
             exposure = data.exposure.to_numpy().astype(np.float64)
             y_fit = y / exposure  # fit on claim rate
             sample_weight = exposure
+            if data.weight is not None:
+                sample_weight = (
+                    sample_weight
+                    * data.weight.to_numpy().astype(np.float64)
+                )
         elif data.weight is not None:
             y_fit = y
             sample_weight = data.weight.to_numpy().astype(np.float64)

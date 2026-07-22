@@ -171,9 +171,47 @@ def test_compute_metrics_matches_individual_functions():
         predicted=predicted,
         exposure=exposure,
     )
-    expected_deviance = poisson_deviance(actual, predicted, weights=exposure)
+    expected_deviance = poisson_deviance(
+        actual / exposure,
+        predicted / exposure,
+        weights=exposure,
+    )
     row = result.filter(pl.col("metric") == "poisson_deviance")["value"][0]
     assert abs(row - expected_deviance) < 1e-10
+
+
+def test_compute_metrics_poisson_combines_exposure_and_model_weight():
+    actual = pl.Series([1.0, 4.0, 3.0])
+    predicted = pl.Series([2.0, 2.0, 4.5])
+    exposure = pl.Series([1.0, 2.0, 3.0])
+    weight = pl.Series([3.0, 5.0, 2.0])
+
+    result = compute_metrics(
+        objective="poisson",
+        actual=actual,
+        predicted=predicted,
+        exposure=exposure,
+        weight=weight,
+    )
+
+    actual_rate = actual / exposure
+    predicted_rate = predicted / exposure
+    effective_weight = exposure * weight
+    expected_deviance = poisson_deviance(
+        actual_rate,
+        predicted_rate,
+        weights=effective_weight,
+    )
+    expected_gini = normalized_gini(
+        actual_rate,
+        predicted_rate,
+        weights=effective_weight,
+    )
+
+    deviance = result.filter(pl.col("metric") == "poisson_deviance")["value"][0]
+    gini = result.filter(pl.col("metric") == "gini")["value"][0]
+    assert deviance == pytest.approx(expected_deviance)
+    assert gini == pytest.approx(expected_gini)
 
 
 def test_compute_metrics_no_weights():

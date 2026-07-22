@@ -7,7 +7,13 @@ import numpy as np
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
-from ins_gbm.evaluation.metrics import poisson_deviance, gamma_deviance, rmse, mae
+from ins_gbm.evaluation.metrics import (
+    _poisson_rate_metric_inputs,
+    poisson_deviance,
+    gamma_deviance,
+    rmse,
+    mae,
+)
 from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 from ins_gbm.preprocessing.chain import fit_transform_chain
 
@@ -154,14 +160,27 @@ class HyperparameterTuner:
                 fitted_model = model.fit(train_data, params=params)
                 preds = fitted_model.predict(val_data, prediction_type="response")
 
-                weights = (
-                    val_data.exposure
-                    if val_data.exposure is not None
-                    else val_data.weight
-                )
+                metric_actual = val_data.target
+                metric_predicted = preds
+                if (
+                    val_data.objective == "poisson"
+                    and self.metric == "poisson_deviance"
+                ):
+                    metric_actual, metric_predicted, weights = (
+                        _poisson_rate_metric_inputs(
+                            val_data.target,
+                            preds,
+                            val_data.exposure,
+                            val_data.weight,
+                        )
+                    )
+                else:
+                    # Response predictions are expected counts for frequency
+                    # models, so exposure is not also a count-error weight.
+                    weights = val_data.weight
                 score = metric_fn(
-                    val_data.target,
-                    preds,
+                    metric_actual,
+                    metric_predicted,
                     weights=weights,
                 )
                 fold_scores.append(score)

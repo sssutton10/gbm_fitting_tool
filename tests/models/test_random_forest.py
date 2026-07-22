@@ -1,3 +1,6 @@
+from dataclasses import replace
+
+import numpy as np
 import polars as pl
 import pytest
 from ins_gbm.data.loader import load_model_data
@@ -46,6 +49,31 @@ def test_rf_poisson_response_floors_zero_rate_predictions(poisson_parquet):
     preds = fitted.predict(zero_target_data, prediction_type="response")
 
     assert (preds == 1e-10).all()
+
+
+def test_rf_poisson_combines_exposure_and_model_weight(
+    poisson_parquet, monkeypatch
+):
+    data = _poisson(poisson_parquet)
+    model_weight = pl.Series("model_weight", [2.0] * data.n_rows)
+    weighted_data = replace(data, weight=model_weight).validate()
+    captured = {}
+
+    from sklearn.ensemble import RandomForestRegressor
+
+    original_fit = RandomForestRegressor.fit
+
+    def recording_fit(self, X, y, sample_weight=None):
+        captured["sample_weight"] = np.asarray(sample_weight)
+        return original_fit(self, X, y, sample_weight=sample_weight)
+
+    monkeypatch.setattr(RandomForestRegressor, "fit", recording_fit)
+    RandomForestModel(objective="poisson").fit(
+        weighted_data, params={"n_estimators": 1}
+    )
+
+    expected = data.exposure.to_numpy() * model_weight.to_numpy()
+    np.testing.assert_allclose(captured["sample_weight"], expected)
 
 
 def test_rf_gamma_fit_predict(gamma_parquet):

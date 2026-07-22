@@ -16,7 +16,7 @@ def poisson_deviance(
     predicted: pl.Series,
     weights: Optional[pl.Series] = None,
 ) -> float:
-    """Mean Poisson deviance, optionally exposure-weighted.
+    """Mean Poisson deviance, optionally observation-weighted.
 
     d_i = 2 * (y_i * log(y_i / mu_i) - (y_i - mu_i))
     Convention: 0 * log(0) = 0.
@@ -36,6 +36,26 @@ def poisson_deviance(
         w = _to_numpy(weights)
         return float(np.sum(w * d) / np.sum(w))
     return float(np.mean(d))
+
+
+def _poisson_rate_metric_inputs(
+    actual: pl.Series,
+    predicted: pl.Series,
+    exposure: Optional[pl.Series],
+    weight: Optional[pl.Series],
+) -> tuple[pl.Series, pl.Series, Optional[pl.Series]]:
+    """Return rate-scale inputs and their effective observation weights.
+
+    Frequency data enters the modeling API as claim counts and expected claim
+    counts.  Dividing both by exposure and weighting by exposure gives the
+    standard actuarial rate formulation without applying exposure twice.  A
+    separate model weight multiplies exposure when supplied.
+    """
+    if exposure is None:
+        return actual, predicted, weight
+
+    effective_weight = exposure if weight is None else exposure * weight
+    return actual / exposure, predicted / exposure, effective_weight
 
 
 def gamma_deviance(
@@ -156,9 +176,11 @@ def compute_metrics(
     predicted : pl.Series
         Model predictions.
     exposure : Optional[pl.Series]
-        Exposure weights for Poisson models. Used for deviance and Gini.
+        Exposure for Poisson models. Count actuals and predictions are divided
+        by exposure for deviance and Gini, then weighted by exposure.
     weight : Optional[pl.Series]
-        Observation weights for Gamma models. Used for deviance and Gini.
+        Optional observation/model weights. For Poisson models these multiply
+        exposure; for Gamma models they are used directly.
 
     Returns
     -------
@@ -171,19 +193,31 @@ def compute_metrics(
     """
     rows: list[dict] = []
     if objective == "poisson":
+        metric_actual, metric_predicted, metric_weight = _poisson_rate_metric_inputs(
+            actual, predicted, exposure, weight
+        )
         rows.append({
             "metric": "poisson_deviance",
-            "value": poisson_deviance(actual, predicted, weights=exposure),
+            "value": poisson_deviance(
+                metric_actual, metric_predicted, weights=metric_weight
+            ),
         })
+        gini_actual = metric_actual
+        gini_predicted = metric_predicted
+        gini_weights = metric_weight
     else:
         rows.append({
             "metric": "gamma_deviance",
             "value": gamma_deviance(actual, predicted, weights=weight),
         })
-    gini_weights = exposure if exposure is not None else weight
+        gini_actual = actual
+        gini_predicted = predicted
+        gini_weights = weight
     rows.append({
         "metric": "gini",
-        "value": normalized_gini(actual, predicted, weights=gini_weights)
+        "value": normalized_gini(
+            gini_actual, gini_predicted, weights=gini_weights
+        )
     })
     rows.append({"metric": "rmse", "value": rmse(actual, predicted)})
     rows.append({"metric": "mae", "value": mae(actual, predicted)})
