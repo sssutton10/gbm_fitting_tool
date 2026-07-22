@@ -18,7 +18,7 @@ from ins_gbm.models.base import FittedModel
 class EvaluationReport:
     fitted_model: FittedModel
     evaluation_data: ModelData
-    train_data: ModelData
+    train_data: Optional[ModelData] = None
     _comparison_models: Optional[dict[str, tuple[FittedModel, ModelData, ModelData]]] = None
     comparison_predictions: Optional[dict[str, pl.Series]] = None
 

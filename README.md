@@ -37,6 +37,35 @@ fit = ModelPipeline(data=data, recipe=recipe).run(
 )
 ```
 
+Model wrappers also build their design matrix at fit time. This is useful for
+lightweight iterations that do not need tuning or learned feature selection:
+
+```python
+from ins_gbm.models.lightgbm import LightGBMModel
+from ins_gbm.preprocessing.encoder import OneHotEncoder
+from ins_gbm.preprocessing.pca import PCAReducer
+from ins_gbm.preprocessing.steps import PreprocessingStep
+
+model = LightGBMModel(objective="poisson").fit(
+    data,
+    params={"n_estimators": 200},
+    feature_names=["age", "territory", "annual_miles", "vehicle_age"],
+    encoder=OneHotEncoder(),
+    preprocessing=[
+        PreprocessingStep(
+            name="usage_pca",
+            preprocessor=PCAReducer(n_components=1),
+            feature_names=["annual_miles", "vehicle_age"],
+        ),
+    ],
+)
+predictions = model.predict(data)  # raw ModelData; fitted transforms replayed
+```
+
+The expanded matrix is temporary. A fitted pipeline retains the reusable raw
+training-data reference for OOF ensembles; `fitted.train_data` reconstructs the
+transformed matrix on demand without caching it.
+
 To reduce only part of the feature frame while retaining other columns, wrap a
 reducer in `PreprocessingStep`:
 

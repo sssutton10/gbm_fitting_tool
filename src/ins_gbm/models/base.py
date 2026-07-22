@@ -31,6 +31,7 @@ class FittedModel:
     feature_names: list[str]
     predict_fn: Callable[["ModelData", PredictionType], pl.Series]
     importance_fn: Callable[..., pl.DataFrame]
+    transform_chain: Optional[Any] = None
 
     def predict(
         self,
@@ -41,7 +42,12 @@ class FittedModel:
             raise ValueError(
                 "prediction_type='rate' is invalid for gamma objective"
             )
-        return self.predict_fn(data, prediction_type)
+        current = (
+            self.transform_chain.transform(data)
+            if self.transform_chain is not None
+            else data
+        )
+        return self.predict_fn(current, prediction_type)
 
     def feature_importance(self, importance_type: Optional[str] = None) -> pl.DataFrame:
         """Return feature scores, optionally using a framework-native importance type.
@@ -66,6 +72,10 @@ class BaseModel(Protocol):
         self,
         data: ModelData,
         params: Optional[dict] = None,
+        *,
+        feature_names: Optional[list[str]] = None,
+        encoder: Optional[Any] = None,
+        preprocessing: Optional[list[Any]] = None,
     ) -> FittedModel: ...
 
     def default_search_space(self) -> dict: ...

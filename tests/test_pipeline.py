@@ -24,6 +24,9 @@ def test_pipeline_fits_all_supplied_rows(poisson_parquet):
     result = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run()
     assert isinstance(result, FittedPipeline)
     assert result.train_data.n_rows == data.n_rows
+    assert "train_data" not in result.__dict__
+    assert result.raw_train_data is data
+    assert result.train_data is not result.train_data
     assert not hasattr(result, "test_data")
     assert not hasattr(result, "report")
 
@@ -51,6 +54,7 @@ def test_explicit_evaluation_transforms_holdout_without_retaining_it(poisson_raw
     assert report.evaluation_data.n_rows == holdout.n_rows
     assert report.evaluation_data.features.columns != holdout.features.columns
     assert not hasattr(result, "evaluation_data")
+    assert report.train_data is None
     assert "metric" in report.metrics().columns
 
 

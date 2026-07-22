@@ -52,7 +52,7 @@ class EnsembleResult:
         return EvaluationReport(
             fitted_model=proxy_model,
             evaluation_data=holdout_data,
-            train_data=first.train_data,
+            train_data=None,
             comparison_predictions=comparison_predictions,
         )
 

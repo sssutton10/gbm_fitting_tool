@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.chain import fit_transform_chain
 
 
 Objective = Literal["poisson", "gamma"]
@@ -47,8 +48,20 @@ class RandomForestModel:
         self,
         data: ModelData,
         params: Optional[dict] = None,
+        *,
+        feature_names: Optional[list[str]] = None,
+        encoder: Optional[object] = None,
+        preprocessing: Optional[list[object]] = None,
     ) -> FittedModel:
         from sklearn.ensemble import RandomForestRegressor
+
+        transform_result = fit_transform_chain(
+            data,
+            feature_names=feature_names,
+            encoder=encoder,
+            preprocessing=preprocessing,
+        )
+        data = transform_result.data
 
         p = dict(params or {})
         p.setdefault("random_state", 42)
@@ -113,4 +126,5 @@ class RandomForestModel:
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,
+            transform_chain=transform_result.chain,
         )

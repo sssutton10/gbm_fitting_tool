@@ -10,6 +10,7 @@ from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
 from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
+from ins_gbm.preprocessing.chain import FittedTransformChain
 
 
 @dataclass
@@ -33,15 +34,14 @@ class ModelRecipe:
 class FittedPipeline:
     """Result of running a ``ModelPipeline``.
 
-    ``train_data`` holds the transformed full training data — i.e., the
-    features as they were passed to the model. Evaluation data is supplied
-    explicitly to :meth:`evaluate` and is never retained by this object.
+    The raw training data is retained for OOF ensemble workflows. The expanded
+    transformed training matrix is reconstructed only when ``train_data`` is
+    explicitly accessed and is never cached on this object.
     """
     fitted_model: FittedModel
     recipe: ModelRecipe
     input_feature_names: list[str]
     raw_train_data: ModelData
-    train_data: ModelData
     selected_features: Optional[list[str]]
     selection_results: Optional[list[Any]]
     tuning_history: Optional[pl.DataFrame]
@@ -49,25 +49,19 @@ class FittedPipeline:
     preprocessors: list
     metadata: ReproducibilityMetadata
 
+    @property
+    def train_data(self) -> ModelData:
+        """Reconstruct transformed training data without retaining the matrix."""
+        return self._prepare_data(self.raw_train_data)
+
     def _prepare_data(self, data: ModelData) -> ModelData:
         """Select fitted raw inputs and apply the fitted transform chain."""
-        current = data.select_features(self.input_feature_names)
-        if self.encoder is not None:
-            current = current.with_features(self.encoder.transform(current.features))
-        if self.selected_features is not None:
-            missing = [
-                f for f in self.selected_features if f not in current.features.columns
-            ]
-            if missing:
-                raise ValueError(
-                    f"Selected features missing after encoding: {missing}"
-                )
-            current = current.with_features(
-                current.features.select(self.selected_features)
-            )
-        for prep in self.preprocessors:
-            current = current.with_features(prep.transform(current.features))
-        return current
+        return FittedTransformChain(
+            input_feature_names=self.input_feature_names,
+            encoder=self.encoder,
+            selected_features=self.selected_features,
+            preprocessors=self.preprocessors,
+        ).transform(data)
 
     def predict(
         self,
@@ -116,7 +110,7 @@ class FittedPipeline:
             exposure=exposure,
             weight=weight,
             feature_names=list(features.columns),
-            schema=self.train_data.schema,
+            schema=self.raw_train_data.schema,
             objective=obj,
         )
         return self.predict(data, prediction_type=prediction_type)
@@ -139,7 +133,7 @@ class FittedPipeline:
         return EvaluationReport(
             fitted_model=self.fitted_model,
             evaluation_data=current,
-            train_data=self.train_data,
+            train_data=None,
             comparison_predictions=comparison_predictions,
         )
 
@@ -275,7 +269,6 @@ class ModelPipeline:
             recipe=self.recipe,
             input_feature_names=input_feature_names,
             raw_train_data=raw_train_data,
-            train_data=current_train,
             selected_features=selected_features,
             selection_results=selection_results,
             tuning_history=tuning_history,

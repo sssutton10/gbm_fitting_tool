@@ -9,6 +9,7 @@ import polars as pl
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.evaluation.metrics import poisson_deviance, gamma_deviance, rmse, mae
 from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
+from ins_gbm.preprocessing.chain import fit_transform_chain
 
 
 _METRIC_FN = {
@@ -140,33 +141,15 @@ class HyperparameterTuner:
                 train_data = slice_model_data(data, train_idx)
                 val_data = slice_model_data(data, val_idx)
 
-                if encoder is not None:
-                    fitted_enc = encoder.fit(train_data.features, schema)
-                    train_data = train_data.with_features(
-                        fitted_enc.transform(train_data.features)
-                    )
-                    val_data = val_data.with_features(
-                        fitted_enc.transform(val_data.features)
-                    )
-
-                if selector is not None:
-                    fitted_sel = selector.fit(train_data)
-                    selected = fitted_sel.selected_features()
-                    train_data = train_data.with_features(
-                        train_data.features.select(selected)
-                    )
-                    val_data = val_data.with_features(
-                        val_data.features.select(selected)
-                    )
-
-                for prep in preprocessing_chain:
-                    fitted_pre = prep.fit(train_data.features, train_data.target)
-                    train_data = train_data.with_features(
-                        fitted_pre.transform(train_data.features)
-                    )
-                    val_data = val_data.with_features(
-                        fitted_pre.transform(val_data.features)
-                    )
+                transform_result = fit_transform_chain(
+                    train_data,
+                    encoder=encoder,
+                    selector=selector,
+                    preprocessing=preprocessing_chain,
+                    schema=schema,
+                )
+                train_data = transform_result.data
+                val_data = transform_result.chain.transform(val_data)
 
                 fitted_model = model.fit(train_data, params=params)
                 preds = fitted_model.predict(val_data, prediction_type="response")

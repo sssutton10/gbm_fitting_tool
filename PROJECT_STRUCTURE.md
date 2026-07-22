@@ -805,7 +805,9 @@ Important fields:
 
 - `fitted_model`: the final `FittedModel`.
 - `recipe`: the original `ModelRecipe` object.
-- `train_data`: transformed training data as seen by the fitted model.
+- `raw_train_data`: reusable raw training data retained for OOF ensemble fits.
+- `train_data`: non-cached property that reconstructs the transformed training
+  data only when explicitly accessed.
 - `selected_features`: selected feature names, if selection was used.
 - `selection_results`: per-stage importance rankings and selected columns for a
   staged importance selector.
@@ -835,8 +837,8 @@ Pitfalls:
   was used, pass raw feature columns, not already encoded features.
 - `FittedPipeline.predict_raw()` creates a placeholder target. It does not
   replace the need to provide exposure for Poisson expected claim count scoring.
-- `train_data` is transformed data. Holdouts are never stored on
-  `FittedPipeline`; each call to `.evaluate()` returns an independent report.
+- Accessing `train_data` constructs transformed data; the result is not stored
+  on `FittedPipeline`. Holdouts are also never stored on the pipeline itself.
 
 ## Hyperparameter Tuning
 
@@ -1489,9 +1491,10 @@ code. Import most classes from their concrete modules.
 
 ### Treating `FittedPipeline.train_data` as Raw Data
 
-`FittedPipeline.train_data` is transformed
-model-ready frames. If an encoder, selector, or reducer was used, these are not
-the raw parquet features.
+`FittedPipeline.train_data` reconstructs a transformed model-ready frame on
+each access. If an encoder, selector, or reducer was used, it is not the raw
+parquet frame and callers should avoid retaining it when memory is constrained.
+Use `raw_train_data` for the shared raw reference.
 
 ### Passing Transformed Data to `FittedPipeline.predict()`
 

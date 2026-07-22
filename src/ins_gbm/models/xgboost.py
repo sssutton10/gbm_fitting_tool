@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
@@ -25,7 +26,9 @@ class XGBoostModel:
 
     Missing values
     --------------
-    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    With no encoder, expects numeric features ready for model fitting. When an
+    encoder is supplied to :meth:`fit`, raw features are encoded at fit time.
+    Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Both ``DMatrix`` calls (train and predict) declare ``missing=_NUMERIC_FILL``
     so XGBoost treats that sentinel as missing and applies its sparse-aware
     split-finding rather than treating it as a real value.
@@ -58,8 +61,20 @@ class XGBoostModel:
         self,
         data: ModelData,
         params: Optional[dict] = None,
+        *,
+        feature_names: Optional[list[str]] = None,
+        encoder: Optional[object] = None,
+        preprocessing: Optional[list[object]] = None,
     ) -> FittedModel:
         import xgboost as xgb
+
+        transform_result = fit_transform_chain(
+            data,
+            feature_names=feature_names,
+            encoder=encoder,
+            preprocessing=preprocessing,
+        )
+        data = transform_result.data
 
         p = dict(params or {})
         p.setdefault("objective", _XGB_OBJECTIVE[self.objective])
@@ -140,4 +155,5 @@ class XGBoostModel:
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,
+            transform_chain=transform_result.chain,
         )

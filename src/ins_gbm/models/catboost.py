@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
@@ -38,7 +39,9 @@ class CatBoostModel:
 
     Missing values
     --------------
-    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    With no encoder, expects numeric features ready for model fitting. When an
+    encoder is supplied to :meth:`fit`, raw features are encoded at fit time.
+    Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Pool``, the wrapper converts that sentinel back to
     ``NaN`` so CatBoost can apply its native missing-value handling.
     """
@@ -68,8 +71,20 @@ class CatBoostModel:
         self,
         data: ModelData,
         params: Optional[dict] = None,
+        *,
+        feature_names: Optional[list[str]] = None,
+        encoder: Optional[object] = None,
+        preprocessing: Optional[list[object]] = None,
     ) -> FittedModel:
         from catboost import CatBoostRegressor, Pool
+
+        transform_result = fit_transform_chain(
+            data,
+            feature_names=feature_names,
+            encoder=encoder,
+            preprocessing=preprocessing,
+        )
+        data = transform_result.data
 
         p = dict(params or {})
         p.setdefault("loss_function", _CB_OBJECTIVE[self.objective])
@@ -99,6 +114,13 @@ class CatBoostModel:
 
         model = CatBoostRegressor(**p)
         model.fit(pool)
+
+        # LossFunctionChange normally requires the training Pool. Cache its
+        # compact result now so the fitted wrapper does not retain that matrix.
+        loss_function_importance = model.get_feature_importance(
+            data=pool,
+            type="LossFunctionChange",
+        )
 
         feature_names = list(data.feature_names)
         objective = self.objective
@@ -143,9 +165,10 @@ class CatBoostModel:
                     "'FeatureImportance', 'PredictionValuesChange', "
                     "'LossFunctionChange'"
                 )
-            scores = model.get_feature_importance(
-                data=pool if importance_type == "LossFunctionChange" else None,
-                type=importance_type,
+            scores = (
+                loss_function_importance
+                if importance_type == "LossFunctionChange"
+                else model.get_feature_importance(type=importance_type)
             )
             return pl.DataFrame({"feature": feature_names, "importance": scores.astype(float).tolist()})
 
@@ -157,4 +180,5 @@ class CatBoostModel:
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,
+            transform_chain=transform_result.chain,
         )

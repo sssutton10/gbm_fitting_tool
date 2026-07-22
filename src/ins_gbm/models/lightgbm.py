@@ -8,6 +8,7 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
 
@@ -25,7 +26,9 @@ class LightGBMModel:
 
     Missing values
     --------------
-    Expects numeric features pre-filled with ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    With no encoder, expects numeric features ready for model fitting. When an
+    encoder is supplied to :meth:`fit`, raw features are encoded at fit time.
+    Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Dataset``, the wrapper converts that sentinel back
     to ``NaN`` so LightGBM can apply its native missing-value branch logic
     (learns the optimal direction at each split).
@@ -58,8 +61,20 @@ class LightGBMModel:
         self,
         data: ModelData,
         params: Optional[dict] = None,
+        *,
+        feature_names: Optional[list[str]] = None,
+        encoder: Optional[object] = None,
+        preprocessing: Optional[list[object]] = None,
     ) -> FittedModel:
         import lightgbm as lgb
+
+        transform_result = fit_transform_chain(
+            data,
+            feature_names=feature_names,
+            encoder=encoder,
+            preprocessing=preprocessing,
+        )
+        data = transform_result.data
 
         p = dict(params or {})
         p.setdefault("objective", _LGB_OBJECTIVE[self.objective])
@@ -88,7 +103,7 @@ class LightGBMModel:
             init_score=init_score,
             weight=sample_weight,
             feature_name=list(data.feature_names),
-            free_raw_data=False,
+            free_raw_data=True,
         )
 
         booster = lgb.train(
@@ -154,4 +169,5 @@ class LightGBMModel:
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,
+            transform_chain=transform_result.chain,
         )
