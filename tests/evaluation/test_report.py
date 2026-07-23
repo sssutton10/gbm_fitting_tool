@@ -23,3 +23,16 @@ def test_compare_does_not_accept_redundant_evaluation_argument(poisson_parquet):
     report = EvaluationReport.compare({"a": (fitted, data, data), "b": (fitted, data, data)})
     assert report.is_comparison_mode
     assert set(report.metrics()["model"].unique()) == {"a", "b"}
+    assert "double_lift_score" in report.metrics()["metric"]
+    assert report.double_lift_score() == 0.0
+    assert report.plot_double_lift() is not None
+
+
+def test_named_model_comparison_exports_double_lift(poisson_parquet, tmp_path):
+    data, fitted = _fitted(poisson_parquet)
+    report = EvaluationReport.compare({
+        "a": (fitted, data, data),
+        "b": (fitted, data, data),
+    })
+    report.export(str(tmp_path))
+    assert os.path.exists(tmp_path / "double_lift_a_vs_b.png")

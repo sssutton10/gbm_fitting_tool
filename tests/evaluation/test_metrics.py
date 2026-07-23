@@ -7,6 +7,8 @@ from ins_gbm.evaluation.metrics import (
     normalized_gini,
     rmse,
     mae,
+    double_lift_score,
+    double_lift_table,
     METRIC_DIRECTIONS,
     compute_metrics,
 )
@@ -132,6 +134,41 @@ def test_mae_manual():
     assert mae(actual, pred) == pytest.approx(1.0)
 
 
+# ── Double lift ────────────────────────────────────────────────────────────────
+
+def test_double_lift_score_matches_reference_absolute_definition():
+    table = pl.DataFrame({
+        "actual": [1.0, 3.0],
+        "model1": [2.0, 1.0],
+        "model2": [1.0, 2.0],
+    })
+    # (|2-1| - |1-1|) + (|1-3| - |2-3|) = 2
+    assert double_lift_score(table) == pytest.approx(2.0)
+
+
+def test_double_lift_score_positive_favors_second_model():
+    actual = pl.Series([1.0, 2.0, 3.0, 4.0])
+    model1 = pl.Series([2.0, 3.0, 4.0, 5.0])
+    model2 = actual
+    table = double_lift_table(
+        actual,
+        model1,
+        model2,
+        weights=pl.Series([1.0, 1.0, 1.0, 1.0]),
+        n_bins=2,
+    )
+    assert double_lift_score(table) > 0
+
+
+def test_double_lift_score_relative_definition():
+    table = pl.DataFrame({
+        "actual": [2.0, 4.0],
+        "model1": [1.0, 2.0],
+        "model2": [2.0, 4.0],
+    })
+    assert double_lift_score(table, deviation="relative") == pytest.approx(2.0)
+
+
 # ── compute_metrics and METRIC_DIRECTIONS ──────────────────────────────────
 
 def test_compute_metrics_poisson_returns_four_metrics():
@@ -231,3 +268,4 @@ def test_metric_directions_has_all_keys():
     assert METRIC_DIRECTIONS["gamma_deviance"] == "lower"
     assert METRIC_DIRECTIONS["rmse"] == "lower"
     assert METRIC_DIRECTIONS["mae"] == "lower"
+    assert METRIC_DIRECTIONS["double_lift_score"] == "lower"

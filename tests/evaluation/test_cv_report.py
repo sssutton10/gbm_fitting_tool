@@ -85,6 +85,43 @@ def test_run_passes_recipe_params_to_each_fold(poisson_raw, monkeypatch):
     assert received_params == [params, params, params]
 
 
+def test_run_selects_features_without_losing_special_columns(
+    poisson_raw,
+    monkeypatch,
+):
+    bench = (poisson_raw["x1"].abs() + 0.1).alias("bench_pred")
+    folds = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
+    raw = poisson_raw.with_columns(bench, folds)
+    schema = infer_schema(raw, ["x1", "x3"])
+    data = ModelData(
+        features=raw.select(["x1", "x3", "bench_pred", "fold_id"]),
+        target=raw["claim_count"],
+        exposure=raw["exposure"],
+        weight=None,
+        feature_names=["x1", "x3", "bench_pred", "fold_id"],
+        schema=schema,
+        objective="poisson",
+    ).validate()
+    fitted_features = []
+    original_fit = LightGBMModel.fit
+
+    def recording_fit(self, fold_data, params=None):
+        fitted_features.append(fold_data.feature_names)
+        return original_fit(self, fold_data, params=params)
+
+    monkeypatch.setattr(LightGBMModel, "fit", recording_fit)
+    result = CrossValidationReport(
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
+        data=data,
+        benchmark_col="bench_pred",
+        fold_col="fold_id",
+    ).run(feature_names=["x1"])
+
+    assert fitted_features == [["x1"], ["x1"], ["x1"]]
+    assert result.feature_names == ["x1"]
+    assert result.predictions.columns == ["gbm", "benchmark"]
+
+
 def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):
     fold_series = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(fold_series)
@@ -159,6 +196,9 @@ def test_benchmark_col_adds_benchmark_rows(poisson_raw):
     models_in_metrics = result.fold_metrics["model"].unique().sort().to_list()
     assert "benchmark" in models_in_metrics
     assert "gbm" in models_in_metrics
+    assert "double_lift_score" in result.fold_metrics["metric"]
+    assert np.isfinite(result.double_lift_score())
+    assert result.plot_double_lift() is not None
 
 
 def test_n_folds_less_than_2_raises(poisson_raw):

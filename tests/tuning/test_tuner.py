@@ -10,6 +10,25 @@ from ins_gbm.preprocessing.steps import PreprocessingStep
 from ins_gbm.tuning.tuner import HyperparameterTuner
 
 
+class _RecordingModel:
+    objective = "poisson"
+
+    def __init__(self):
+        self.fit_feature_names = []
+
+    def default_search_space(self):
+        return {}
+
+    def fit(self, data, params=None):
+        self.fit_feature_names.append(list(data.feature_names))
+
+        class Fitted:
+            def predict(self, validation_data, prediction_type="response"):
+                return pl.Series([1.0] * validation_data.n_rows)
+
+        return Fitted()
+
+
 # ── Basic return types ──────────────────────────────────────────────────────────
 
 def test_tuner_returns_dict_and_dataframe(poisson_parquet):
@@ -42,6 +61,91 @@ def test_tuner_history_row_count_equals_n_trials(poisson_parquet):
     tuner = HyperparameterTuner(n_trials=4, cv_folds=2, seed=42)
     _, history = tuner.tune(data, LightGBMModel(objective="poisson"))
     assert len(history) == 4
+
+
+def test_tuner_selects_runtime_feature_subset(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    model = _RecordingModel()
+
+    HyperparameterTuner(n_trials=1, cv_folds=2).tune(
+        data,
+        model,
+        feature_names=["x3"],
+    )
+
+    assert model.fit_feature_names == [["x3"], ["x3"]]
+
+
+def test_tuner_feature_subset_filters_explicit_encoder_schema(poisson_parquet):
+    from ins_gbm.data.schema import FeatureSchema
+    from ins_gbm.preprocessing.encoder import OneHotEncoder
+
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    model = _RecordingModel()
+    schema = FeatureSchema(
+        numeric=["x1", "x3"],
+        categorical=[],
+        ordinal=[],
+        passthrough=[],
+    )
+
+    HyperparameterTuner(n_trials=1, cv_folds=2).tune(
+        data,
+        model,
+        encoder=OneHotEncoder(),
+        schema=schema,
+        feature_names=["x3"],
+    )
+
+    assert model.fit_feature_names == [["x3"], ["x3"]]
+
+
+def test_tuner_passes_parallel_job_count_to_optuna(
+    poisson_parquet,
+    monkeypatch,
+):
+    import optuna
+
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    observed_n_jobs = []
+    original_optimize = optuna.study.Study.optimize
+
+    def recording_optimize(study, objective, *args, **kwargs):
+        observed_n_jobs.append(kwargs["n_jobs"])
+        return original_optimize(study, objective, *args, **kwargs)
+
+    monkeypatch.setattr(optuna.study.Study, "optimize", recording_optimize)
+    _, history = HyperparameterTuner(
+        n_trials=4,
+        cv_folds=2,
+        n_jobs=2,
+    ).tune(data, _RecordingModel())
+
+    assert observed_n_jobs == [2]
+    assert len(history) == 4
+
+
+@pytest.mark.parametrize("n_jobs", [0, -2, True, 1.5])
+def test_tuner_rejects_invalid_n_jobs(poisson_parquet, n_jobs):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+    )
+    with pytest.raises(ValueError, match="n_jobs"):
+        HyperparameterTuner(
+            n_trials=1,
+            cv_folds=2,
+            n_jobs=n_jobs,
+        ).tune(data, _RecordingModel())
 
 
 # ── Best params ─────────────────────────────────────────────────────────────────

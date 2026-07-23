@@ -72,29 +72,25 @@ def plot_double_lift(
     output_path: Optional[str] = None,
 ) -> "matplotlib.figure.Figure":
     import matplotlib.pyplot as plt
+    from ins_gbm.evaluation.metrics import double_lift_table
 
-    y = _to_numpy(actual)
-    pa = _to_numpy(predicted_a)
-    pb = _to_numpy(predicted_b)
-    w = _to_numpy(weights) if weights is not None else None
-
-    # Sort by ratio of predictions
-    ratio = np.log(pa / (pb + 1e-15))
-    order = np.argsort(ratio)
-    y_s, pa_s, pb_s = y[order], pa[order], pb[order]
-    wt = w[order] if w is not None else np.ones(len(y))
-
-    bins = np.array_split(np.arange(len(y_s)), n_bins)
-    bin_labels = np.arange(1, n_bins + 1)
-    avg_actual = np.array([np.average(y_s[b], weights=wt[b]) for b in bins])
-    avg_a = np.array([np.average(pa_s[b], weights=wt[b]) for b in bins])
-    avg_b = np.array([np.average(pb_s[b], weights=wt[b]) for b in bins])
+    summary = double_lift_table(
+        actual,
+        predicted_a,
+        predicted_b,
+        weights=weights,
+        n_bins=n_bins,
+    )
+    bin_labels = summary["bucket"].to_numpy()
+    avg_actual = summary["actual"].to_numpy()
+    avg_a = summary["model1"].to_numpy()
+    avg_b = summary["model2"].to_numpy()
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(bin_labels, avg_actual, "o-", label="Actual", color="black")
     ax.plot(bin_labels, avg_a, "s--", label=labels[0], color="steelblue")
     ax.plot(bin_labels, avg_b, "^--", label=labels[1], color="darkorange")
-    ax.set_xlabel("Decile (sorted by A/B ratio)")
+    ax.set_xlabel("Bucket (sorted by B/A ratio)")
     ax.set_ylabel("Mean value")
     ax.set_title("Double Lift Chart")
     ax.legend()

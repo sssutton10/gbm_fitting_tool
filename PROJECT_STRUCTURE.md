@@ -17,7 +17,8 @@ At a high level, the tool does this:
 
 1. Load a policy-level parquet file into a `ModelData` object.
 2. Validate basic target, exposure, weight, offset, fold, and comparison fields.
-3. Optionally tune model hyperparameters with fold-local cross-validation.
+3. Optionally select a raw-feature subset and tune model hyperparameters with
+   fold-local cross-validation.
 4. Fit feature preparation steps and the model on all supplied training rows.
 5. Evaluate an explicitly supplied holdout with the fitted artifacts.
 6. Optionally export reports, persist the fitted pipeline, or combine fitted
@@ -31,8 +32,8 @@ src/ins_gbm/
 
 The package name is `ins_gbm`, not `gbm_fitting`.
 
-The root README is intentionally minimal. The deeper implementation details are
-in the source tree, tests, and this document.
+The root README is a quick-start guide. Deeper implementation details are in
+the source tree, tests, and this document.
 
 ## Top-Level Repository Layout
 
@@ -84,6 +85,9 @@ Optional extras declared in `pyproject.toml`:
 - `umap`: installs UMAP.
 - `all`: installs all optional modeling and explainability dependencies.
 - `dev`: installs pytest-related development dependencies.
+
+The `explain` extra currently installs SHAP for downstream use; this package
+does not currently expose a SHAP-specific API.
 
 Common local pitfall: the path contains a space. Quote paths in shell commands
 when needed.
@@ -268,6 +272,8 @@ Important methods:
   `self`.
 - `with_features(features)`: returns a copy with new features and updated
   `feature_names`.
+- `select_features(feature_names)`: returns an ordered raw-feature subset,
+  filters the schema to the same names, and preserves row-level fields.
 - `with_offset(offset)`: returns a copy with a new offset series.
 - `slice_model_data(data, indices)`: returns a row-sliced `ModelData`, including
   optional `offset`, `cv_fold`, and `comparisons` fields.
@@ -280,16 +286,18 @@ Validation rules currently implemented:
 - If `exposure` is supplied, it must be non-null and positive.
 - Poisson objective requires exposure and non-negative target values.
 - Gamma objective requires strictly positive target values.
-- `offset`, if supplied, must match row count, be numeric, non-null, and finite.
+- `offset`, if supplied, must match row count, be numeric, non-null, and not
+  contain infinity.
 - `cv_fold`, if supplied, must match row count, be integer, non-null, and have
   at least two unique values.
 - `comparisons`, if supplied, must match row count, contain numeric columns, and
   every value must be strictly positive.
 
-Important validation pitfall: the current `validate()` implementation does not
-explicitly reject null `target` or null `weight` values. Objective checks may
-still catch some bad target data, but callers should clean these fields before
-constructing `ModelData`.
+Important validation pitfall: `validate()` does not comprehensively enforce
+finite, non-null values for every row-level field. In particular, null targets,
+null weights, null comparison predictions, `NaN` values, and negative weights
+are not all rejected. Objective checks may still catch some bad data, but
+callers should clean these fields before constructing `ModelData`.
 
 ### `load_model_data`
 
@@ -439,8 +447,8 @@ encoded first.
 `ModelRecipe.preprocessing` accepts a list of preprocessors. The pipeline fits
 and applies every item in that ordered chain after encoding and selection; the
 same complete chain is refit on each training fold during tuning, cross-
-validation, blending, and stacking. This preserves leakage isolation for every
-step, including supervised reducers such as PLS.
+validation, OOF blending, and stacking. This preserves leakage isolation for
+every step, including supervised reducers such as PLS.
 
 `PreprocessingStep` in `preprocessing/steps.py` is the preferred wrapper when
 a reducer should affect only selected columns. It replaces its input columns
@@ -508,7 +516,7 @@ The usual pattern is a shallow, fast screening learner followed by a more
 realistic tree configuration for final pruning. Stage learner parameters remain
 fixed during hyperparameter tuning; Optuna tunes only the final recipe model.
 The selector is refit independently on fold-training data in tuning,
-cross-validation, blending, and stacking.
+cross-validation, OOF blending, and stacking.
 
 `FittedStagedImportanceSelector` exposes every stage's ranking DataFrame with
 `feature`, `importance`, `rank`, and `selected` columns. `FittedPipeline` keeps
@@ -578,7 +586,7 @@ Important types:
 Every model wrapper should provide:
 
 - `objective`
-- `fit(data, params=None)`
+- `fit(data, params=None, *, feature_names=None, encoder=None, preprocessing=None)`
 - `default_search_space()`
 - `capabilities()`
 
@@ -593,6 +601,8 @@ Every model wrapper should provide:
 - feature names.
 - a `predict_fn` closure.
 - an `importance_fn` closure.
+- an optional fitted transform chain for direct model fits that supplied
+  feature selection, encoding, or preprocessing.
 
 The closures are why persistence uses `cloudpickle`.
 
@@ -702,7 +712,7 @@ This is a benchmark model, not a true GLM-style frequency or severity wrapper.
 Poisson behavior:
 
 - If exposure is present, fits on claim rate: `target / exposure`.
-- Uses exposure as sample weight.
+- Uses exposure as sample weight, multiplied by `data.weight` when supplied.
 - `response` multiplies predicted rate by exposure.
 - `rate` returns predicted rate.
 - `link` returns `log(rate clipped above zero)`.
@@ -761,10 +771,11 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 `ModelPipeline.run()` executes in this order:
 
-1. Optionally tune hyperparameters with fold-local cross-validation fitting.
-2. Fit encoder, feature selection, the full ordered preprocessing chain, and
+1. Optionally restrict the raw input to `feature_names`.
+2. Optionally tune hyperparameters with fold-local cross-validation fitting.
+3. Fit encoder, feature selection, the full ordered preprocessing chain, and
    model on all supplied data.
-3. Build reproducibility metadata and return `FittedPipeline`.
+4. Build reproducibility metadata and return `FittedPipeline`.
 
 Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
 caller-provided final holdout. That holdout is never used for tuning, selector
@@ -790,6 +801,11 @@ self.recipe.tuning.tune(
 The full preprocessing chain is fit and applied on each fold's training data,
 then applied to that fold's validation data.
 
+When the pipeline is started with `ModelPipeline.run(feature_names=...)`, that
+ordered raw-feature subset becomes `train_data` before tuning begins, so every
+tuning fold and the final full-data fit use the same inputs. Direct tuner calls
+can instead pass `feature_names` to `HyperparameterTuner.tune(...)`.
+
 Pitfalls:
 
 - Preprocessors are an ordered transform chain, not concurrent jobs.
@@ -805,14 +821,15 @@ Important fields:
 
 - `fitted_model`: the final `FittedModel`.
 - `recipe`: the original `ModelRecipe` object.
-- `raw_train_data`: reusable raw training data retained for OOF ensemble fits.
+- `input_feature_names`: ordered raw inputs selected for this run.
+- `raw_train_data`: reusable selected raw training data retained for OOF
+  ensemble fits.
 - `train_data`: non-cached property that reconstructs the transformed training
   data only when explicitly accessed.
 - `selected_features`: selected feature names, if selection was used.
 - `selection_results`: per-stage importance rankings and selected columns for a
   staged importance selector.
 - `tuning_history`: Optuna history DataFrame, if tuning was used.
-- `report`: `EvaluationReport`.
 - `encoder`: fitted encoder, if used.
 - `preprocessors`: fitted preprocessors.
 - `metadata`: reproducibility metadata.
@@ -821,6 +838,7 @@ Important methods:
 
 - `predict(data, prediction_type="response")`
 - `predict_raw(features, exposure=None, weight=None, prediction_type="response")`
+- `evaluate(holdout_data)`
 
 Use `result.predict(holdout_data)` for raw holdout data, or
 `result.evaluate(holdout_data)` to produce metrics and plots.
@@ -855,6 +873,7 @@ tuner = HyperparameterTuner(
     metric="poisson_deviance",
     seed=42,
     use_data_folds=False,
+    n_jobs=4,
 )
 ```
 
@@ -884,14 +903,36 @@ For each Optuna trial:
 The tuner returns:
 
 ```python
-best_params, history = tuner.tune(...)
+best_params, history = tuner.tune(
+    data,
+    model,
+    feature_names=["x1", "x3"],
+)
 ```
 
-`history` has one row per completed trial and includes:
+`feature_names` is an ordered raw-feature subset applied before any fold-local
+encoder, selector, or preprocessor. An explicit encoder schema is restricted
+to the same subset.
+
+`n_jobs` controls concurrent Optuna trials. The default is `1`; use `-1` for
+all available CPUs. Parallel trials run in worker threads, which works well
+with LightGBM, XGBoost, CatBoost, and NumPy operations that release the Python
+GIL.
+
+`history` has one row per trial with a recorded objective value and includes:
 
 - `trial`
 - `value`
 - one column per tuned hyperparameter
+
+Pitfalls:
+
+- Parallel TPE trial scheduling can produce different suggestions between
+  runs even with the same seed.
+- Avoid CPU oversubscription: if `n_jobs` runs several trials concurrently,
+  consider limiting each model's own thread count.
+- Each concurrent trial holds its fold data and fitted transforms in memory,
+  so increase `n_jobs` conservatively on very large datasets.
 
 ### Search Spaces
 
@@ -925,6 +966,8 @@ Metric functions:
 - `normalized_gini(actual, predicted, weights=None)`
 - `rmse(actual, predicted, weights=None)`
 - `mae(actual, predicted, weights=None)`
+- `double_lift_table(actual, predicted_a, predicted_b, weights=None, n_bins=10)`
+- `double_lift_score(dl_table, deviation="absolute")`
 - `compute_metrics(...)`
 
 `compute_metrics()` returns a DataFrame with:
@@ -934,8 +977,13 @@ Metric functions:
 - rmse
 - mae
 
-For Poisson, exposure is used as the deviance and Gini weight. For Gamma, weight
-is used.
+For Poisson, exposure is used as the deviance and Gini weight; when a separate
+model weight is present, the effective weight is `exposure * weight`. For
+Gamma, `weight` is used directly.
+
+Report-level double-lift calculations compare Poisson rates using
+`exposure * weight` as the effective weight when both are present. A positive
+`double_lift_score` favors model 2; a negative score favors model 1.
 
 Pitfalls:
 
@@ -961,9 +1009,15 @@ Primary methods:
 - `plot_calibration(output_path=None)`
 - `plot_feature_importance(output_path=None)`
 - `plot_double_lift(name, output_path=None)`
+- `double_lift_score(name, other_name=None, n_bins=10, deviation="absolute")`
 - `export(output_dir)`
 
-`export(output_dir)` writes:
+`plot_double_lift()` also works in named-model comparison mode. Pass
+`name`/`other_name`, or omit both when the report contains exactly two models.
+Comparison metrics include `double_lift_score`; positive values favor the
+second model and negative values favor the first.
+
+For a single-model report, `export(output_dir)` writes:
 
 - `metrics.csv`
 - `lift.png`
@@ -971,6 +1025,13 @@ Primary methods:
 - `calibration.png`
 - `feature_importance.png`
 - double-lift plots when comparison predictions exist
+
+Named-model comparison reports write `metrics.csv` plus one double-lift image
+for every model pair; they do not write the single-model lift, calibration, or
+feature-importance images.
+
+Named-model double lift requires aligned evaluation targets, exposures, and
+weights with the same objective.
 
 External comparison predictions can come from `ModelData.comparisons`. The
 caller-provided holdout supplies those columns to `EvaluationReport` as named
@@ -990,7 +1051,7 @@ result = CrossValidationReport(
     benchmark_col=None,
     fold_col=None,
     seed=42,
-).run()
+).run(feature_names=["x1", "x3"])
 ```
 
 Returns `CVResult`:
@@ -998,6 +1059,16 @@ Returns `CVResult`:
 - `fold_metrics`: columns `fold`, `model`, `metric`, `value`.
 - `summary`: columns `model`, `metric`, `mean`, `std`.
 - `fold_col`: name of fold column if predefined feature folds were used.
+- `predictions`: out-of-fold predictions used for comparison charts.
+- `actual`, `exposure`, `weight`, and `objective`: aligned row-level context for
+  the stored out-of-fold predictions.
+- `feature_names`: the ordered runtime feature subset.
+
+`run(feature_names=...)` selects raw predictors without removing a
+`benchmark_col` or `fold_col` from its special role. In benchmark mode,
+`CVResult.plot_double_lift()` plots the OOF GBM and benchmark predictions,
+`CVResult.double_lift_score()` returns their signed score, and fold/summary
+metrics include `double_lift_score`.
 
 Fold modes:
 
@@ -1009,6 +1080,9 @@ Benchmark mode:
 - `benchmark_col` can name a positive prediction column in `data.features`.
 - The benchmark column is dropped before fitting the GBM recipe.
 - Fold metrics include both `gbm` and `benchmark` rows.
+
+`CrossValidationReport` applies recipe transforms and fits with
+`recipe.params`; it does not start nested `recipe.tuning`.
 
 Important distinction: `HyperparameterTuner(use_data_folds=True)` uses
 `ModelData.cv_fold`. `CrossValidationReport(fold_col=...)` expects the fold
@@ -1031,7 +1105,15 @@ The output has one row per metric, one column per report name, and a `preferred`
 column. Direction comes from `METRIC_DIRECTIONS`:
 
 - higher is better for `gini`.
-- lower is better for deviance, RMSE, and MAE.
+- lower is better for deviance, RMSE, MAE, and `double_lift_score` when the
+  report's focal model is model 1.
+
+Single evaluation values are formatted to four decimals. CV values are
+formatted as `mean +/- std`.
+
+When a single-model `EvaluationReport` also contains external comparison
+predictions, `compare_reports()` compares the fitted model's metrics rather
+than the benchmark rows.
 
 Pitfall: comparison-mode `EvaluationReport` objects from
 `EvaluationReport.compare()` cannot be passed into `compare_reports()`. Pass
@@ -1102,8 +1184,8 @@ Pitfalls:
   compatible row order. The code does not perform deep compatibility checks.
 - OOF refits call `pipeline.recipe.model.fit(current_train)` without explicitly
   passing tuned best params or `recipe.params`.
-- Ensemble evaluation uses the caller-provided holdout; the first base
-  pipeline's transformed training data is retained as report context.
+- Ensemble evaluation uses only the caller-provided holdout and does not retain
+  training data on the resulting `EvaluationReport`.
 
 ### EnsemblePipeline
 
@@ -1123,10 +1205,12 @@ ensemble_result = EnsemblePipeline(
 Returns `EnsembleResult`:
 
 - `ensemble`: fitted blending or stacking ensemble.
-- `report`: `EvaluationReport` using a proxy `FittedModel`.
 - `base_pipelines`: base fitted pipelines.
 
-The proxy model lets `EvaluationReport` call `predict()` on the ensemble.
+`EnsembleResult.predict(data)` scores raw data. Call
+`EnsembleResult.evaluate(holdout_data)` to create an `EvaluationReport`; the
+method builds a proxy `FittedModel` so the standard report machinery can call
+the ensemble.
 
 ## Persistence
 
@@ -1171,10 +1255,12 @@ Defined in `persistence/metadata.py`.
 `ReproducibilityMetadata` records:
 
 - package versions
-- random seeds
+- supplied split/tuning seeds
 - model params
 - fitted feature names
+- raw input feature names
 - selected features
+- staged-selection summaries, when present
 - objective
 - prediction scale
 
@@ -1204,18 +1290,16 @@ Types:
 - `progress`: callback that accepts a `ProgressEvent`.
 - `should_stop`: callback returning truthy when the run should be cancelled.
 
-Pipeline stages include:
+Pipeline-emitted stages are:
 
-- `split`
 - `tuning`
 - `encode`
 - `select`
 - `preprocess`
 - `fit`
-- `evaluate`
 
-The tuner also emits trial-level progress events when a progress callback is
-provided.
+The tuner emits `tuning` events when a progress callback is provided. The
+pipeline does not currently emit `split` or `evaluate` events.
 
 ## Common Usage Flows
 
@@ -1308,10 +1392,13 @@ recipe = ModelRecipe(
         cv_folds=5,
         metric="poisson_deviance",
         seed=42,
+        n_jobs=4,
     ),
 )
 
-result = ModelPipeline(data=data, recipe=recipe).run()
+result = ModelPipeline(data=data, recipe=recipe).run(
+    feature_names=["x1", "x3"],
+)
 history = result.tuning_history
 ```
 
@@ -1346,7 +1433,7 @@ cv_result = CrossValidationReport(
     data=data,
     n_folds=5,
     seed=42,
-).run()
+).run(feature_names=["x1", "x3"])
 
 fold_metrics = cv_result.fold_metrics
 summary = cv_result.summary
@@ -1398,12 +1485,14 @@ Major areas:
 - `tests/preprocessing/`: one-hot encoding and reducers.
 - `tests/models/`: base contracts and model wrapper behavior.
 - `tests/tuning/`: Optuna tuning and predefined folds.
-- `tests/selection/`: Boruta and importance pruning.
+- `tests/selection/`: Boruta, standalone importance pruning, and staged
+  importance selection.
 - `tests/evaluation/`: metrics, plots, reports, CV reports, comparison helpers.
 - `tests/ensemble/`: blending, stacking, and ensemble pipeline.
 - `tests/persistence/`: save/load behavior.
 - `tests/test_pipeline.py`: main pipeline behavior.
-- `tests/test_integration.py`: end-to-end flows and leakage checks.
+- `tests/test_integration.py`: end-to-end pipeline and explicit-evaluation
+  flows.
 - `tests/test_progress.py`: progress callbacks and cancellation.
 
 The fixtures in `tests/conftest.py` generate synthetic Poisson and Gamma data:
@@ -1422,10 +1511,12 @@ protocol:
 1. Add an unfitted dataclass with an `objective` field.
 2. Implement `capabilities()`.
 3. Implement `default_search_space()`.
-4. Implement `fit(data, params=None)`.
+4. Implement the `fit(...)` signature from `BaseModel`, including optional
+   runtime features and fit-time transforms.
 5. Convert `data.features.select(data.feature_names)` to the model's expected
    matrix format.
-6. Return a `FittedModel` with `predict_fn` and `importance_fn`.
+6. Return a `FittedModel` with `predict_fn`, `importance_fn`, and any fitted
+   transform chain.
 7. Add model-specific tests under `tests/models/`.
 
 Be explicit about:
@@ -1486,8 +1577,8 @@ Do not use `gbm_fitting` for this project.
 
 ### Assuming Root Package Exports Everything
 
-`src/ins_gbm/__init__.py` only exports progress-related types in the current
-code. Import most classes from their concrete modules.
+`src/ins_gbm/__init__.py` exposes `__version__` and progress-related types only.
+Import most classes from their concrete modules.
 
 ### Treating `FittedPipeline.train_data` as Raw Data
 
@@ -1529,12 +1620,6 @@ The caller owns holdout construction. Keep final holdout rows separate from
 the `ModelData` passed to `ModelPipeline.run()` and pass them only to
 `FittedPipeline.evaluate()`.
 
-### Leaving Group IDs in Model Features
-
-If `group_col` is used for splitting and also remains in `feature_names`, the
-model may train on that identifier. Remove it from the modeling features unless
-that is intentional.
-
 ### Using `ImportancePruner` Directly in `ModelRecipe.selection`
 
 `ImportancePruner` requires a fitted model. The pipeline selector hook does not
@@ -1562,8 +1647,10 @@ but they do not currently add the optional `ModelData.offset` series.
 
 ### Assuming Optional Dependencies Are Installed
 
-LightGBM, XGBoost, CatBoost, SHAP, and UMAP are optional extras. Install the
-right extras before using wrappers or reducers that need them.
+LightGBM, XGBoost, CatBoost, and UMAP are optional extras. Install the right
+extras before using wrappers or reducers that need them. SHAP is also declared
+as an optional dependency for downstream explainability work, but there is no
+package-level SHAP workflow at present.
 
 ### Mixing NaN and Null Missing Values
 
@@ -1584,9 +1671,9 @@ responsible for keeping that holdout untouched.
 
 ### Assuming Ensemble Inputs Are Validated Deeply
 
-The ensemble code expects fitted pipelines to be compatible. It uses the first
-pipeline's training data as report context. Make sure base pipelines share the
-same objective, row basis, and intended evaluation holdout.
+The ensemble code expects fitted pipelines to be compatible. Make sure base
+pipelines share the same objective, row basis, and intended evaluation
+holdout.
 
 ### Expecting Tuned Params in Ensemble OOF Refits
 

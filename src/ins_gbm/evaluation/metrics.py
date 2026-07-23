@@ -58,6 +58,26 @@ def _poisson_rate_metric_inputs(
     return actual / exposure, predicted / exposure, effective_weight
 
 
+def _double_lift_metric_inputs(
+    objective: Objective,
+    actual: pl.Series,
+    predicted_a: pl.Series,
+    predicted_b: pl.Series,
+    exposure: Optional[pl.Series],
+    weight: Optional[pl.Series],
+) -> tuple[pl.Series, pl.Series, pl.Series, Optional[pl.Series]]:
+    """Return consistently scaled comparison inputs for double-lift metrics."""
+    if objective == "poisson" and exposure is not None:
+        effective_weight = exposure if weight is None else exposure * weight
+        return (
+            actual / exposure,
+            predicted_a / exposure,
+            predicted_b / exposure,
+            effective_weight,
+        )
+    return actual, predicted_a, predicted_b, weight
+
+
 def gamma_deviance(
     actual: pl.Series,
     predicted: pl.Series,
@@ -145,6 +165,159 @@ def mae(
     return float(np.mean(residuals))
 
 
+def _double_lift_bucket_ids(
+    scores: np.ndarray,
+    weights: np.ndarray,
+    n_bins: int,
+) -> np.ndarray:
+    """Assign stable, approximately equal-weight double-lift buckets."""
+    if (
+        not isinstance(n_bins, int)
+        or isinstance(n_bins, bool)
+        or n_bins < 2
+        or n_bins > len(scores)
+    ):
+        raise ValueError(
+            f"n_bins must be an integer from 2 through {len(scores)}"
+        )
+
+    order = np.argsort(scores, kind="mergesort")
+    cumulative_midpoints = np.cumsum(weights[order]) - weights[order] / 2.0
+    raw_ids = np.floor(
+        cumulative_midpoints / weights.sum() * n_bins
+    ).astype(int)
+    raw_ids = np.clip(raw_ids, 0, n_bins - 1)
+
+    bucket_ids = np.empty(len(scores), dtype=int)
+    bucket_ids[order] = raw_ids + 1
+
+    # Concentrated weights can leave bucket numbers unused. Compact them so
+    # chart axes remain consecutive without changing bucket membership.
+    used = sorted(set(bucket_ids.tolist()))
+    remap = {old: new for new, old in enumerate(used, 1)}
+    return np.array([remap[item] for item in bucket_ids], dtype=int)
+
+
+def double_lift_table(
+    actual: pl.Series,
+    predicted_a: pl.Series,
+    predicted_b: pl.Series,
+    weights: Optional[pl.Series] = None,
+    n_bins: int = 10,
+) -> pl.DataFrame:
+    """Summarize two models in buckets ordered by the B/A prediction ratio.
+
+    Buckets are approximately equal-weight. ``model1`` is ``predicted_a`` and
+    ``model2`` is ``predicted_b``; this ordering also defines the sign of
+    :func:`double_lift_score`.
+    """
+    y = _to_numpy(actual)
+    model1 = _to_numpy(predicted_a)
+    model2 = _to_numpy(predicted_b)
+    if not (len(y) == len(model1) == len(model2)) or len(y) == 0:
+        raise ValueError(
+            "actual, predicted_a, and predicted_b must be non-empty and "
+            "have matching lengths"
+        )
+    if not (
+        np.all(np.isfinite(y))
+        and np.all(np.isfinite(model1))
+        and np.all(np.isfinite(model2))
+    ):
+        raise ValueError("double-lift inputs must contain only finite values")
+    if np.any(model1 == 0):
+        raise ValueError(
+            "predicted_a must not contain zero when computing a double-lift ratio"
+        )
+
+    if weights is None:
+        w = np.ones(len(y), dtype=np.float64)
+    else:
+        w = _to_numpy(weights)
+        if len(w) != len(y):
+            raise ValueError("weights must have the same length as actual")
+        if (
+            not np.all(np.isfinite(w))
+            or np.any(w < 0)
+            or w.sum() <= 0
+        ):
+            raise ValueError(
+                "weights must be finite, non-negative, and have a positive total"
+            )
+
+    ratio = model2 / model1
+    if not np.all(np.isfinite(ratio)):
+        raise ValueError(
+            "predicted_a and predicted_b must produce finite double-lift ratios"
+        )
+
+    bucket_ids = _double_lift_bucket_ids(ratio, w, n_bins)
+    rows: list[dict] = []
+    for bucket in sorted(set(bucket_ids.tolist())):
+        mask = bucket_ids == bucket
+        bucket_weight = float(w[mask].sum())
+        if bucket_weight <= 0:
+            continue
+        rows.append({
+            "bucket": bucket,
+            "actual": float(np.dot(y[mask], w[mask]) / bucket_weight),
+            "model1": float(np.dot(model1[mask], w[mask]) / bucket_weight),
+            "model2": float(np.dot(model2[mask], w[mask]) / bucket_weight),
+            "ratio_mean": float(np.dot(ratio[mask], w[mask]) / bucket_weight),
+            "weight": bucket_weight,
+        })
+    return pl.DataFrame(rows)
+
+
+def double_lift_score(
+    dl_table: pl.DataFrame,
+    deviation: Literal["absolute", "relative"] = "absolute",
+) -> float:
+    """Score model 2 against model 1 from a double-lift table.
+
+    The absolute score is ``sum(|model1 - actual| - |model2 - actual|)``.
+    Positive values favor model 2, negative values favor model 1, and zero is
+    a tie. Relative deviation applies the same comparison on ratio errors.
+    """
+    required = {"actual", "model1", "model2"}
+    missing = sorted(required - set(dl_table.columns))
+    if missing:
+        raise ValueError(
+            f"dl_table is missing required columns: {missing}"
+        )
+    if deviation not in {"absolute", "relative"}:
+        raise ValueError("deviation must be 'absolute' or 'relative'")
+
+    actual = _to_numpy(dl_table["actual"])
+    model1 = _to_numpy(dl_table["model1"])
+    model2 = _to_numpy(dl_table["model2"])
+    if (
+        len(actual) == 0
+        or not np.all(np.isfinite(actual))
+        or not np.all(np.isfinite(model1))
+        or not np.all(np.isfinite(model2))
+    ):
+        raise ValueError(
+            "dl_table actual and model columns must be finite and non-empty"
+        )
+
+    if deviation == "absolute":
+        return float(
+            (np.abs(model1 - actual) - np.abs(model2 - actual)).sum()
+        )
+
+    if np.any(np.abs(model1) < 1e-12) or np.any(np.abs(model2) < 1e-12):
+        raise ValueError(
+            "relative double-lift score requires non-zero model values"
+        )
+    return float(
+        (
+            np.abs(actual / model1 - 1.0)
+            - np.abs(actual / model2 - 1.0)
+        ).sum()
+    )
+
+
 Direction = Literal["higher", "lower"]
 METRIC_DIRECTIONS: dict[str, Direction] = {
     "gini": "higher",
@@ -152,6 +325,8 @@ METRIC_DIRECTIONS: dict[str, Direction] = {
     "gamma_deviance": "lower",
     "rmse": "lower",
     "mae": "lower",
+    # Negative values favor model 1, which is the report's focal model.
+    "double_lift_score": "lower",
 }
 
 
