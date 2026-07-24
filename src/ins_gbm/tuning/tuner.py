@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 import numpy as np
 import polars as pl
+from tqdm.auto import tqdm
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
@@ -70,6 +71,7 @@ class HyperparameterTuner:
     seed: int = 42
     use_data_folds: bool = False
     n_jobs: int = 1
+    show_progress_bar: bool = True
 
     def tune(
         self,
@@ -240,13 +242,20 @@ class HyperparameterTuner:
             return float(np.mean(fold_scores))
 
         optuna_callbacks = []
-        if progress is not None or should_stop is not None:
+        trial_progress = tqdm(
+            total=self.n_trials,
+            desc="Hyperparameter tuning",
+            unit="trial",
+            disable=not self.show_progress_bar,
+        )
+        if self.show_progress_bar or progress is not None or should_stop is not None:
             callback_lock = Lock()
 
             def _on_trial(study: Any, trial: Any) -> None:
                 # Optuna invokes callbacks from worker threads when n_jobs > 1.
                 # Serialize user callbacks and progress accounting.
                 with callback_lock:
+                    trial_progress.update()
                     if progress is not None and trial.value is not None:
                         finished = sum(
                             frozen.state.is_finished()
@@ -275,6 +284,8 @@ class HyperparameterTuner:
             )
         except PipelineCancelled:
             raise
+        finally:
+            trial_progress.close()
 
         rows = []
         for t in study.trials:

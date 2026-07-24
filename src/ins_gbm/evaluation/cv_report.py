@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import polars as pl
+from tqdm.auto import tqdm
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
@@ -123,6 +124,7 @@ class CrossValidationReport:
     benchmark_col: Optional[str] = None
     fold_col: Optional[str] = None
     seed: int = 42
+    show_progress_bar: bool = True
 
     def run(self, feature_names: Optional[list[str]] = None) -> CVResult:
         """Run CV, optionally using an ordered subset of raw predictor features."""
@@ -170,7 +172,14 @@ class CrossValidationReport:
         all_fold_rows: list[dict] = []
         oof_gbm = np.full(clean_data.n_rows, np.nan, dtype=np.float64)
 
-        for fold_id, (train_idx, held_idx) in zip(unique_folds, folds):
+        fold_progress = tqdm(
+            zip(unique_folds, folds),
+            total=len(folds),
+            desc="Cross-validation",
+            unit="fold",
+            disable=not self.show_progress_bar,
+        )
+        for fold_id, (train_idx, held_idx) in fold_progress:
             train_data = slice_model_data(clean_data, train_idx)
             held_data = slice_model_data(clean_data, held_idx)
 

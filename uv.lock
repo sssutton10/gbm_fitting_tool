@@ -431,6 +431,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -486,6 +487,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11" },
     { name = "shap", marker = "extra == 'all'", specifier = ">=0.44" },
     { name = "shap", marker = "extra == 'explain'", specifier = ">=0.44" },
+    { name = "tqdm", specifier = ">=4.66" },
     { name = "umap-learn", marker = "extra == 'all'", specifier = ">=0.5" },
     { name = "umap-learn", marker = "extra == 'umap'", specifier = ">=0.5" },
     { name = "xgboost", marker = "extra == 'all'", specifier = ">=2.0" },

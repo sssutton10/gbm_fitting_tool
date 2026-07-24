@@ -21,8 +21,32 @@ def test_progress_event_is_frozen():
 
 def test_tuner_progress_callback_fires(poisson_parquet):
     events = []
-    HyperparameterTuner(n_trials=2, cv_folds=2, seed=42).tune(_data(poisson_parquet), LightGBMModel(objective="poisson"), progress=events.append)
+    HyperparameterTuner(
+        n_trials=2,
+        cv_folds=2,
+        seed=42,
+        show_progress_bar=False,
+    ).tune(
+        _data(poisson_parquet),
+        LightGBMModel(objective="poisson"),
+        progress=events.append,
+    )
     assert len([event for event in events if event.stage == "tuning"]) == 2
+
+
+def test_tuner_progress_bar_shows_trial_count(poisson_parquet, capsys):
+    HyperparameterTuner(
+        n_trials=2,
+        cv_folds=2,
+        seed=42,
+    ).tune(
+        _data(poisson_parquet),
+        LightGBMModel(objective="poisson"),
+    )
+
+    stderr = capsys.readouterr().err
+    assert "Hyperparameter tuning" in stderr
+    assert "2/2" in stderr
 
 
 def test_pipeline_emits_fit_but_not_split_or_evaluate_events(poisson_parquet):

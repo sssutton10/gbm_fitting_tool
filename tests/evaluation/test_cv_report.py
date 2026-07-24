@@ -34,6 +34,20 @@ def test_run_returns_cv_result(poisson_raw):
     assert isinstance(result, CVResult)
 
 
+def test_run_progress_bar_shows_fold_count(poisson_raw, capsys):
+    data = _poisson_data(poisson_raw)
+    CrossValidationReport(
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
+        data=data,
+        n_folds=3,
+        seed=0,
+    ).run()
+
+    stderr = capsys.readouterr().err
+    assert "Cross-validation" in stderr
+    assert "3/3" in stderr
+
+
 def test_random_folds_fold_metrics_row_count(poisson_raw):
     data = _poisson_data(poisson_raw)
     result = CrossValidationReport(

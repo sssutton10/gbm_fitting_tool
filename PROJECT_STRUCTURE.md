@@ -874,6 +874,7 @@ tuner = HyperparameterTuner(
     seed=42,
     use_data_folds=False,
     n_jobs=4,
+    show_progress_bar=True,
 )
 ```
 
@@ -918,6 +919,9 @@ to the same subset.
 all available CPUs. Parallel trials run in worker threads, which works well
 with LightGBM, XGBoost, CatBoost, and NumPy operations that release the Python
 GIL.
+
+`show_progress_bar` displays completed trials and defaults to `True`. Set it to
+`False` for quiet batch runs.
 
 `history` has one row per trial with a recorded objective value and includes:
 
@@ -1433,6 +1437,7 @@ cv_result = CrossValidationReport(
     data=data,
     n_folds=5,
     seed=42,
+    show_progress_bar=True,
 ).run(feature_names=["x1", "x3"])
 
 fold_metrics = cv_result.fold_metrics
