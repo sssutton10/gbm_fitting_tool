@@ -50,7 +50,7 @@ src/ins_gbm/
 - **`ModelData`** — central data container (`features`, `target`, `exposure`, `weight`, `feature_names`, `schema`, `objective`). Call `.validate()` after construction. `.with_features(df)` returns a copy with new features + updated feature names; `.select_features(names)` returns a schema-filtered view while preserving all row-level fields.
 - **`FittedModel`** — wraps a trained model. Fields `predict_fn` and `importance_fn` are callables (NOT `_predict_fn` — leading underscore breaks dataclass `__init__`). `.predict(data, prediction_type)` where `prediction_type ∈ {"response", "rate", "link"}`.
 - **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). `preprocessing` accepts either legacy whole-frame preprocessors or `PreprocessingStep(name, preprocessor, feature_names)` for column-targeted transforms with passthrough. Cloneable; used by tuner and stacking for CV re-fits.
-- **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` contains every supplied training row after encoding, selection, and preprocessing; `raw_train_data` retains the selected raw inputs for fold refits. Call `.evaluate(holdout_data)` for explicit holdout metrics and plots.
+- **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` reconstructs every supplied training row after encoding, selection, and preprocessing; `raw_train_data` retains selected raw inputs in memory for fold refits but is omitted from persistence. Call `.evaluate(holdout_data)` for explicit holdout metrics and plots.
 
 ## Reusable Fits and Targeted Preprocessing
 
@@ -91,7 +91,14 @@ Uses `cloudpickle` (not standard `joblib`) to serialize `FittedPipeline` because
 from ins_gbm.persistence.io import save_pipeline, load_pipeline
 save_pipeline(result, "output/my_model")
 loaded = load_pipeline("output/my_model")
+loaded_for_oof = load_pipeline(
+    "output/my_model",
+    training_data=original_training_data,
+)
 ```
+
+Compact loads support prediction, evaluation, and importance. Reattach the
+original rows in their original order for `train_data` or OOF ensembles.
 
 ## Test Fixtures
 

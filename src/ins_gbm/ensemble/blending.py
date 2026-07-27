@@ -117,15 +117,20 @@ class BlendingEnsemble:
         """Re-fit each pipeline's recipe inside CV folds to get OOF predictions."""
         from sklearn.model_selection import KFold
 
-        ref_train = pipelines[0].raw_train_data
+        training_data = [
+            pipeline._require_raw_train_data() for pipeline in pipelines
+        ]
+        ref_train = training_data[0]
         n = ref_train.n_rows
         kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
         oof_preds = np.zeros((n, len(pipelines)))
 
-        for p_idx, pipeline in enumerate(pipelines):
+        for p_idx, (pipeline, pipeline_data) in enumerate(
+            zip(pipelines, training_data)
+        ):
             for train_idx, val_idx in kf.split(range(n)):
-                fold_train = slice_model_data(pipeline.raw_train_data, train_idx)
-                fold_val = slice_model_data(pipeline.raw_train_data, val_idx)
+                fold_train = slice_model_data(pipeline_data, train_idx)
+                fold_val = slice_model_data(pipeline_data, val_idx)
                 current_train, current_val = _apply_recipe_fold_transforms(
                     pipeline.recipe, fold_train, fold_val
                 )

@@ -822,8 +822,9 @@ Important fields:
 - `fitted_model`: the final `FittedModel`.
 - `recipe`: the original `ModelRecipe` object.
 - `input_feature_names`: ordered raw inputs selected for this run.
-- `raw_train_data`: reusable selected raw training data retained for OOF
-  ensemble fits.
+- `raw_train_data`: optional selected raw training data retained in memory for
+  OOF ensemble fits and omitted from compact persisted artifacts.
+- `input_schema`: compact raw-feature schema retained for scoring.
 - `train_data`: non-cached property that reconstructs the transformed training
   data only when explicitly accessed.
 - `selected_features`: selected feature names, if selection was used.
@@ -856,7 +857,8 @@ Pitfalls:
 - `FittedPipeline.predict_raw()` creates a placeholder target. It does not
   replace the need to provide exposure for Poisson expected claim count scoring.
 - Accessing `train_data` constructs transformed data; the result is not stored
-  on `FittedPipeline`. Holdouts are also never stored on the pipeline itself.
+  on `FittedPipeline`. A compactly loaded pipeline must have its original
+  training data reattached first. Holdouts are never stored on the pipeline.
 
 ## Hyperparameter Tuning
 
@@ -1232,7 +1234,7 @@ save_pipeline(result, "output/my_model")
 
 Artifacts written:
 
-- `pipeline.pkl`: full fitted pipeline via `cloudpickle`.
+- `pipeline.pkl`: fitted pipeline via `cloudpickle`, without raw training rows.
 - `metadata.json`: `ReproducibilityMetadata` as JSON.
 - `tuning_history.parquet`: only when tuning history exists.
 
@@ -1242,12 +1244,22 @@ Artifacts written:
 from ins_gbm.persistence.io import load_pipeline
 
 loaded = load_pipeline("output/my_model")
+
+# Reattach the original rows only for train_data or OOF ensemble fitting.
+loaded_for_oof = load_pipeline(
+    "output/my_model",
+    training_data=original_training_data,
+)
 ```
 
 Pitfalls:
 
 - Standard `pickle` and `joblib` are not used because `FittedModel` contains
   local prediction and importance closures.
+- Prediction, evaluation, and feature importance do not require training data.
+  Reattached rows must be the original training dataset in its original order.
+- A fitted UMAP reducer may retain training-derived matrices that its transform
+  implementation needs even though `raw_train_data` itself is omitted.
 - Loading is safest in an environment with compatible package versions.
 - `metadata.json` is useful for auditing but does not recreate the pipeline by
   itself.

@@ -64,7 +64,26 @@ predictions = model.predict(data)  # raw ModelData; fitted transforms replayed
 
 The expanded matrix is temporary. A fitted pipeline retains the reusable raw
 training-data reference for OOF ensembles; `fitted.train_data` reconstructs the
-transformed matrix on demand without caching it.
+transformed matrix on demand without caching it. Persistence omits that raw
+dataset:
+
+```python
+from ins_gbm.persistence.io import load_pipeline, save_pipeline
+
+save_pipeline(fitted, "output/my_model")
+
+loaded = load_pipeline("output/my_model")  # scoring and evaluation
+loaded_for_oof = load_pipeline(
+    "output/my_model",
+    training_data=training_data,
+)  # also enables train_data and later OOF ensemble fitting
+```
+
+When reattaching data, supply the original training rows in their original
+order. Fitted transforms and the input schema remain in the compact artifact,
+so prediction does not require training data. UMAP is an exception to the
+general compact-state rule: a fitted UMAP reducer may retain training-derived
+matrices required by its transform implementation.
 
 To reduce only part of the feature frame while retaining other columns, wrap a
 reducer in `PreprocessingStep`:

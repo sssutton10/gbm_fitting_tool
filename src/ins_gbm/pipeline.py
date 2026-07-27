@@ -6,6 +6,7 @@ from typing import Any, Optional
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
@@ -34,25 +35,44 @@ class ModelRecipe:
 class FittedPipeline:
     """Result of running a ``ModelPipeline``.
 
-    The raw training data is retained for OOF ensemble workflows. The expanded
-    transformed training matrix is reconstructed only when ``train_data`` is
-    explicitly accessed and is never cached on this object.
+    The raw training data is retained in memory for OOF ensemble workflows, but
+    is omitted from persisted artifacts. The expanded transformed training
+    matrix is reconstructed only when ``train_data`` is explicitly accessed and
+    is never cached on this object.
     """
     fitted_model: FittedModel
     recipe: ModelRecipe
     input_feature_names: list[str]
-    raw_train_data: ModelData
+    raw_train_data: Optional[ModelData]
     selected_features: Optional[list[str]]
     selection_results: Optional[list[Any]]
     tuning_history: Optional[pl.DataFrame]
     encoder: Optional[Any]
     preprocessors: list
     metadata: ReproducibilityMetadata
+    input_schema: Optional[FeatureSchema] = None
 
     @property
     def train_data(self) -> ModelData:
         """Reconstruct transformed training data without retaining the matrix."""
-        return self._prepare_data(self.raw_train_data)
+        return self._prepare_data(self._require_raw_train_data())
+
+    def _require_raw_train_data(self) -> ModelData:
+        """Return attached training rows or explain how to restore them."""
+        if self.raw_train_data is None:
+            raise RuntimeError(
+                "Training data is not attached to this fitted pipeline. "
+                "Reload it with load_pipeline(..., training_data=original_training_data) "
+                "before accessing train_data or fitting an OOF ensemble."
+            )
+        return self.raw_train_data
+
+    def _input_schema(self) -> Optional[FeatureSchema]:
+        """Return the compact input schema, including for legacy artifacts."""
+        schema = getattr(self, "input_schema", None)
+        if schema is None and self.raw_train_data is not None:
+            return self.raw_train_data.schema
+        return schema
 
     def _prepare_data(self, data: ModelData) -> ModelData:
         """Select fitted raw inputs and apply the fitted transform chain."""
@@ -110,7 +130,7 @@ class FittedPipeline:
             exposure=exposure,
             weight=weight,
             feature_names=list(features.columns),
-            schema=self.raw_train_data.schema,
+            schema=self._input_schema(),
             objective=obj,
         )
         return self.predict(data, prediction_type=prediction_type)
@@ -269,6 +289,7 @@ class ModelPipeline:
             recipe=self.recipe,
             input_feature_names=input_feature_names,
             raw_train_data=raw_train_data,
+            input_schema=raw_train_data.schema,
             selected_features=selected_features,
             selection_results=selection_results,
             tuning_history=tuning_history,
