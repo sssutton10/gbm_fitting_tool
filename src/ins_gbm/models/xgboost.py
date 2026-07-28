@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
-from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
@@ -33,7 +33,7 @@ class XGBoostModel:
     so XGBoost treats that sentinel as missing and applies its sparse-aware
     split-finding rather than treating it as a real value.
     """
-    objective: Objective = "poisson"
+    objective: Optional[Objective] = None
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -75,16 +75,17 @@ class XGBoostModel:
             preprocessing=preprocessing,
         )
         data = transform_result.data
+        objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
-        p.setdefault("objective", _XGB_OBJECTIVE[self.objective])
+        p.setdefault("objective", _XGB_OBJECTIVE[objective])
         p.setdefault("verbosity", 0)
 
         X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
         y = data.target.to_numpy().astype(np.float64)
 
         base_margin: Optional[np.ndarray] = None
-        if self.objective == "poisson" and data.exposure is not None:
+        if objective == "poisson" and data.exposure is not None:
             base_margin = np.log(data.exposure.to_numpy().astype(np.float64))
 
         sample_weight: Optional[np.ndarray] = None
@@ -93,14 +94,15 @@ class XGBoostModel:
 
         n_estimators = p.pop("n_estimators", 100)
 
-        dtrain = xgb.DMatrix(
-            X,
-            label=y,
-            base_margin=base_margin,
-            weight=sample_weight,
-            feature_names=list(data.feature_names),
-            missing=_NUMERIC_FILL,
-        )
+        dtrain_kwargs = {
+            "label": y,
+            "weight": sample_weight,
+            "feature_names": list(data.feature_names),
+            "missing": _NUMERIC_FILL,
+        }
+        if base_margin is not None:
+            dtrain_kwargs["base_margin"] = base_margin
+        dtrain = xgb.DMatrix(X, **dtrain_kwargs)
 
         booster = xgb.train(
             params=p,
@@ -110,8 +112,6 @@ class XGBoostModel:
         )
 
         feature_names = list(data.feature_names)
-        objective = self.objective
-
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
 
@@ -119,7 +119,13 @@ class XGBoostModel:
             if objective == "poisson" and pred_data.exposure is not None:
                 pred_margin = np.log(pred_data.exposure.to_numpy().astype(np.float64))
 
-            dtest = xgb.DMatrix(X_pred, base_margin=pred_margin, feature_names=feature_names, missing=_NUMERIC_FILL)
+            dtest_kwargs = {
+                "feature_names": feature_names,
+                "missing": _NUMERIC_FILL,
+            }
+            if pred_margin is not None:
+                dtest_kwargs["base_margin"] = pred_margin
+            dtest = xgb.DMatrix(X_pred, **dtest_kwargs)
             raw = booster.predict(dtest)
 
             if objective == "poisson":
@@ -151,7 +157,7 @@ class XGBoostModel:
             model=booster,
             params={**p, "n_estimators": n_estimators},
             framework="xgboost",
-            objective=self.objective,
+            objective=objective,
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,

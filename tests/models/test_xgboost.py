@@ -49,6 +49,14 @@ def test_xgb_gamma_fit_predict(gamma_parquet):
     assert (preds > 0).all()
 
 
+def test_xgb_uses_model_data_objective_when_omitted(gamma_parquet):
+    data = _gamma(gamma_parquet)
+
+    fitted = XGBoostModel().fit(data, params={"n_estimators": 5})
+
+    assert fitted.objective == "gamma"
+
+
 def test_xgb_gamma_rejects_rate(gamma_parquet):
     data = _gamma(gamma_parquet)
     train = test = data

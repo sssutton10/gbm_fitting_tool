@@ -3,7 +3,7 @@ from typing import Literal, Optional
 
 import polars as pl
 
-from .schema import FeatureSchema
+from .schema import FeatureSchema, infer_schema
 
 
 Objective = Literal["poisson", "gamma"]
@@ -28,6 +28,14 @@ class ModelData:
     offset: Optional[pl.Series] = None
     cv_fold: Optional[pl.Series] = None
     comparisons: Optional[pl.DataFrame] = None
+
+    def __post_init__(self) -> None:
+        """Infer a feature schema when the caller does not supply one."""
+        if (
+            self.schema is None
+            and all(name in self.features.columns for name in self.feature_names)
+        ):
+            self.schema = infer_schema(self.features, self.feature_names)
 
     @property
     def n_rows(self) -> int:
@@ -58,8 +66,6 @@ class ModelData:
             if (self.exposure <= 0).any():
                 raise ValueError("exposure must be positive and non-zero")
         if self.objective == "poisson":
-            if self.exposure is None:
-                raise ValueError("exposure is required for Poisson objective")
             if (self.target < 0).any():
                 raise ValueError("Poisson target must be non-negative")
         if self.objective == "gamma":

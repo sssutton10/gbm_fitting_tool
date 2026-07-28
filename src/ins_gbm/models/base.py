@@ -12,6 +12,14 @@ PredictionType = Literal["response", "rate", "link"]
 Objective = Literal["poisson", "gamma"]
 
 
+def resolve_objective(
+    model_objective: Optional[Objective],
+    data: ModelData,
+) -> Objective:
+    """Resolve an objective from model configuration, data, then legacy default."""
+    return model_objective or data.objective or "poisson"
+
+
 @dataclass(frozen=True)
 class ModelCapabilities:
     supports_poisson: bool
@@ -66,7 +74,7 @@ class FittedModel:
 @runtime_checkable
 class BaseModel(Protocol):
     """Protocol that all model wrappers must satisfy."""
-    objective: Objective
+    objective: Optional[Objective]
 
     def fit(
         self,

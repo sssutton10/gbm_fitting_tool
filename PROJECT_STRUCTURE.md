@@ -164,16 +164,21 @@ Do not assume that `from ins_gbm.models import LightGBMModel` works.
 
 The library supports two modeling objectives:
 
-- `poisson`: policy-level frequency modeling. The target is claim count and
-  `exposure` is required.
+- `poisson`: policy-level frequency modeling. The target is a non-negative
+  claim count or frequency response. `exposure` is optional; when omitted, no
+  exposure offset, base margin, baseline, or exposure-derived sample weight is
+  passed to the model.
 - `gamma`: policy-level severity modeling. The target must be strictly positive.
   `weight` may be supplied, but exposure is not used as a severity offset.
 
 Prediction scales use the `PredictionType` literal from `models/base.py`:
 
-- `response`: expected claim count for Poisson, expected severity for Gamma.
-- `rate`: expected claim count divided by exposure for Poisson. Invalid for
-  Gamma and raises in `FittedModel.predict()`.
+- `response`: expected claim count for Poisson when exposure is supplied;
+  otherwise the model's unadjusted Poisson response. For Gamma it is expected
+  severity.
+- `rate`: expected claim count divided by exposure when exposure is supplied;
+  otherwise the same unadjusted Poisson response. Invalid for Gamma and raises
+  in `FittedModel.predict()`.
 - `link`: model-specific link scale where implemented.
 
 ### Polars Public API
@@ -226,6 +231,10 @@ numeric, categorical, ordinal, passthrough
 If a dtype is unsupported, `infer_schema()` raises and the caller should supply
 an explicit schema.
 
+`ModelData` calls `infer_schema()` during construction whenever `schema=None`,
+using its `features` and ordered `feature_names`. The parquet loader also
+infers the schema when the caller does not provide one.
+
 ### `ModelData`
 
 Defined in `data/model_data.py`.
@@ -252,10 +261,12 @@ Core fields:
 - `features`: feature frame used by encoders, selectors, preprocessors, and
   models.
 - `target`: target series.
-- `exposure`: required for Poisson objective.
+- `exposure`: optional Poisson exposure. When absent, it remains `None`
+  throughout model fitting and prediction.
 - `weight`: optional observation weights.
 - `feature_names`: the ordered feature columns that should be used by models.
-- `schema`: optional feature role metadata, mainly used by `OneHotEncoder`.
+- `schema`: feature role metadata, mainly used by `OneHotEncoder`. If omitted,
+  it is inferred automatically from supported Polars dtypes.
 - `objective`: optional objective marker, usually `poisson` or `gamma`.
 
 Additional fields:
@@ -286,7 +297,7 @@ Validation rules currently implemented:
 - `feature_names` must be unique.
 - Every `feature_name` must exist in `features`.
 - If `exposure` is supplied, it must be non-null and positive.
-- Poisson objective requires exposure and non-negative target values.
+- Poisson objective requires non-negative target values; exposure is optional.
 - Gamma objective requires strictly positive target values.
 - `offset`, if supplied, must match row count, be numeric, non-null, and not
   contain infinity.
@@ -398,8 +409,10 @@ Framework-specific missing handling later:
 - XGBoost passes `_NUMERIC_FILL` as the `missing` value in `DMatrix`.
 - Random Forest receives `_NUMERIC_FILL` as an ordinary numeric value.
 
-Pitfall: `OneHotEncoder.fit(features, schema)` requires a schema. If the
-pipeline recipe includes an encoder, make sure `ModelData.schema` is present.
+`OneHotEncoder.fit(features, schema)` requires a schema. Normally
+`ModelData` supplies one through automatic inference. Provide an explicit
+`FeatureSchema` when feature dtypes are unsupported or need ordinal or
+passthrough roles that dtype inference cannot determine.
 
 ### PCA Reducer
 
@@ -590,7 +603,7 @@ Important types:
 
 Every model wrapper should provide:
 
-- `objective`
+- optional `objective`
 - `fit(data, params=None, *, feature_names=None, encoder=None, preprocessing=None)`
 - `default_search_space()`
 - `capabilities()`
@@ -611,6 +624,15 @@ Every model wrapper should provide:
 
 The closures are why persistence uses `cloudpickle`.
 
+Unfitted wrappers default `objective` to `None`. At fit time, the objective is
+resolved in this order:
+
+1. an objective explicitly supplied to the model wrapper;
+2. `ModelData.objective`;
+3. `poisson` as the legacy fallback when both are absent.
+
+The resolved value is stored on `FittedModel`.
+
 ### LightGBMModel
 
 Defined in `models/lightgbm.py`.
@@ -629,6 +651,8 @@ Training behavior:
 - Converts feature data to `float64` NumPy.
 - Converts `_NUMERIC_FILL` to `np.nan`.
 - For Poisson with exposure, uses `log(exposure)` as an initial score.
+- If exposure and `data.offset` are both absent, omits `init_score` from the
+  native `Dataset` rather than synthesizing unit exposure.
 - If `data.offset` is present, adds it to the initial score.
 - Uses `data.weight` as sample weight if supplied.
 - Pops `n_estimators` from params and passes it as `num_boost_round`.
@@ -641,6 +665,8 @@ Prediction behavior:
   - `response` returns expected claim count.
   - `rate` returns expected rate.
   - `link` returns link-scale predictions.
+  - when exposure is absent, no exposure adjustment is applied and `response`
+    and `rate` return the same model-scale value.
 - For Gamma:
   - `response` returns expected severity.
   - `link` returns log response plus offset if present.
@@ -663,12 +689,14 @@ Training behavior:
 - Converts feature data to `float64` NumPy.
 - Passes `_NUMERIC_FILL` as `missing` to `xgb.DMatrix`.
 - For Poisson with exposure, uses `log(exposure)` as `base_margin`.
+- If exposure is absent, omits `base_margin` from the training `DMatrix`.
 - Uses `data.weight` as sample weight if supplied.
 - Pops `n_estimators` from params and passes it as `num_boost_round`.
 
 Prediction behavior:
 
 - For Poisson with exposure, supplies prediction-time `base_margin`.
+- If prediction exposure is absent, omits prediction-time `base_margin`.
 - `response` returns the model response.
 - `rate` divides response by exposure if exposure is present.
 - `link` returns `log(response)`.
@@ -699,6 +727,8 @@ Training behavior:
 - Uses `allow_writing_files=False` by default.
 - For Poisson with exposure, uses `log(exposure)` as CatBoost baseline only if
   the installed CatBoost supports the `baseline` parameter.
+- If exposure is absent, omits `baseline` from both training and prediction
+  pools.
 - Uses `data.weight` as sample weight if supplied.
 
 Pitfalls:
@@ -721,6 +751,8 @@ Poisson behavior:
 - `response` multiplies predicted rate by exposure.
 - `rate` returns predicted rate.
 - `link` returns `log(rate clipped above zero)`.
+- If exposure is absent, fits directly on the target and does not pass an
+  exposure-derived `sample_weight`; a separate `data.weight` is still honored.
 
 Gamma behavior:
 
@@ -853,14 +885,16 @@ Use `result.predict(raw_model_data)` when you have a raw `ModelData` shaped like
 the original pre-transform data.
 
 Use `result.predict_raw(raw_features, exposure=...)` when scoring a feature
-DataFrame without a real target column.
+DataFrame without a real target column and an exposure offset is wanted. Omit
+the argument to leave exposure absent.
 
 Pitfalls:
 
 - `FittedPipeline.predict()` applies the fitted transform chain. If an encoder
   was used, pass raw feature columns, not already encoded features.
-- `FittedPipeline.predict_raw()` creates a placeholder target. It does not
-  replace the need to provide exposure for Poisson expected claim count scoring.
+- `FittedPipeline.predict_raw()` creates a placeholder target. When exposure is
+  omitted, it remains `None` and the fitted wrapper receives no exposure
+  offset, margin, baseline, or exposure-derived weight.
 - Accessing `train_data` constructs transformed data; the result is not stored
   on `FittedPipeline`. A compactly loaded pipeline must have its original
   training data reattached first. Holdouts are never stored on the pipeline.
@@ -994,13 +1028,17 @@ Metric functions:
 - rmse
 - mae
 
-For Poisson, exposure is used as the deviance and Gini weight; when a separate
-model weight is present, the effective weight is `exposure * weight`. For
-Gamma, `weight` is used directly.
+For Poisson with exposure, exposure is used as the deviance and Gini weight;
+when a separate model weight is present, the effective weight is
+`exposure * weight`. Without exposure, metrics use the supplied actual and
+predicted values directly and use only `weight` when present. For Gamma,
+`weight` is used directly.
 
 Report-level double-lift calculations compare Poisson rates using
-`exposure * weight` as the effective weight when both are present. A positive
-`double_lift_score` favors model 2; a negative score favors model 1.
+`exposure * weight` as the effective weight when both are present. Without
+exposure, they compare the supplied values directly and use only the separate
+model weight when present. A positive `double_lift_score` favors model 2; a
+negative score favors model 1.
 
 Pitfalls:
 
@@ -1346,7 +1384,7 @@ data = load_model_data(
 )
 
 recipe = ModelRecipe(
-    model=LightGBMModel(objective="poisson"),
+    model=LightGBMModel(),  # inherits objective="poisson" from data
     params={"n_estimators": 100},
 )
 
@@ -1377,7 +1415,7 @@ data = load_model_data(
 
 result = ModelPipeline(
     data=data,
-    recipe=ModelRecipe(model=LightGBMModel(objective="gamma")),
+    recipe=ModelRecipe(model=LightGBMModel()),  # inherits "gamma" from data
 ).run()
 ```
 
@@ -1548,7 +1586,9 @@ The fixtures in `tests/conftest.py` generate synthetic Poisson and Gamma data:
 Create a module under `src/ins_gbm/models/` that implements the `BaseModel`
 protocol:
 
-1. Add an unfitted dataclass with an `objective` field.
+1. Add an unfitted dataclass with
+   `objective: Optional[Objective] = None`, and resolve it from the model
+   override, `ModelData.objective`, then the legacy Poisson fallback.
 2. Implement `capabilities()`.
 3. Implement `default_search_space()`.
 4. Implement the `fit(...)` signature from `BaseModel`, including optional
@@ -1633,12 +1673,13 @@ Use `raw_train_data` for the shared raw reference.
 encoder, pass raw columns. For already transformed data, call
 `result.fitted_model.predict(transformed_data)` instead.
 
-### Forgetting Exposure for Poisson
+### Omitting Exposure for Poisson
 
-Poisson `ModelData.validate()` requires exposure. Prediction methods can
-sometimes run without exposure and effectively behave as if exposure were 1, but
-that is usually not the intended expected claim count workflow. Supply exposure
-when scoring Poisson models.
+Poisson `ModelData.validate()` allows `exposure=None`. The wrappers keep it
+absent: LightGBM receives no exposure-derived initial score, XGBoost no base
+margin, CatBoost no baseline, and Random Forest no exposure-derived sample
+weight. No vector or scalar of ones is synthesized. Supply exposure only when
+the model should include that exposure adjustment.
 
 ### Using Gamma Rate Predictions
 
@@ -1699,9 +1740,9 @@ be handled explicitly upstream if present.
 
 ### Treating Random Forest as a True Poisson or Gamma Objective
 
-`RandomForestModel` is a benchmark. Its Poisson behavior fits rates with exposure
-weights; it does not optimize a Poisson likelihood with a native log exposure
-offset.
+`RandomForestModel` is a benchmark. With exposure, its Poisson behavior fits
+rates with exposure weights; without exposure, it fits the target directly. It
+does not optimize a Poisson likelihood with a native log exposure offset.
 
 ### Optimizing Blends on the Final Holdout
 
@@ -1750,7 +1791,7 @@ The second invariant is data shape consistency:
 
 The third invariant is objective consistency:
 
-- Poisson means claim count target plus positive exposure.
+- Poisson means a non-negative target and optional positive exposure.
 - Gamma means strictly positive severity target.
 - rate predictions are Poisson-only.
 - deviance metrics require positive predictions.

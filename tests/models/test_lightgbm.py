@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import polars as pl
 import pytest
@@ -47,6 +49,31 @@ def test_lgb_poisson_rate_prediction(poisson_parquet):
     np.testing.assert_allclose(rate.to_numpy(), expected.to_numpy(), rtol=1e-5)
 
 
+def test_lgb_poisson_without_exposure_passes_no_init_score(
+    poisson_parquet, monkeypatch
+):
+    import lightgbm as lgb
+
+    data = replace(_poisson_data(poisson_parquet), exposure=None).validate()
+    captured = {}
+    original_init = lgb.Dataset.__init__
+
+    def recording_init(self, *args, **kwargs):
+        captured["kwargs"] = kwargs
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(lgb.Dataset, "__init__", recording_init)
+
+    fitted = LightGBMModel().fit(
+        data, params={"n_estimators": 5, "verbose": -1}
+    )
+    response = fitted.predict(data, prediction_type="response")
+    rate = fitted.predict(data, prediction_type="rate")
+
+    assert "init_score" not in captured["kwargs"]
+    np.testing.assert_allclose(response.to_numpy(), rate.to_numpy())
+
+
 def test_lgb_gamma_fit_predict(gamma_parquet):
     data = _gamma_data(gamma_parquet)
     train = test = data
@@ -54,6 +81,16 @@ def test_lgb_gamma_fit_predict(gamma_parquet):
     preds = fitted.predict(test, prediction_type="response")
     assert (preds > 0).all()
     assert len(preds) == test.n_rows
+
+
+def test_lgb_uses_model_data_objective_when_omitted(gamma_parquet):
+    data = _gamma_data(gamma_parquet)
+
+    fitted = LightGBMModel().fit(
+        data, params={"n_estimators": 5, "verbose": -1}
+    )
+
+    assert fitted.objective == "gamma"
 
 
 def test_lgb_gamma_rejects_rate(gamma_parquet):

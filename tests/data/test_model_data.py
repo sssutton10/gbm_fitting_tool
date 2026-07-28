@@ -30,16 +30,33 @@ def test_model_data_gamma_valid(gamma_raw):
     assert data.n_rows == 300
 
 
-def test_poisson_requires_exposure(poisson_raw):
-    with pytest.raises(ValueError, match="exposure is required"):
-        ModelData(
-            features=poisson_raw.select(["x1"]),
-            target=poisson_raw["claim_count"],
-            exposure=None,
-            weight=None,
-            feature_names=["x1"],
-            objective="poisson",
-        ).validate()
+def test_model_data_infers_schema_when_omitted(poisson_raw):
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]),
+        target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"],
+        weight=None,
+        feature_names=["x1", "x2", "x3"],
+        objective="poisson",
+    )
+
+    assert data.schema == FeatureSchema(
+        numeric=["x1", "x3"],
+        categorical=["x2"],
+    )
+
+
+def test_poisson_allows_missing_exposure(poisson_raw):
+    data = ModelData(
+        features=poisson_raw.select(["x1"]),
+        target=poisson_raw["claim_count"],
+        exposure=None,
+        weight=None,
+        feature_names=["x1"],
+        objective="poisson",
+    ).validate()
+
+    assert data.exposure is None
 
 
 def test_poisson_nonnegative_target(poisson_raw):

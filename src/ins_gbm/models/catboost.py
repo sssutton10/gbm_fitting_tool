@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
-from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
@@ -45,7 +45,7 @@ class CatBoostModel:
     Before constructing the ``Pool``, the wrapper converts that sentinel back to
     ``NaN`` so CatBoost can apply its native missing-value handling.
     """
-    objective: Objective = "poisson"
+    objective: Optional[Objective] = None
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -85,9 +85,10 @@ class CatBoostModel:
             preprocessing=preprocessing,
         )
         data = transform_result.data
+        objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
-        p.setdefault("loss_function", _CB_OBJECTIVE[self.objective])
+        p.setdefault("loss_function", _CB_OBJECTIVE[objective])
         p.setdefault("verbose", 0)
         p.setdefault("allow_writing_files", False)
 
@@ -96,7 +97,7 @@ class CatBoostModel:
         y = data.target.to_numpy().astype(np.float64)
 
         baseline: Optional[np.ndarray] = None
-        if self.objective == "poisson" and data.exposure is not None:
+        if objective == "poisson" and data.exposure is not None:
             if _catboost_supports_offset():
                 baseline = np.log(data.exposure.to_numpy().astype(np.float64))
 
@@ -104,13 +105,15 @@ class CatBoostModel:
         if data.weight is not None:
             sample_weight = data.weight.to_numpy().astype(np.float64)
 
-        pool = Pool(
-            data=X,
-            label=y,
-            baseline=baseline,
-            weight=sample_weight,
-            feature_names=list(data.feature_names),
-        )
+        pool_kwargs = {
+            "data": X,
+            "label": y,
+            "weight": sample_weight,
+            "feature_names": list(data.feature_names),
+        }
+        if baseline is not None:
+            pool_kwargs["baseline"] = baseline
+        pool = Pool(**pool_kwargs)
 
         model = CatBoostRegressor(**p)
         model.fit(pool)
@@ -123,7 +126,6 @@ class CatBoostModel:
         )
 
         feature_names = list(data.feature_names)
-        objective = self.objective
         has_offset = _catboost_supports_offset()
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
@@ -134,7 +136,13 @@ class CatBoostModel:
             if objective == "poisson" and pred_data.exposure is not None and has_offset:
                 pred_baseline = np.log(pred_data.exposure.to_numpy().astype(np.float64))
 
-            pred_pool = Pool(data=X_pred, baseline=pred_baseline, feature_names=feature_names)
+            pred_pool_kwargs = {
+                "data": X_pred,
+                "feature_names": feature_names,
+            }
+            if pred_baseline is not None:
+                pred_pool_kwargs["baseline"] = pred_baseline
+            pred_pool = Pool(**pred_pool_kwargs)
             raw = model.predict(pred_pool)
 
             if objective == "poisson":
@@ -176,7 +184,7 @@ class CatBoostModel:
             model=model,
             params=p,
             framework="catboost",
-            objective=self.objective,
+            objective=objective,
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,

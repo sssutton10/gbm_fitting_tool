@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
-from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
@@ -33,7 +33,7 @@ class LightGBMModel:
     to ``NaN`` so LightGBM can apply its native missing-value branch logic
     (learns the optimal direction at each split).
     """
-    objective: Objective = "poisson"
+    objective: Optional[Objective] = None
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -75,9 +75,10 @@ class LightGBMModel:
             preprocessing=preprocessing,
         )
         data = transform_result.data
+        objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
-        p.setdefault("objective", _LGB_OBJECTIVE[self.objective])
+        p.setdefault("objective", _LGB_OBJECTIVE[objective])
         p.setdefault("verbose", -1)
 
         X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
@@ -85,7 +86,7 @@ class LightGBMModel:
         y = data.target.to_numpy().astype(np.float64)
 
         init_score_parts: list[np.ndarray] = []
-        if self.objective == "poisson" and data.exposure is not None:
+        if objective == "poisson" and data.exposure is not None:
             init_score_parts.append(np.log(data.exposure.to_numpy().astype(np.float64)))
         if data.offset is not None:
             init_score_parts.append(data.offset.to_numpy().astype(np.float64))
@@ -97,14 +98,15 @@ class LightGBMModel:
 
         n_estimators = p.pop("n_estimators", 100)
 
-        ds = lgb.Dataset(
-            X,
-            label=y,
-            init_score=init_score,
-            weight=sample_weight,
-            feature_name=list(data.feature_names),
-            free_raw_data=True,
-        )
+        dataset_kwargs = {
+            "label": y,
+            "weight": sample_weight,
+            "feature_name": list(data.feature_names),
+            "free_raw_data": True,
+        }
+        if init_score is not None:
+            dataset_kwargs["init_score"] = init_score
+        ds = lgb.Dataset(X, **dataset_kwargs)
 
         booster = lgb.train(
             params=p,
@@ -113,8 +115,6 @@ class LightGBMModel:
         )
 
         feature_names = list(data.feature_names)
-        objective = self.objective
-
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
             X_pred[X_pred == _NUMERIC_FILL] = np.nan
@@ -130,12 +130,10 @@ class LightGBMModel:
                 # raw_scores = log(rate) on link scale; exposure and offset add on link scale
                 link = raw_scores if offset is None else raw_scores + offset
                 if prediction_type == "response":
-                    exposure = (
-                        pred_data.exposure.to_numpy()
-                        if pred_data.exposure is not None
-                        else 1.0
-                    )
-                    return pl.Series(np.exp(link) * exposure)
+                    response = np.exp(link)
+                    if pred_data.exposure is not None:
+                        response = response * pred_data.exposure.to_numpy()
+                    return pl.Series(response)
                 elif prediction_type == "rate":
                     return pl.Series(np.exp(link))
                 else:  # link
@@ -165,7 +163,7 @@ class LightGBMModel:
             model=booster,
             params={**p, "n_estimators": n_estimators},
             framework="lightgbm",
-            objective=self.objective,
+            objective=objective,
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,

@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
-from ins_gbm.models.base import FittedModel, ModelCapabilities
+from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 
 
@@ -24,7 +24,7 @@ class RandomForestModel:
     Both are documented limitations — this model is a benchmark, not a GLM-style
     objective wrapper.
     """
-    objective: Objective = "poisson"
+    objective: Optional[Objective] = None
 
     def capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
@@ -62,6 +62,7 @@ class RandomForestModel:
             preprocessing=preprocessing,
         )
         data = transform_result.data
+        objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
         p.setdefault("random_state", 42)
@@ -70,7 +71,7 @@ class RandomForestModel:
         y = data.target.to_numpy().astype(np.float64)
 
         # Approximate Poisson objective: weight by exposure, fit on claim rate
-        if self.objective == "poisson" and data.exposure is not None:
+        if objective == "poisson" and data.exposure is not None:
             exposure = data.exposure.to_numpy().astype(np.float64)
             y_fit = y / exposure  # fit on claim rate
             sample_weight = exposure
@@ -87,11 +88,12 @@ class RandomForestModel:
             sample_weight = None
 
         rf = RandomForestRegressor(**p)
-        rf.fit(X, y_fit, sample_weight=sample_weight)
+        if sample_weight is None:
+            rf.fit(X, y_fit)
+        else:
+            rf.fit(X, y_fit, sample_weight=sample_weight)
 
         feature_names = list(data.feature_names)
-        objective = self.objective
-
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
             raw = rf.predict(X_pred)  # predicted claim rate or severity
@@ -106,7 +108,7 @@ class RandomForestModel:
                     # Poisson deviance requires strictly positive means.
                     return pl.Series(np.maximum(response, 1e-10))
                 elif prediction_type == "rate":
-                    return pl.Series(raw)
+                    return pl.Series(np.maximum(raw, 1e-10))
                 else:  # link
                     return pl.Series(np.log(np.maximum(raw, 1e-10)))
             else:  # gamma
@@ -127,7 +129,7 @@ class RandomForestModel:
             model=rf,
             params=p,
             framework="random_forest",
-            objective=self.objective,
+            objective=objective,
             feature_names=feature_names,
             predict_fn=_predict,
             importance_fn=_importance,

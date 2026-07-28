@@ -84,6 +84,39 @@ def test_rf_gamma_fit_predict(gamma_parquet):
     assert (preds > 0).all()
 
 
+def test_rf_uses_model_data_objective_when_omitted(gamma_parquet):
+    data = _gamma(gamma_parquet)
+
+    fitted = RandomForestModel().fit(data, params={"n_estimators": 5})
+
+    assert fitted.objective == "gamma"
+
+
+def test_rf_poisson_without_exposure_passes_no_exposure_weight(
+    poisson_parquet, monkeypatch
+):
+    data = replace(_poisson(poisson_parquet), exposure=None).validate()
+    captured = {}
+
+    from sklearn.ensemble import RandomForestRegressor
+
+    original_fit = RandomForestRegressor.fit
+
+    def recording_fit(self, X, y, **kwargs):
+        captured["kwargs"] = kwargs
+        return original_fit(self, X, y, **kwargs)
+
+    monkeypatch.setattr(RandomForestRegressor, "fit", recording_fit)
+
+    fitted = RandomForestModel().fit(data, params={"n_estimators": 5})
+    response = fitted.predict(data, prediction_type="response")
+    rate = fitted.predict(data, prediction_type="rate")
+
+    assert fitted.objective == "poisson"
+    assert "sample_weight" not in captured["kwargs"]
+    np.testing.assert_allclose(response.to_numpy(), rate.to_numpy())
+
+
 def test_rf_gamma_rejects_rate(gamma_parquet):
     data = _gamma(gamma_parquet)
     train = test = data
