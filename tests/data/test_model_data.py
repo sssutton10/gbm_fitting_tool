@@ -46,17 +46,16 @@ def test_model_data_infers_schema_when_omitted(poisson_raw):
     )
 
 
-def test_poisson_allows_missing_exposure(poisson_raw):
+def test_poisson_defaults_exposure_and_weight_to_none(poisson_raw):
     data = ModelData(
         features=poisson_raw.select(["x1"]),
         target=poisson_raw["claim_count"],
-        exposure=None,
-        weight=None,
         feature_names=["x1"],
         objective="poisson",
     ).validate()
 
     assert data.exposure is None
+    assert data.weight is None
 
 
 def test_poisson_nonnegative_target(poisson_raw):

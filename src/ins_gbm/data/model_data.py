@@ -20,9 +20,9 @@ _NUMERIC_DTYPES = _INTEGER_DTYPES | {pl.Float32, pl.Float64}
 class ModelData:
     features: pl.DataFrame
     target: pl.Series
-    exposure: Optional[pl.Series]
-    weight: Optional[pl.Series]
     feature_names: list[str]
+    exposure: Optional[pl.Series] = None
+    weight: Optional[pl.Series] = None
     schema: Optional[FeatureSchema] = None
     objective: Optional[Objective] = None
     offset: Optional[pl.Series] = None

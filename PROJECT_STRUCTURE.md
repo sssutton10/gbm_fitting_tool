@@ -245,9 +245,9 @@ Defined in `data/model_data.py`.
 ModelData(
     features=pl.DataFrame(...),
     target=pl.Series(...),
+    feature_names=["x1", "x2"],
     exposure=pl.Series(...) or None,
     weight=pl.Series(...) or None,
-    feature_names=["x1", "x2"],
     schema=FeatureSchema(...) or None,
     objective="poisson" or "gamma" or None,
     offset=pl.Series(...) or None,
@@ -261,10 +261,10 @@ Core fields:
 - `features`: feature frame used by encoders, selectors, preprocessors, and
   models.
 - `target`: target series.
-- `exposure`: optional Poisson exposure. When absent, it remains `None`
-  throughout model fitting and prediction.
-- `weight`: optional observation weights.
 - `feature_names`: the ordered feature columns that should be used by models.
+- `exposure`: optional Poisson exposure, defaulting to `None`. When absent, it
+  remains `None` throughout model fitting and prediction.
+- `weight`: optional observation weights, defaulting to `None`.
 - `schema`: feature role metadata, mainly used by `OneHotEncoder`. If omitted,
   it is inferred automatically from supported Polars dtypes.
 - `objective`: optional objective marker, usually `poisson` or `gamma`.
