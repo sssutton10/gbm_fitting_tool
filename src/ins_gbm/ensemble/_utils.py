@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import FIT_DTYPE
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.preprocessing.chain import fit_transform_chain
 
@@ -28,7 +29,9 @@ def _apply_pipeline_transforms(pipeline: "FittedPipeline", data: ModelData) -> M
 
 def _predict_from_pipeline(pipeline: "FittedPipeline", data: ModelData) -> np.ndarray:
     transformed = _apply_pipeline_transforms(pipeline, data)
-    return pipeline.fitted_model.predict(transformed, prediction_type="response").to_numpy()
+    return pipeline.fitted_model.predict(
+        transformed, prediction_type="response"
+    ).to_numpy().astype(FIT_DTYPE, copy=False)
 
 
 def _apply_recipe_fold_transforms(

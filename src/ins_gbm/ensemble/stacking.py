@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import FIT_DTYPE, series_to_fit_array
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms, _predict_from_pipeline
 
@@ -69,7 +70,9 @@ class StackingEnsemble:
         ref_train = training_data[0]
         n = ref_train.n_rows
         fold_splits = list(KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed).split(range(n)))
-        oof_matrix = np.zeros((n, len(fitted_pipelines)))
+        oof_matrix = np.zeros(
+            (n, len(fitted_pipelines)), dtype=FIT_DTYPE
+        )
 
         for p_idx, (pipeline, pipeline_data) in enumerate(
             zip(fitted_pipelines, training_data)
@@ -83,7 +86,7 @@ class StackingEnsemble:
                 fitted_model = pipeline.recipe.model.fit(current_train)
                 oof_matrix[val_idx, p_idx] = fitted_model.predict(current_val, "response").to_numpy()
 
-        meta.fit(oof_matrix, ref_train.target.to_numpy().astype(np.float64))
+        meta.fit(oof_matrix, series_to_fit_array(ref_train.target))
 
         return FittedStackingEnsemble(
             meta_learner=meta,

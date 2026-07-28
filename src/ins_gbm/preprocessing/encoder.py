@@ -78,16 +78,20 @@ class FittedOneHotEncoder:
         parts: list[pl.Series] = []
 
         for col in self.numeric_cols:
-            parts.append(features[col].fill_null(_NUMERIC_FILL))
+            parts.append(
+                features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32)
+            )
         for col in self.ordinal_cols:
-            parts.append(features[col].fill_null(_NUMERIC_FILL))
+            parts.append(
+                features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32)
+            )
         for col in self.passthrough_cols:
-            parts.append(features[col])
+            parts.append(features[col].cast(pl.Float32))
 
         for col, lvls in self.levels.items():
             col_str = features[col].cast(pl.Utf8).fill_null(_MISSING_LEVEL)
             for lvl in lvls:
-                indicator = (col_str == lvl).cast(pl.Float64).alias(f"{col}__{lvl}")
+                indicator = (col_str == lvl).cast(pl.Float32).alias(f"{col}__{lvl}")
                 parts.append(indicator)
 
         return pl.DataFrame(parts)[self._output_names]

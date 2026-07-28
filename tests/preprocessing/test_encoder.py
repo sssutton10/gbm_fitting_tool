@@ -24,6 +24,7 @@ def test_fit_and_transform_basic():
     assert "cat__A" in out.columns
     assert "cat__B" in out.columns
     assert "cat" not in out.columns
+    assert set(out.dtypes) == {pl.Float32}
 
 
 def test_output_feature_names_stable():

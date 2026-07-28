@@ -67,6 +67,10 @@ training-data reference for OOF ensembles; `fitted.train_data` reconstructs the
 transformed matrix on demand without caching it. Persistence omits that raw
 dataset:
 
+Floating-point `ModelData` columns and model-fitting buffers use `float32`.
+Integer and categorical source columns retain their original dtypes. Evaluation
+metrics use `float64` accumulation for numerical stability.
+
 ```python
 from ins_gbm.persistence.io import load_pipeline, save_pipeline
 

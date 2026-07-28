@@ -6,6 +6,7 @@ from typing import Literal, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import frame_to_fit_array, series_to_fit_array
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
@@ -67,22 +68,22 @@ class RandomForestModel:
         p = dict(params or {})
         p.setdefault("random_state", 42)
 
-        X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
-        y = data.target.to_numpy().astype(np.float64)
+        X = frame_to_fit_array(data.features, data.feature_names)
+        y = series_to_fit_array(data.target)
 
         # Approximate Poisson objective: weight by exposure, fit on claim rate
         if objective == "poisson" and data.exposure is not None:
-            exposure = data.exposure.to_numpy().astype(np.float64)
+            exposure = series_to_fit_array(data.exposure)
             y_fit = y / exposure  # fit on claim rate
             sample_weight = exposure
             if data.weight is not None:
                 sample_weight = (
                     sample_weight
-                    * data.weight.to_numpy().astype(np.float64)
+                    * series_to_fit_array(data.weight)
                 )
         elif data.weight is not None:
             y_fit = y
-            sample_weight = data.weight.to_numpy().astype(np.float64)
+            sample_weight = series_to_fit_array(data.weight)
         else:
             y_fit = y
             sample_weight = None
@@ -95,7 +96,9 @@ class RandomForestModel:
 
         feature_names = list(data.feature_names)
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
+            X_pred = frame_to_fit_array(
+                pred_data.features, pred_data.feature_names
+            )
             raw = rf.predict(X_pred)  # predicted claim rate or severity
 
             if objective == "poisson":

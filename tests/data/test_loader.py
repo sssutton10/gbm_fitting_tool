@@ -1,4 +1,5 @@
 import pytest
+import polars as pl
 from ins_gbm.data.loader import load_model_data
 
 
@@ -17,6 +18,9 @@ def test_load_poisson_from_parquet(poisson_parquet):
     assert data.schema is not None
     assert set(data.schema.numeric) == {"x1", "x3"}
     assert data.schema.categorical == ["x2"]
+    assert data.features["x1"].dtype == pl.Float32
+    assert data.target.dtype == pl.Float32
+    assert data.exposure.dtype == pl.Float32
 
 
 def test_load_gamma_from_parquet(gamma_parquet):

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import FIT_DTYPE, series_to_fit_array
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms, _predict_from_pipeline
 
@@ -25,7 +26,9 @@ class FittedBlendingEnsemble:
             [_predict_from_pipeline(p, data) for p in self.fitted_pipelines],
             axis=1,
         )
-        return pl.Series(stacked @ np.array(self.weights))
+        return pl.Series(
+            stacked @ np.asarray(self.weights, dtype=FIT_DTYPE)
+        )
 
 
 @dataclass
@@ -107,7 +110,7 @@ class BlendingEnsemble:
             [_predict_from_pipeline(p, validation_data) for p in pipelines],
             axis=1,
         )
-        actual = validation_data.target.to_numpy().astype(np.float64)
+        actual = series_to_fit_array(validation_data.target)
         return FittedBlendingEnsemble(
             weights=_optimize_weights(preds, actual).tolist(),
             fitted_pipelines=list(pipelines),
@@ -123,7 +126,7 @@ class BlendingEnsemble:
         ref_train = training_data[0]
         n = ref_train.n_rows
         kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
-        oof_preds = np.zeros((n, len(pipelines)))
+        oof_preds = np.zeros((n, len(pipelines)), dtype=FIT_DTYPE)
 
         for p_idx, (pipeline, pipeline_data) in enumerate(
             zip(pipelines, training_data)
@@ -137,7 +140,7 @@ class BlendingEnsemble:
                 fitted_model = pipeline.recipe.model.fit(current_train)
                 oof_preds[val_idx, p_idx] = fitted_model.predict(current_val, "response").to_numpy()
 
-        actual = ref_train.target.to_numpy().astype(np.float64)
+        actual = series_to_fit_array(ref_train.target)
         return FittedBlendingEnsemble(
             weights=_optimize_weights(oof_preds, actual).tolist(),
             fitted_pipelines=list(pipelines),

@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-import numpy as np
 import polars as pl
 from sklearn.preprocessing import StandardScaler
+
+from ins_gbm.data.dtypes import FIT_DTYPE, frame_to_fit_array
 
 
 @dataclass
@@ -22,7 +23,7 @@ class UMAPReducer:
             raise ImportError("umap-learn is required for UMAPReducer. "
                               "Install with: pip install umap-learn")
 
-        X = features.to_numpy().astype(np.float64)
+        X = frame_to_fit_array(features)
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
@@ -46,9 +47,9 @@ class FittedUMAPReducer:
     input_names: list[str]
 
     def transform(self, features: pl.DataFrame) -> pl.DataFrame:
-        X = features.select(self.input_names).to_numpy().astype(np.float64)
+        X = frame_to_fit_array(features, self.input_names)
         X_scaled = self.scaler.transform(X)
-        embedding = self.reducer.transform(X_scaled)
+        embedding = self.reducer.transform(X_scaled).astype(FIT_DTYPE, copy=False)
         return pl.DataFrame(dict(zip(self.output_names, embedding.T)))
 
     def output_feature_names(self) -> list[str]:

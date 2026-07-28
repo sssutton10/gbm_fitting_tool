@@ -162,7 +162,11 @@ class TestSliceModelData:
         indices = [0, 2, 4, 6, 8]
         sliced = slice_model_data(data, indices)
         assert sliced.offset is not None
-        assert sliced.offset.to_list() == valid_offset[indices].to_list()
+        assert sliced.offset.dtype == pl.Float32
+        assert (
+            sliced.offset.to_list()
+            == valid_offset[indices].cast(pl.Float32).to_list()
+        )
 
     def test_slice_cv_fold(self, base_data, valid_cv_fold):
         data = replace(base_data, cv_fold=valid_cv_fold)
@@ -177,7 +181,11 @@ class TestSliceModelData:
         sliced = slice_model_data(data, indices)
         assert sliced.comparisons is not None
         assert sliced.comparisons.shape[0] == 5
-        assert sliced.comparisons["model_a"].to_list() == valid_comparisons["model_a"][indices].to_list()
+        assert sliced.comparisons["model_a"].dtype == pl.Float32
+        assert (
+            sliced.comparisons["model_a"].to_list()
+            == valid_comparisons["model_a"][indices].cast(pl.Float32).to_list()
+        )
 
     def test_slice_none_fields_stay_none(self, base_data):
         sliced = slice_model_data(base_data, [0, 1, 2])
@@ -194,7 +202,8 @@ class TestWithOffset:
     def test_with_offset_sets_field(self, base_data, valid_offset):
         updated = base_data.with_offset(valid_offset)
         assert updated.offset is not None
-        assert updated.offset.to_list() == valid_offset.to_list()
+        assert updated.offset.dtype == pl.Float32
+        assert updated.offset.to_list() == valid_offset.cast(pl.Float32).to_list()
 
     def test_with_offset_original_unchanged(self, base_data, valid_offset):
         _ = base_data.with_offset(valid_offset)

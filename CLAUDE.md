@@ -30,7 +30,7 @@ uv sync --all-extras --dev
 
 ## Architecture
 
-Layered library. Public API is Polars-native; numpy conversion happens only at the model boundary (inside each model's `fit()` and `predict()`).
+Layered library. Public API is Polars-native; NumPy conversion happens only at fitting and prediction boundaries. Float64 `ModelData` columns are downcast to Float32, and dense model-fitting buffers use `numpy.float32`; evaluation calculations may use Float64 accumulation.
 
 ```
 src/ins_gbm/

@@ -76,6 +76,30 @@ def test_rf_poisson_combines_exposure_and_model_weight(
     np.testing.assert_allclose(captured["sample_weight"], expected)
 
 
+def test_rf_fit_receives_float32_arrays(poisson_parquet, monkeypatch):
+    data = _poisson(poisson_parquet)
+    captured = {}
+
+    from sklearn.ensemble import RandomForestRegressor
+
+    original_fit = RandomForestRegressor.fit
+
+    def recording_fit(self, X, y, sample_weight=None):
+        captured["X"] = np.asarray(X)
+        captured["y"] = np.asarray(y)
+        captured["sample_weight"] = np.asarray(sample_weight)
+        return original_fit(self, X, y, sample_weight=sample_weight)
+
+    monkeypatch.setattr(RandomForestRegressor, "fit", recording_fit)
+    RandomForestModel(objective="poisson").fit(
+        data, params={"n_estimators": 1}
+    )
+
+    assert captured["X"].dtype == np.float32
+    assert captured["y"].dtype == np.float32
+    assert captured["sample_weight"].dtype == np.float32
+
+
 def test_rf_gamma_fit_predict(gamma_parquet):
     data = _gamma(gamma_parquet)
     train = test = data

@@ -31,6 +31,7 @@ def test_pca_reduces_dimensions():
     fitted = PCAReducer(n_components=2).fit(df)
     out = fitted.transform(df)
     assert out.shape == (100, 2)
+    assert set(out.dtypes) == {pl.Float32}
 
 
 def test_pca_component_names():
@@ -110,6 +111,7 @@ def test_pls_reduces_dimensions():
     fitted = PLSReducer(n_components=2).fit(df, target=target)
     out = fitted.transform(df)
     assert out.shape == (100, 2)
+    assert set(out.dtypes) == {pl.Float32}
 
 
 def test_pls_requires_target_at_fit():
@@ -133,6 +135,7 @@ def test_umap_reduces_dimensions():
     fitted = UMAPReducer(n_components=2, n_neighbors=5).fit(df)
     out = fitted.transform(df)
     assert out.shape == (100, 2)
+    assert set(out.dtypes) == {pl.Float32}
 
 
 def test_umap_component_names():

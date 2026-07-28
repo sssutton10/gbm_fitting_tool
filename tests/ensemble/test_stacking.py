@@ -1,3 +1,5 @@
+import numpy as np
+
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.ensemble.stacking import StackingEnsemble
 from ins_gbm.models.lightgbm import LightGBMModel
@@ -9,3 +11,4 @@ def test_stacking_uses_full_training_data(poisson_parquet):
     pipelines = [ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run() for _ in range(2)]
     ensemble = StackingEnsemble(cv_folds=2).fit(pipelines)
     assert len(ensemble.predict(data)) == data.n_rows
+    assert ensemble.oof_predictions.dtype == np.float32

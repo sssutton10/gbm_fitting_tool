@@ -6,6 +6,11 @@ from typing import Literal, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import (
+    frame_to_fit_array,
+    replace_value_with_nan,
+    series_to_fit_array,
+)
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
@@ -81,20 +86,20 @@ class LightGBMModel:
         p.setdefault("objective", _LGB_OBJECTIVE[objective])
         p.setdefault("verbose", -1)
 
-        X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
-        X[X == _NUMERIC_FILL] = np.nan
-        y = data.target.to_numpy().astype(np.float64)
+        X = frame_to_fit_array(data.features, data.feature_names)
+        X = replace_value_with_nan(X, _NUMERIC_FILL)
+        y = series_to_fit_array(data.target)
 
         init_score_parts: list[np.ndarray] = []
         if objective == "poisson" and data.exposure is not None:
-            init_score_parts.append(np.log(data.exposure.to_numpy().astype(np.float64)))
+            init_score_parts.append(np.log(series_to_fit_array(data.exposure)))
         if data.offset is not None:
-            init_score_parts.append(data.offset.to_numpy().astype(np.float64))
+            init_score_parts.append(series_to_fit_array(data.offset))
         init_score: Optional[np.ndarray] = np.sum(init_score_parts, axis=0) if init_score_parts else None
 
         sample_weight: Optional[np.ndarray] = None
         if data.weight is not None:
-            sample_weight = data.weight.to_numpy().astype(np.float64)
+            sample_weight = series_to_fit_array(data.weight)
 
         n_estimators = p.pop("n_estimators", 100)
 
@@ -116,12 +121,14 @@ class LightGBMModel:
 
         feature_names = list(data.feature_names)
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
-            X_pred[X_pred == _NUMERIC_FILL] = np.nan
+            X_pred = frame_to_fit_array(
+                pred_data.features, pred_data.feature_names
+            )
+            X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
             raw_scores = booster.predict(X_pred)
 
             offset = (
-                pred_data.offset.to_numpy().astype(np.float64)
+                series_to_fit_array(pred_data.offset)
                 if pred_data.offset is not None
                 else None
             )

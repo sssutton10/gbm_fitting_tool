@@ -6,6 +6,11 @@ from typing import Literal, Optional
 import numpy as np
 import polars as pl
 
+from ins_gbm.data.dtypes import (
+    frame_to_fit_array,
+    replace_value_with_nan,
+    series_to_fit_array,
+)
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
@@ -92,18 +97,18 @@ class CatBoostModel:
         p.setdefault("verbose", 0)
         p.setdefault("allow_writing_files", False)
 
-        X = data.features.select(data.feature_names).to_numpy().astype(np.float64)
-        X[X == _NUMERIC_FILL] = np.nan
-        y = data.target.to_numpy().astype(np.float64)
+        X = frame_to_fit_array(data.features, data.feature_names)
+        X = replace_value_with_nan(X, _NUMERIC_FILL)
+        y = series_to_fit_array(data.target)
 
         baseline: Optional[np.ndarray] = None
         if objective == "poisson" and data.exposure is not None:
             if _catboost_supports_offset():
-                baseline = np.log(data.exposure.to_numpy().astype(np.float64))
+                baseline = np.log(series_to_fit_array(data.exposure))
 
         sample_weight: Optional[np.ndarray] = None
         if data.weight is not None:
-            sample_weight = data.weight.to_numpy().astype(np.float64)
+            sample_weight = series_to_fit_array(data.weight)
 
         pool_kwargs = {
             "data": X,
@@ -129,12 +134,14 @@ class CatBoostModel:
         has_offset = _catboost_supports_offset()
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = pred_data.features.select(pred_data.feature_names).to_numpy().astype(np.float64)
-            X_pred[X_pred == _NUMERIC_FILL] = np.nan
+            X_pred = frame_to_fit_array(
+                pred_data.features, pred_data.feature_names
+            )
+            X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
 
             pred_baseline: Optional[np.ndarray] = None
             if objective == "poisson" and pred_data.exposure is not None and has_offset:
-                pred_baseline = np.log(pred_data.exposure.to_numpy().astype(np.float64))
+                pred_baseline = np.log(series_to_fit_array(pred_data.exposure))
 
             pred_pool_kwargs = {
                 "data": X_pred,

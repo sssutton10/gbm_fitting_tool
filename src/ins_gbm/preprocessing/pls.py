@@ -3,10 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import polars as pl
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import StandardScaler
+
+from ins_gbm.data.dtypes import (
+    FIT_DTYPE,
+    frame_to_fit_array,
+    series_to_fit_array,
+)
 
 
 @dataclass
@@ -21,8 +26,8 @@ class PLSReducer:
     def fit(self, features: pl.DataFrame, target: Optional[pl.Series] = None) -> "FittedPLSReducer":
         if target is None:
             raise ValueError("PLSReducer requires target at fit time (supervised method)")
-        X = features.to_numpy().astype(np.float64)
-        y = target.to_numpy().astype(np.float64).reshape(-1, 1)
+        X = frame_to_fit_array(features)
+        y = series_to_fit_array(target).reshape(-1, 1)
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         pls = PLSRegression(n_components=self.n_components)
@@ -40,10 +45,11 @@ class FittedPLSReducer:
     input_names: list[str]
 
     def transform(self, features: pl.DataFrame) -> pl.DataFrame:
-        X = features.select(self.input_names).to_numpy().astype(np.float64)
+        X = frame_to_fit_array(features, self.input_names)
         X_scaled = self.scaler.transform(X)
         result = self.pls.transform(X_scaled)
         components = result[0] if isinstance(result, tuple) else result
+        components = components.astype(FIT_DTYPE, copy=False)
         return pl.DataFrame(dict(zip(self.output_names, components.T)))
 
     def output_feature_names(self) -> list[str]:

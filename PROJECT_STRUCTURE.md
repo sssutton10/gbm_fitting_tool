@@ -190,7 +190,8 @@ The public data containers use Polars:
 - metrics and feature importance outputs are usually `pl.DataFrame`
 
 Model wrappers convert to NumPy or framework-native matrix types at model
-boundaries.
+boundaries. Floating-point `ModelData` columns and model-fitting buffers use
+`float32`; evaluation metrics use `float64` accumulation.
 
 ## Data Layer
 
@@ -240,6 +241,8 @@ infers the schema when the caller does not provide one.
 Defined in `data/model_data.py`.
 
 `ModelData` is the central data container passed through almost every layer.
+During construction, Float64 feature and row-level columns are downcast to
+Float32. Integer and categorical columns retain their original dtypes.
 
 ```python
 ModelData(
@@ -648,7 +651,7 @@ Supports:
 
 Training behavior:
 
-- Converts feature data to `float64` NumPy.
+- Converts feature and row-level fitting data to `float32` NumPy.
 - Converts `_NUMERIC_FILL` to `np.nan`.
 - For Poisson with exposure, uses `log(exposure)` as an initial score.
 - If exposure and `data.offset` are both absent, omits `init_score` from the
@@ -686,7 +689,7 @@ Supports:
 
 Training behavior:
 
-- Converts feature data to `float64` NumPy.
+- Converts feature and row-level fitting data to `float32` NumPy.
 - Passes `_NUMERIC_FILL` as `missing` to `xgb.DMatrix`.
 - For Poisson with exposure, uses `log(exposure)` as `base_margin`.
 - If exposure is absent, omits `base_margin` from the training `DMatrix`.
@@ -721,7 +724,7 @@ Supports:
 
 Training behavior:
 
-- Converts feature data to `float64` NumPy.
+- Converts feature and row-level fitting data to `float32` NumPy.
 - Converts `_NUMERIC_FILL` to `np.nan`.
 - Sets `loss_function` from objective unless caller overrides it.
 - Uses `allow_writing_files=False` by default.

@@ -3,6 +3,7 @@ from typing import Literal, Optional
 
 import polars as pl
 
+from .dtypes import cast_float64_frame, cast_float64_series
 from .schema import FeatureSchema, infer_schema
 
 
@@ -30,7 +31,15 @@ class ModelData:
     comparisons: Optional[pl.DataFrame] = None
 
     def __post_init__(self) -> None:
-        """Infer a feature schema when the caller does not supply one."""
+        """Apply the fitting dtype policy and infer a schema when needed."""
+        self.features = cast_float64_frame(self.features)
+        self.target = cast_float64_series(self.target)
+        self.exposure = cast_float64_series(self.exposure)
+        self.weight = cast_float64_series(self.weight)
+        self.offset = cast_float64_series(self.offset)
+        if self.comparisons is not None:
+            self.comparisons = cast_float64_frame(self.comparisons)
+
         if (
             self.schema is None
             and all(name in self.features.columns for name in self.feature_names)

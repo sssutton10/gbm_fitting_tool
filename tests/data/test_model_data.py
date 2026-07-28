@@ -46,6 +46,35 @@ def test_model_data_infers_schema_when_omitted(poisson_raw):
     )
 
 
+def test_model_data_downcasts_float64_fields_to_float32():
+    data = ModelData(
+        features=pl.DataFrame({
+            "continuous": pl.Series([1.0, 2.0], dtype=pl.Float64),
+            "integer": pl.Series([1, 2], dtype=pl.Int64),
+            "category": ["a", "b"],
+        }),
+        target=pl.Series("target", [1.0, 2.0], dtype=pl.Float64),
+        exposure=pl.Series("exposure", [0.5, 1.5], dtype=pl.Float64),
+        weight=pl.Series("weight", [1.0, 2.0], dtype=pl.Float64),
+        feature_names=["continuous", "integer", "category"],
+        offset=pl.Series("offset", [0.1, 0.2], dtype=pl.Float64),
+        comparisons=pl.DataFrame({
+            "benchmark": pl.Series([1.0, 2.0], dtype=pl.Float64),
+        }),
+    )
+
+    assert data.features.schema == {
+        "continuous": pl.Float32,
+        "integer": pl.Int64,
+        "category": pl.String,
+    }
+    assert data.target.dtype == pl.Float32
+    assert data.exposure.dtype == pl.Float32
+    assert data.weight.dtype == pl.Float32
+    assert data.offset.dtype == pl.Float32
+    assert data.comparisons.schema == {"benchmark": pl.Float32}
+
+
 def test_poisson_defaults_exposure_and_weight_to_none(poisson_raw):
     data = ModelData(
         features=poisson_raw.select(["x1"]),
