@@ -17,9 +17,11 @@ At a high level, the tool does this:
 
 1. Load a policy-level parquet file into a `ModelData` object.
 2. Validate basic target, exposure, weight, offset, fold, and comparison fields.
-3. Optionally select a raw-feature subset and tune model hyperparameters with
-   fold-local cross-validation.
-4. Fit feature preparation steps and the model on all supplied training rows.
+3. Optionally select a raw-feature subset, encode it, and complete feature
+   selection on all supplied training rows.
+4. Optionally tune model hyperparameters on the fixed final selection with
+   fold-local preprocessing, then fit preprocessing and the model on all
+   training rows.
 5. Evaluate an explicitly supplied holdout with the fitted artifacts.
 6. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
@@ -358,9 +360,11 @@ Classes:
 - `OneHotEncoder`
 - `FittedOneHotEncoder`
 
-The pipeline uses the unfitted `OneHotEncoder` from `ModelRecipe`. It is fit on
-all supplied training rows, or on each fold's training rows during tuning, and
-the fitted encoder is reused for evaluation and prediction.
+The main pipeline uses the unfitted `OneHotEncoder` from `ModelRecipe`. It is
+fit once on all supplied training rows before feature selection and tuning, and
+the fitted encoder is reused for evaluation and prediction. A direct
+`HyperparameterTuner.tune(...)` call may instead receive an encoder to refit on
+each fold's training rows.
 
 Output order:
 
@@ -425,8 +429,9 @@ Defined in `preprocessing/pls.py`.
 - returns components named `pls_1`, `pls_2`, and so on.
 
 Pitfall: because PLS is supervised, it must only be fit on training data inside
-each split or fold. `ModelPipeline.run()`, `HyperparameterTuner`, and ensemble
-fold helpers pass the fold-training target to the reducer.
+each split or fold. `ModelPipeline.run()` passes the supplied full-training
+target during its final fit; `HyperparameterTuner` and ensemble fold helpers
+pass only the fold-training target.
 
 ### UMAP Reducer
 
@@ -514,9 +519,9 @@ refer to encoded columns rather than original source fields.
 
 The usual pattern is a shallow, fast screening learner followed by a more
 realistic tree configuration for final pruning. Stage learner parameters remain
-fixed during hyperparameter tuning; Optuna tunes only the final recipe model.
-The selector is refit independently on fold-training data in tuning,
-cross-validation, OOF blending, and stacking.
+fixed, and the main pipeline completes every stage before Optuna tunes only the
+final recipe model on the fixed retained columns. OOF blending and stacking
+continue to refit their recipe transform chains within their own folds.
 
 `FittedStagedImportanceSelector` exposes every stage's ranking DataFrame with
 `feature`, `importance`, `rank`, and `selected` columns. `FittedPipeline` keeps
@@ -557,7 +562,7 @@ Important pitfall: `ImportancePruner.fit()` has this signature:
 fit(data: ModelData, fitted_model: FittedModel)
 ```
 
-The main pipeline and tuner selector hooks call:
+Pipeline-compatible selector hooks call:
 
 ```python
 selector.fit(current_train)
@@ -772,10 +777,11 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 `ModelPipeline.run()` executes in this order:
 
 1. Optionally restrict the raw input to `feature_names`.
-2. Optionally tune hyperparameters with fold-local cross-validation fitting.
-3. Fit encoder, feature selection, the full ordered preprocessing chain, and
-   model on all supplied data.
-4. Build reproducibility metadata and return `FittedPipeline`.
+2. Fit the encoder and complete feature selection on all supplied training rows.
+3. Optionally tune hyperparameters on that fixed final feature selection, with
+   preprocessors fit independently in each tuning fold.
+4. Fit the full preprocessing chain and model on all supplied data.
+5. Build reproducibility metadata and return `FittedPipeline`.
 
 Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
 caller-provided final holdout. That holdout is never used for tuning, selector
@@ -787,24 +793,23 @@ If `recipe.tuning` is supplied, pipeline tuning calls:
 
 ```python
 self.recipe.tuning.tune(
-    train_data,
+    selected_train_data,
     self.recipe.model,
-    encoder=self.recipe.encoder,
-    selector=self.recipe.selection,
     preprocessors=self.recipe.preprocessing,
-    schema=train_data.schema,
     progress=self.progress,
     should_stop=self.should_stop,
 )
 ```
 
-The full preprocessing chain is fit and applied on each fold's training data,
-then applied to that fold's validation data.
+The selected matrix is fixed before this call. The full preprocessing chain is
+fit and applied on each fold's training data, then applied to that fold's
+validation data.
 
 When the pipeline is started with `ModelPipeline.run(feature_names=...)`, that
-ordered raw-feature subset becomes `train_data` before tuning begins, so every
-tuning fold and the final full-data fit use the same inputs. Direct tuner calls
-can instead pass `feature_names` to `HyperparameterTuner.tune(...)`.
+ordered raw-feature subset is applied before encoding and selection. Tuning
+then receives the encoded, final selected columns derived from that subset, and
+the final full-data model uses the same selected columns. Direct tuner calls can
+instead pass `feature_names` to `HyperparameterTuner.tune(...)`.
 
 Pitfalls:
 
@@ -887,7 +892,7 @@ Supported metrics:
 - `rmse`
 - `mae`
 
-For each Optuna trial:
+For a direct `HyperparameterTuner.tune(...)` call, each Optuna trial:
 
 1. Draw params from `model.default_search_space()`.
 2. Build fold splits:
@@ -902,6 +907,12 @@ For each Optuna trial:
 8. Predict validation response.
 9. Score validation predictions.
 10. Report intermediate score to Optuna for pruning.
+
+`ModelPipeline.run()` deliberately invokes the tuner differently: it has
+already fitted the encoder and completed feature selection, so it passes the
+fixed selected `ModelData` without an encoder or selector. In that path, steps
+4 and 5 above are already complete, and only the preprocessing chain is refit
+inside each tuning fold.
 
 The tuner returns:
 
@@ -1308,9 +1319,9 @@ Types:
 
 Pipeline-emitted stages are:
 
-- `tuning`
 - `encode`
 - `select`
+- `tuning`
 - `preprocess`
 - `fit`
 
@@ -1399,10 +1410,18 @@ recipe = ModelRecipe(
 ### Optuna Tuning
 
 ```python
+from ins_gbm.preprocessing.encoder import OneHotEncoder
+from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.tuning.tuner import HyperparameterTuner
 
 recipe = ModelRecipe(
     model=LightGBMModel(objective="poisson"),
+    encoder=OneHotEncoder(),
+    selection=BorutaSelector(
+        base_estimator="lightgbm",
+        max_iter=50,
+        seed=42,
+    ),
     tuning=HyperparameterTuner(
         n_trials=25,
         cv_folds=5,
@@ -1417,6 +1436,10 @@ result = ModelPipeline(data=data, recipe=recipe).run(
 )
 history = result.tuning_history
 ```
+
+This pipeline fits the encoder, completes Boruta, and fixes
+`result.selected_features` before the first Optuna trial begins. Tuning folds
+refit the preprocessing chain, if present, against that fixed feature set.
 
 ### Predefined Folds for Tuning
 
@@ -1706,11 +1729,13 @@ or Python version changes.
 
 ## Mental Model for New Contributors
 
-The main invariant to preserve is leakage control:
+The main invariant to preserve is final-holdout isolation:
 
-- fit encoders, selectors, and reducers only on the rows available to the
-  current fit or CV training fold.
-- tune only with fold-local training transformations.
+- fit the main pipeline encoder and selector only on the supplied training
+  data, never on the final holdout.
+- finish selection before tuning and keep the selected feature matrix fixed
+  throughout hyperparameter CV.
+- fit reducers only on each CV training fold during tuning.
 - optimize blend weights or stacking meta-learners without the final holdout.
 - evaluate once on a caller-provided final holdout.
 

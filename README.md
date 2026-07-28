@@ -106,7 +106,17 @@ recipe.preprocessing = [
 Use `StagedImportanceSelector` to prune encoded model columns in one or more
 fits before the final model is trained. Each stage owns its learner and fixed
 parameters, so a shallow screen can be followed by a more realistic pruning
-fit. Importance names are native to the selected framework.
+fit. The pipeline completes every selection stage first, then tunes the final
+recipe model on that fixed selected feature set. Importance names are native to
+the selected framework.
+
+For a pool of roughly 500 eligible candidates, prefer one cheap global screen
+followed by one or more narrower refinement fits. Do not divide columns into
+arbitrary batches: importance scores from different batches are not directly
+comparable, and removing competing or interacting variables changes the
+rankings. Separate the final holdout before selection, and remember that stage
+limits count encoded model columns rather than raw source variables. The
+complete runnable workflow is in `examples/example_usage.ipynb`.
 
 ```python
 from ins_gbm.models.lightgbm import LightGBMModel

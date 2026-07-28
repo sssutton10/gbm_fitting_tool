@@ -85,6 +85,55 @@ def test_tuning_still_uses_cv_and_stores_history(poisson_parquet):
     assert len(result.tuning_history) == 2
 
 
+def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
+    events = []
+
+    class RecordingEncoder:
+        def fit(self, features, schema):
+            events.append("encode")
+            return self
+
+        def transform(self, features):
+            return features
+
+    class SelectX3:
+        def fit(self, data):
+            events.append("select")
+            return self
+
+        def selected_features(self):
+            return ["x3"]
+
+    class RecordingTuner:
+        n_trials = 1
+        seed = 17
+
+        def tune(self, data, model, **kwargs):
+            events.append("tune")
+            assert data.feature_names == ["x3"]
+            assert kwargs.get("encoder") is None
+            assert kwargs.get("selector") is None
+            return (
+                {"n_estimators": 5, "verbose": -1},
+                pl.DataFrame({"trial": [0], "value": [1.0]}),
+            )
+
+    result = ModelPipeline(
+        data=_data(poisson_parquet),
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            encoder=RecordingEncoder(),
+            selection=SelectX3(),
+            tuning=RecordingTuner(),
+        ),
+    ).run()
+
+    assert events == ["encode", "select", "tune"]
+    assert result.selected_features == ["x3"]
+    assert result.train_data.feature_names == ["x3"]
+    assert len(result.tuning_history) == 1
+
+
 def test_comparison_predictions_are_taken_from_holdout(poisson_raw):
     data = _data_from_raw = ModelData(
         features=poisson_raw.select(["x1", "x3"]), target=poisson_raw["claim_count"],

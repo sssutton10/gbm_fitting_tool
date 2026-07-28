@@ -49,7 +49,7 @@ src/ins_gbm/
 
 - **`ModelData`** — central data container (`features`, `target`, `exposure`, `weight`, `feature_names`, `schema`, `objective`). Call `.validate()` after construction. `.with_features(df)` returns a copy with new features + updated feature names; `.select_features(names)` returns a schema-filtered view while preserving all row-level fields.
 - **`FittedModel`** — wraps a trained model. Fields `predict_fn` and `importance_fn` are callables (NOT `_predict_fn` — leading underscore breaks dataclass `__init__`). `.predict(data, prediction_type)` where `prediction_type ∈ {"response", "rate", "link"}`.
-- **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). `preprocessing` accepts either legacy whole-frame preprocessors or `PreprocessingStep(name, preprocessor, feature_names)` for column-targeted transforms with passthrough. Cloneable; used by tuner and stacking for CV re-fits.
+- **`ModelRecipe`** — unfitted config (`model`, `encoder`, `selection`, `preprocessing`, `tuning`). `preprocessing` accepts either legacy whole-frame preprocessors or `PreprocessingStep(name, preprocessor, feature_names)` for column-targeted transforms with passthrough. Cloneable; used by the pipeline, tuner, and stacking workflows.
 - **`FittedPipeline`** — result of `ModelPipeline.run()`. `train_data` reconstructs every supplied training row after encoding, selection, and preprocessing; `raw_train_data` retains selected raw inputs in memory for fold refits but is omitted from persistence. Call `.evaluate(holdout_data)` for explicit holdout metrics and plots.
 
 ## Reusable Fits and Targeted Preprocessing
@@ -78,10 +78,11 @@ Random Forest (sklearn) has no native missing-value support, so it receives the 
 
 ## Leakage Guardrails
 
-- Encoder, selector, and preprocessor must be fit only on the **training fold** inside CV loops — never on the full dataset before splitting.
+- `ModelPipeline.run()` fits its encoder and complete selector workflow on all supplied training rows first, then tunes on that fixed final feature matrix. Keep the final holdout entirely separate from the supplied training data.
+- Preprocessors must be fit only on the **training fold** inside tuning CV loops.
 - `PLSReducer` is supervised (requires target at fit time); never let it see validation target during CV.
 - Blend weights and stacking meta-learner are fit only on training/OOF data; test set is evaluation-only.
-- `ModelPipeline.run()` enforces this order: optional raw-feature subset → tune with fold-local transforms → refit on all supplied rows. The caller evaluates an explicit holdout afterward.
+- `ModelPipeline.run()` enforces this order: optional raw-feature subset → encode → complete feature selection → tune with the final selection and fold-local preprocessing → fit on all supplied rows. The caller evaluates an explicit holdout afterward.
 
 ## Persistence
 

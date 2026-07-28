@@ -18,8 +18,8 @@ from ins_gbm.preprocessing.chain import FittedTransformChain
 class ModelRecipe:
     """Cloneable, unfitted pipeline configuration.
 
-    Used by ``ModelPipeline.run()``, the hyperparameter tuner (each CV trial
-    refits the full recipe), and the stacking ensemble (refits inside CV folds).
+    Used by ``ModelPipeline.run()``, the hyperparameter tuner, and the stacking
+    ensemble (which refits recipes inside CV folds).
     """
     model: Any
     encoder: Optional[Any] = None
@@ -160,13 +160,15 @@ class FittedPipeline:
 
 @dataclass
 class ModelPipeline:
-    """Full-data train → tune → fit orchestrator.
+    """Full-data select → tune → fit orchestrator.
 
     Execution order
     ---------------
-    1. (Optional) Tune with cross-validation: encoder, selector, and preprocessor
-       are refit independently on each CV fold to prevent leakage.
-    2. Fit encoder → selector → preprocessors → model on every supplied row
+    1. Fit the encoder and complete feature-selection workflow on every supplied
+       training row, producing one final selected feature matrix.
+    2. (Optional) Tune with cross-validation on that fixed feature matrix.
+       Preprocessors are still refit independently on each CV fold.
+    3. Fit preprocessors and the final model on every supplied training row
        using the best hyperparameters.
 
     Use :meth:`FittedPipeline.evaluate` to evaluate a separately supplied
@@ -200,27 +202,7 @@ class ModelPipeline:
         raw_train_data = train_data
         self._check_cancel()
 
-        # ── 1. Tune (optional) ────────────────────────────────────────────────
-        tuning_history: Optional[pl.DataFrame] = None
-        best_params: dict = {}
-        if self.recipe.tuning is not None:
-            self._emit(
-                "tuning", "starting hyperparameter tuning",
-                total=self.recipe.tuning.n_trials,
-            )
-            best_params, tuning_history = self.recipe.tuning.tune(
-                train_data,
-                self.recipe.model,
-                encoder=self.recipe.encoder,
-                selector=self.recipe.selection,
-                preprocessors=self.recipe.preprocessing,
-                schema=getattr(train_data, "schema", None),
-                progress=self.progress,
-                should_stop=self.should_stop,
-            )
-            self._check_cancel()
-
-        # ── 2. Fit on full training data ──────────────────────────────────────
+        # ── 1. Encode and complete feature selection ─────────────────────────
         current_train = train_data
         fitted_encoder: Optional[Any] = None
 
@@ -251,6 +233,24 @@ class ModelPipeline:
                 current_train.features.select(selected_features)
             )
 
+        # ── 2. Tune on the fixed final feature selection (optional) ───────────
+        tuning_history: Optional[pl.DataFrame] = None
+        best_params: dict = {}
+        if self.recipe.tuning is not None:
+            self._emit(
+                "tuning", "starting hyperparameter tuning",
+                total=self.recipe.tuning.n_trials,
+            )
+            best_params, tuning_history = self.recipe.tuning.tune(
+                current_train,
+                self.recipe.model,
+                preprocessors=self.recipe.preprocessing,
+                progress=self.progress,
+                should_stop=self.should_stop,
+            )
+            self._check_cancel()
+
+        # ── 3. Fit preprocessors and model on full training data ──────────────
         fitted_preprocessors: list = []
         for prep in self.recipe.preprocessing:
             self._emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
@@ -271,7 +271,7 @@ class ModelPipeline:
         )
         self._check_cancel()
 
-        # ── 3. Capture reproducibility metadata ───────────────────────────────
+        # ── 4. Capture reproducibility metadata ───────────────────────────────
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=selected_features,
