@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,24 @@ _METRIC_FN = {
     "rmse": rmse,
     "mae": mae,
 }
+
+
+def _create_journal_storage(file_path: str) -> Any:
+    """Create process-safe JournalStorage with Windows-compatible locking."""
+    from optuna.storages import JournalStorage
+    from optuna.storages.journal import (
+        JournalFileBackend,
+        JournalFileOpenLock,
+    )
+
+    lock = (
+        JournalFileOpenLock(file_path)
+        if platform.system() == "Windows"
+        else None
+    )
+    return JournalStorage(
+        JournalFileBackend(file_path=file_path, lock_obj=lock)
+    )
 
 
 @dataclass
@@ -404,8 +423,6 @@ class HyperparameterTuner:
     ) -> tuple[dict, pl.DataFrame]:
         """Run trials in subprocesses coordinated by JournalStorage."""
         import cloudpickle
-        from optuna.storages import JournalStorage
-        from optuna.storages.journal import JournalFileBackend
 
         worker_count = (
             os.cpu_count() or 1
@@ -435,9 +452,7 @@ class HyperparameterTuner:
                 ) from exc
             payload_path.write_bytes(payload)
 
-            storage = JournalStorage(
-                JournalFileBackend(file_path=str(journal_path))
-            )
+            storage = _create_journal_storage(str(journal_path))
             study_name = f"ins-gbm-{uuid.uuid4()}"
             optuna.logging.set_verbosity(optuna.logging.WARNING)
             study = optuna.create_study(

@@ -1010,6 +1010,11 @@ is supplied. An explicit path preserves the journal for inspection; each
 previous one. Journal file locking supports multiple workers on the same host
 and local filesystem.
 
+On Windows, journal files automatically use `JournalFileOpenLock` rather than
+Optuna's default symbolic-link lock. This avoids the Windows "A required
+privilege is not held by the client" error without requiring Developer Mode or
+administrator privileges. Other platforms retain Optuna's default lock.
+
 Process tuning can be called directly from a Jupyter notebook cell. Workers
 start through an importable `ins_gbm` module, and the tuning payload is
 serialized with cloudpickle, so the notebook does not need an

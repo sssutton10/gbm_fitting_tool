@@ -6,10 +6,8 @@ import sys
 
 import cloudpickle
 import optuna
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
 
-from ins_gbm.tuning.tuner import _evaluate_trial
+from ins_gbm.tuning.tuner import _create_journal_storage, _evaluate_trial
 
 
 def main() -> int:
@@ -18,7 +16,7 @@ def main() -> int:
         config = cloudpickle.load(payload_file)
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    storage = JournalStorage(JournalFileBackend(file_path=journal_path))
+    storage = _create_journal_storage(journal_path)
     study = optuna.load_study(
         study_name=study_name,
         storage=storage,

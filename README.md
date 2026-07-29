@@ -76,6 +76,9 @@ tuned_fit = fit.retune(
 
 The process backend uses a temporary journal by default. Set
 `journal_path="output/tuning.journal"` to retain the Optuna log for inspection.
+On Windows, the journal automatically uses Optuna's open-file lock instead of
+its default symbolic-link lock, so Developer Mode and administrator privileges
+are not required.
 Each process holds its own copy of the tuning data, and model-level thread
 counts should be limited to avoid CPU oversubscription.
 

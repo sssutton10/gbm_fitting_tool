@@ -12,7 +12,7 @@ from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.preprocessing.pca import PCAReducer
 from ins_gbm.preprocessing.steps import PreprocessingStep
-from ins_gbm.tuning.tuner import HyperparameterTuner
+from ins_gbm.tuning.tuner import HyperparameterTuner, _create_journal_storage
 
 
 class _RecordingModel:
@@ -209,6 +209,29 @@ def test_tuner_process_backend_resolves_all_available_cpus(
 
     assert len(history) == 2
     assert history["value"].n_unique() == 2
+
+
+def test_journal_storage_uses_open_lock_on_windows(tmp_path, monkeypatch):
+    import ins_gbm.tuning.tuner as tuner_module
+    from optuna.storages.journal import JournalFileOpenLock
+
+    monkeypatch.setattr(tuner_module.platform, "system", lambda: "Windows")
+    storage = _create_journal_storage(str(tmp_path / "windows.journal"))
+
+    assert isinstance(storage._backend._lock, JournalFileOpenLock)
+
+
+def test_journal_storage_retains_default_lock_off_windows(
+    tmp_path,
+    monkeypatch,
+):
+    import ins_gbm.tuning.tuner as tuner_module
+    from optuna.storages.journal import JournalFileSymlinkLock
+
+    monkeypatch.setattr(tuner_module.platform, "system", lambda: "Linux")
+    storage = _create_journal_storage(str(tmp_path / "linux.journal"))
+
+    assert isinstance(storage._backend._lock, JournalFileSymlinkLock)
 
 
 def test_tuner_process_backend_retains_explicit_journal(
