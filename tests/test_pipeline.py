@@ -172,6 +172,167 @@ def test_pipeline_run_can_select_reusable_feature_subset(poisson_raw):
     assert result.predict(data).len() == data.n_rows
 
 
+def test_pipeline_run_can_select_fixed_encoded_features(poisson_raw):
+    schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]),
+        target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"],
+        weight=None,
+        feature_names=["x1", "x2", "x3"],
+        schema=schema,
+        objective="poisson",
+    ).validate()
+
+    result = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            encoder=OneHotEncoder(),
+            params={"n_estimators": 5},
+        ),
+    ).run(
+        feature_names=["x1", "x2__A"],
+        feature_stage="encoded",
+    )
+
+    assert result.input_feature_names == ["x1", "x2", "x3"]
+    assert result.raw_train_data is data
+    assert result.selected_features == ["x1", "x2__A"]
+    assert result.train_data.features.columns == ["x1", "x2__A"]
+    assert result.metadata.selected_features == ["x1", "x2__A"]
+    assert result.predict(data).len() == data.n_rows
+
+
+def test_encoded_feature_stage_works_without_encoder(poisson_parquet):
+    data = _data(poisson_parquet)
+    result = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            params={"n_estimators": 5},
+        ),
+    ).run(feature_names=["x3"], feature_stage="encoded")
+
+    assert result.input_feature_names == ["x1", "x3"]
+    assert result.selected_features == ["x3"]
+    assert result.train_data.features.columns == ["x3"]
+
+
+def test_encoded_feature_stage_validates_configuration(poisson_parquet):
+    data = _data(poisson_parquet)
+    recipe = ModelRecipe(model=LightGBMModel(objective="poisson"))
+
+    with pytest.raises(ValueError, match="feature_names is required"):
+        ModelPipeline(data=data, recipe=recipe).run(feature_stage="encoded")
+    with pytest.raises(ValueError, match="at least one"):
+        ModelPipeline(data=data, recipe=recipe).run(
+            feature_names=[],
+            feature_stage="encoded",
+        )
+    with pytest.raises(ValueError, match="must be unique"):
+        ModelPipeline(data=data, recipe=recipe).run(
+            feature_names=["x1", "x1"],
+            feature_stage="encoded",
+        )
+    with pytest.raises(ValueError, match="missing after encoding"):
+        ModelPipeline(data=data, recipe=recipe).run(
+            feature_names=["not_a_feature"],
+            feature_stage="encoded",
+        )
+
+    class Selector:
+        def fit(self, data):
+            return self
+
+        def selected_features(self):
+            return ["x1"]
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ModelPipeline(
+            data=data,
+            recipe=ModelRecipe(
+                model=LightGBMModel(objective="poisson"),
+                selection=Selector(),
+            ),
+        ).run(feature_names=["x1"], feature_stage="encoded")
+
+    with pytest.raises(ValueError, match="feature_stage"):
+        ModelPipeline(data=data, recipe=recipe).run(
+            feature_names=["x1"],
+            feature_stage="invalid",
+        )
+
+
+def test_retune_freezes_encoder_and_selection_and_returns_new_pipeline(poisson_raw):
+    schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]),
+        target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"],
+        weight=None,
+        feature_names=["x1", "x2", "x3"],
+        schema=schema,
+        objective="poisson",
+    ).validate()
+    preprocessing = [
+        PreprocessingStep(
+            name="x1_pca",
+            preprocessor=PCAReducer(n_components=1),
+            feature_names=["x1"],
+        ),
+    ]
+    original = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"),
+            encoder=OneHotEncoder(),
+            preprocessing=preprocessing,
+            params={"n_estimators": 3},
+        ),
+    ).run(
+        feature_names=["x1", "x2__A"],
+        feature_stage="encoded",
+    )
+
+    class RecordingTuner:
+        n_trials = 1
+        seed = 73
+
+        def tune(self, tuning_data, model, **kwargs):
+            assert tuning_data.features.columns == ["x1", "x2__A"]
+            assert kwargs["preprocessors"] is preprocessing
+            assert "encoder" not in kwargs
+            assert "selector" not in kwargs
+            return (
+                {"n_estimators": 7, "learning_rate": 0.123},
+                pl.DataFrame({"trial": [0], "value": [1.0]}),
+            )
+
+    original_model = original.fitted_model
+    original_preprocessors = original.preprocessors
+    tuned = original.retune(RecordingTuner())
+
+    assert tuned is not original
+    assert original.fitted_model is original_model
+    assert original.preprocessors is original_preprocessors
+    assert original.tuning_history is None
+    assert original.recipe.tuning is None
+
+    assert tuned.encoder is original.encoder
+    assert tuned.selected_features == original.selected_features
+    assert tuned.selection_results is original.selection_results
+    assert tuned.raw_train_data is original.raw_train_data
+    assert tuned.preprocessors is not original.preprocessors
+    assert tuned.fitted_model.params["n_estimators"] == 7
+    assert tuned.fitted_model.params["learning_rate"] == 0.123
+    assert tuned.tuning_history.height == 1
+    assert tuned.recipe.tuning.seed == 73
+    assert tuned.metadata.random_seeds["tuning"] == 73
+    assert tuned.metadata.model_params == tuned.fitted_model.params
+    assert tuned.predict(data).len() == data.n_rows
+
+
 def test_pipeline_targeted_preprocessor_retains_other_features(poisson_raw):
     data = ModelData(
         features=poisson_raw.select(["x1", "x3"]),

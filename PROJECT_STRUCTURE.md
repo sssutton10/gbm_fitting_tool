@@ -811,7 +811,8 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 `ModelPipeline.run()` executes in this order:
 
-1. Optionally restrict the raw input to `feature_names`.
+1. Optionally restrict the raw input to `feature_names`, or defer a fixed
+   `feature_names` subset until after encoding with `feature_stage="encoded"`.
 2. Fit the encoder and complete feature selection on all supplied training rows.
 3. Optionally tune hyperparameters on that fixed final feature selection, with
    preprocessors fit independently in each tuning fold.
@@ -846,6 +847,18 @@ then receives the encoded, final selected columns derived from that subset, and
 the final full-data model uses the same selected columns. Direct tuner calls can
 instead pass `feature_names` to `HyperparameterTuner.tune(...)`.
 
+Use `feature_stage="encoded"` when `feature_names` already contains one-hot or
+otherwise encoded column names. The encoder is fit first, the ordered subset is
+stored as the pipeline's fixed final selection, and tuning and prediction reuse
+that selection. This mode cannot be combined with `recipe.selection`.
+
+```python
+fixed_fit = ModelPipeline(data=data, recipe=recipe_without_selector).run(
+    feature_names=["age", "territory__urban", "territory__rural"],
+    feature_stage="encoded",
+)
+```
+
 Pitfalls:
 
 - Preprocessors are an ordered transform chain, not concurrent jobs.
@@ -860,14 +873,16 @@ Pitfalls:
 Important fields:
 
 - `fitted_model`: the final `FittedModel`.
-- `recipe`: the original `ModelRecipe` object.
+- `recipe`: the original `ModelRecipe` object, or a copy containing the new
+  tuner when returned by `retune()`.
 - `input_feature_names`: ordered raw inputs selected for this run.
 - `raw_train_data`: optional selected raw training data retained in memory for
   OOF ensemble fits and omitted from compact persisted artifacts.
 - `input_schema`: compact raw-feature schema retained for scoring.
 - `train_data`: non-cached property that reconstructs the transformed training
   data only when explicitly accessed.
-- `selected_features`: selected feature names, if selection was used.
+- `selected_features`: learned or fixed post-encoding feature names, if
+  selection was used or `feature_stage="encoded"` was requested.
 - `selection_results`: per-stage importance rankings and selected columns for a
   staged importance selector.
 - `tuning_history`: Optuna history DataFrame, if tuning was used.
@@ -880,9 +895,24 @@ Important methods:
 - `predict(data, prediction_type="response")`
 - `predict_raw(features, exposure=None, weight=None, prediction_type="response")`
 - `evaluate(holdout_data)`
+- `retune(tuner, progress=None, should_stop=None)`
 
 Use `result.predict(holdout_data)` for raw holdout data, or
 `result.evaluate(holdout_data)` to produce metrics and plots.
+
+`result.retune(tuner)` returns a new pipeline while leaving `result` unchanged.
+It freezes the fitted encoder and exact selected columns, tunes with fold-local
+preprocessing, then refits preprocessing and the model on all attached training
+rows. Compact persisted pipelines must have their original training data
+reattached through `load_pipeline(..., training_data=...)` before retuning.
+
+```python
+retuned = result.retune(
+    HyperparameterTuner(n_trials=100, cv_folds=5, seed=42)
+)
+assert result.tuning_history is None
+history = retuned.tuning_history
+```
 
 Use `result.predict(raw_model_data)` when you have a raw `ModelData` shaped like
 the original pre-transform data.

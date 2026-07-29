@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Literal, Optional
 
 import polars as pl
 
@@ -12,6 +12,9 @@ from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
 from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 from ins_gbm.preprocessing.chain import FittedTransformChain
+
+
+FeatureStage = Literal["raw", "encoded"]
 
 
 @dataclass
@@ -157,6 +160,93 @@ class FittedPipeline:
             comparison_predictions=comparison_predictions,
         )
 
+    def retune(
+        self,
+        tuner: HyperparameterTuner,
+        *,
+        progress: Optional[ProgressCallback] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> "FittedPipeline":
+        """Tune again while freezing the fitted encoder and feature selection.
+
+        The original pipeline is not mutated. Preprocessors are fit independently
+        inside each tuning fold, then refit on all attached training rows before
+        fitting the returned pipeline's model.
+        """
+        from ins_gbm.persistence.metadata import build_metadata
+        from ins_gbm.preprocessing.steps import validate_preprocessing_steps
+
+        raw_train_data = self._require_raw_train_data()
+        validate_preprocessing_steps(self.recipe.preprocessing)
+
+        def emit(stage: str, message: str, **kwargs) -> None:
+            if progress is not None:
+                progress(ProgressEvent(stage=stage, message=message, **kwargs))
+
+        def check_cancel() -> None:
+            if should_stop is not None and should_stop():
+                raise PipelineCancelled("pipeline cancelled by caller")
+
+        check_cancel()
+        tuning_data = FittedTransformChain(
+            input_feature_names=self.input_feature_names,
+            encoder=self.encoder,
+            selected_features=self.selected_features,
+        ).transform(raw_train_data)
+
+        emit(
+            "tuning",
+            "starting hyperparameter retuning",
+            total=tuner.n_trials,
+        )
+        best_params, tuning_history = tuner.tune(
+            tuning_data,
+            self.recipe.model,
+            preprocessors=self.recipe.preprocessing,
+            progress=progress,
+            should_stop=should_stop,
+        )
+        check_cancel()
+
+        current_train = tuning_data
+        fitted_preprocessors: list[Any] = []
+        for prep in self.recipe.preprocessing:
+            emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
+            check_cancel()
+            fitted_prep = prep.fit(current_train.features, current_train.target)
+            current_train = current_train.with_features(
+                fitted_prep.transform(current_train.features)
+            )
+            fitted_preprocessors.append(fitted_prep)
+
+        emit("fit", "fitting model on full training data")
+        check_cancel()
+        fitted_model = self.recipe.model.fit(
+            current_train,
+            params=best_params if best_params else self.recipe.params,
+        )
+        check_cancel()
+
+        tuned_recipe = replace(self.recipe, tuning=tuner)
+        metadata = build_metadata(
+            fitted_model=fitted_model,
+            selected_features=self.selected_features,
+            input_feature_names=self.input_feature_names,
+            tuning_seed=getattr(tuner, "seed", None),
+            selection_stages=getattr(self.metadata, "selection_stages", None),
+        )
+
+        return replace(
+            self,
+            fitted_model=fitted_model,
+            recipe=tuned_recipe,
+            raw_train_data=raw_train_data,
+            input_schema=self._input_schema(),
+            tuning_history=tuning_history,
+            preprocessors=fitted_preprocessors,
+            metadata=metadata,
+        )
+
 
 @dataclass
 class ModelPipeline:
@@ -187,17 +277,38 @@ class ModelPipeline:
         if self.should_stop is not None and self.should_stop():
             raise PipelineCancelled("pipeline cancelled by caller")
 
-    def run(self, feature_names: Optional[list[str]] = None) -> FittedPipeline:
-        """Fit the recipe, optionally using an ordered subset of raw features."""
+    def run(
+        self,
+        feature_names: Optional[list[str]] = None,
+        *,
+        feature_stage: FeatureStage = "raw",
+    ) -> FittedPipeline:
+        """Fit the recipe with an optional raw or post-encoding feature subset."""
         from ins_gbm.persistence.metadata import build_metadata
         from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
         validate_preprocessing_steps(self.recipe.preprocessing)
-        train_data = (
-            self.data.select_features(feature_names)
-            if feature_names is not None
-            else self.data
-        )
+        if feature_stage not in ("raw", "encoded"):
+            raise ValueError("feature_stage must be 'raw' or 'encoded'")
+        if feature_stage == "encoded":
+            if feature_names is None:
+                raise ValueError(
+                    "feature_names is required when feature_stage='encoded'"
+                )
+            if not feature_names:
+                raise ValueError("feature_names must contain at least one feature")
+            if len(set(feature_names)) != len(feature_names):
+                raise ValueError("feature_names must be unique")
+            if self.recipe.selection is not None:
+                raise ValueError(
+                    "feature_stage='encoded' cannot be combined with "
+                    "recipe.selection; encoded feature_names are the fixed "
+                    "final selection"
+                )
+
+        train_data = self.data
+        if feature_stage == "raw" and feature_names is not None:
+            train_data = self.data.select_features(feature_names)
         input_feature_names = list(train_data.feature_names)
         raw_train_data = train_data
         self._check_cancel()
@@ -218,7 +329,21 @@ class ModelPipeline:
         selected_features: Optional[list[str]] = None
         selection_results: Optional[list[Any]] = None
         selection_metadata: Optional[list[dict]] = None
-        if self.recipe.selection is not None:
+        if feature_stage == "encoded":
+            selected_features = list(feature_names or [])
+            missing = [
+                name
+                for name in selected_features
+                if name not in current_train.features.columns
+            ]
+            if missing:
+                raise ValueError(
+                    f"Encoded features missing after encoding: {missing}"
+                )
+            current_train = current_train.with_features(
+                current_train.features.select(selected_features)
+            )
+        elif self.recipe.selection is not None:
             self._emit("select", "running feature selection")
             self._check_cancel()
             fitted_sel = self.recipe.selection.fit(current_train)

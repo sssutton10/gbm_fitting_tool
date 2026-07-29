@@ -37,6 +37,33 @@ fit = ModelPipeline(data=data, recipe=recipe).run(
 )
 ```
 
+To reuse a fixed set of one-hot columns, apply the subset after encoding. These
+names are stored as the pipeline's final selection and replayed for prediction:
+
+```python
+fit = ModelPipeline(data=data, recipe=recipe).run(
+    feature_names=["age", "territory__urban", "territory__rural"],
+    feature_stage="encoded",
+)
+```
+
+An existing fitted pipeline can also be tuned later without rerunning its
+encoder or selector. The original fit remains unchanged, while preprocessing is
+still refit independently inside each tuning fold:
+
+```python
+from ins_gbm.tuning.tuner import HyperparameterTuner
+
+tuned_fit = fit.retune(
+    HyperparameterTuner(n_trials=100, cv_folds=5, seed=42),
+)
+```
+
+Encoded-stage feature names are a fixed final selection and therefore cannot be
+combined with `recipe.selection`. Retuning requires attached training data; for
+a persisted pipeline, pass it through
+`load_pipeline(..., training_data=original_training_data)`.
+
 Model wrappers also build their design matrix at fit time. This is useful for
 lightweight iterations that do not need tuning or learned feature selection:
 
