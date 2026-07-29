@@ -59,6 +59,26 @@ tuned_fit = fit.retune(
 )
 ```
 
+For CPU-bound trial orchestration, opt into subprocess workers. They coordinate
+through Optuna JournalStorage and can be launched directly from a Jupyter cell:
+
+```python
+tuned_fit = fit.retune(
+    HyperparameterTuner(
+        n_trials=100,
+        cv_folds=5,
+        seed=42,
+        n_jobs=4,
+        backend="process",
+    ),
+)
+```
+
+The process backend uses a temporary journal by default. Set
+`journal_path="output/tuning.journal"` to retain the Optuna log for inspection.
+Each process holds its own copy of the tuning data, and model-level thread
+counts should be limited to avoid CPU oversubscription.
+
 Encoded-stage feature names are a fixed final selection and therefore cannot be
 combined with `recipe.selection`. Retuning requires attached training data; for
 a persisted pipeline, pass it through

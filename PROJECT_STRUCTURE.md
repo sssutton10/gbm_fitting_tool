@@ -948,6 +948,8 @@ tuner = HyperparameterTuner(
     seed=42,
     use_data_folds=False,
     n_jobs=4,
+    backend="process",
+    journal_path=None,
     show_progress_bar=True,
 )
 ```
@@ -996,9 +998,23 @@ encoder, selector, or preprocessor. An explicit encoder schema is restricted
 to the same subset.
 
 `n_jobs` controls concurrent Optuna trials. The default is `1`; use `-1` for
-all available CPUs. Parallel trials run in worker threads, which works well
-with LightGBM, XGBoost, CatBoost, and NumPy operations that release the Python
-GIL.
+all available CPUs. `backend="thread"` is the backward-compatible default and
+passes `n_jobs` directly to Optuna. `backend="process"` launches independent
+Python processes coordinated through
+`JournalStorage(JournalFileBackend(...))`, bypassing the Python GIL for
+CPU-bound Python work.
+
+The process backend uses an internal temporary journal unless `journal_path`
+is supplied. An explicit path preserves the journal for inspection; each
+`tune()` call still creates a new uniquely named study rather than resuming a
+previous one. Journal file locking supports multiple workers on the same host
+and local filesystem.
+
+Process tuning can be called directly from a Jupyter notebook cell. Workers
+start through an importable `ins_gbm` module, and the tuning payload is
+serialized with cloudpickle, so the notebook does not need an
+`if __name__ == "__main__"` guard. User-defined models and transforms must be
+cloudpickle-serializable.
 
 `show_progress_bar` displays completed trials and defaults to `True`. Set it to
 `False` for quiet batch runs.
@@ -1015,8 +1031,9 @@ Pitfalls:
   runs even with the same seed.
 - Avoid CPU oversubscription: if `n_jobs` runs several trials concurrently,
   consider limiting each model's own thread count.
-- Each concurrent trial holds its fold data and fitted transforms in memory,
-  so increase `n_jobs` conservatively on very large datasets.
+- Each process holds its own copy of the tuning data, and each concurrent trial
+  holds its fold data and fitted transforms, so increase `n_jobs`
+  conservatively on very large datasets.
 
 ### Search Spaces
 
