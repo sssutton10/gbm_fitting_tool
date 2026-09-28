@@ -125,6 +125,7 @@ def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
             encoder=RecordingEncoder(),
             selection=SelectX3(),
             tuning=RecordingTuner(),
+            selection_scope="fixed",
         ),
     ).run()
 
@@ -132,6 +133,34 @@ def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
     assert result.selected_features == ["x3"]
     assert result.train_data.feature_names == ["x3"]
     assert len(result.tuning_history) == 1
+
+
+def test_pipeline_default_tuning_receives_fold_local_transforms(poisson_parquet):
+    class RecordingTuner:
+        n_trials = 1
+        seed = 17
+        metric = None
+
+        def tune(self, data, model, **kwargs):
+            assert data.feature_names == ["x1", "x3"]
+            assert kwargs["encoder"] is not None
+            assert kwargs["selector"] is not None
+            return {"n_estimators": 5}, pl.DataFrame({"trial": [0], "value": [1.0]})
+
+    class IdentitySelector:
+        def fit(self, data):
+            self.names = list(data.feature_names)
+            return self
+
+        def selected_features(self):
+            return self.names
+
+    ModelRecipe(
+        model=LightGBMModel(),
+        encoder=OneHotEncoder(),
+        selection=IdentitySelector(),
+        tuning=RecordingTuner(),
+    ).fit(_data(poisson_parquet))
 
 
 def test_comparison_predictions_are_taken_from_holdout(poisson_raw):

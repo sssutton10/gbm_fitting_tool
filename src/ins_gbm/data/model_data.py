@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from typing import Literal, Optional
 
 import polars as pl
+import numpy as np
 
 from .dtypes import cast_float64_frame, cast_float64_series
 from .schema import FeatureSchema, infer_schema
@@ -50,8 +51,10 @@ class ModelData:
     def n_rows(self) -> int:
         return self.features.height
 
-    def validate(self) -> "ModelData":
+    def validate(self, *, require_multiple_folds: bool = True) -> "ModelData":
         n = self.n_rows
+        if n == 0:
+            raise ValueError("features must contain at least one row")
         if self.target.len() != n:
             raise ValueError(
                 f"target row count {self.target.len()} != features row count {n}"
@@ -69,11 +72,19 @@ class ModelData:
         missing = [f for f in self.feature_names if f not in self.features.columns]
         if missing:
             raise ValueError(f"features DataFrame missing columns: {missing}")
+        self._validate_numeric_series("target", self.target, finite=True)
         if self.exposure is not None:
+            self._validate_numeric_series("exposure", self.exposure, finite=True)
             if self.exposure.null_count() > 0:
                 raise ValueError("exposure must be non-null")
             if (self.exposure <= 0).any():
                 raise ValueError("exposure must be positive and non-zero")
+        if self.weight is not None:
+            self._validate_numeric_series("weight", self.weight, finite=True)
+            if (self.weight < 0).any():
+                raise ValueError("weight must be non-negative")
+            if float(self.weight.sum()) <= 0:
+                raise ValueError("weight must have a positive total")
         if self.objective == "poisson":
             if (self.target < 0).any():
                 raise ValueError("Poisson target must be non-negative")
@@ -95,6 +106,8 @@ class ModelData:
                 raise ValueError("offset must be non-null (no missing values)")
             if self.offset.is_infinite().any():
                 raise ValueError("offset must be finite (no inf values)")
+            if self.offset.is_nan().any():
+                raise ValueError("offset must be finite (no NaN values)")
 
         # --- cv_fold validation ---
         if self.cv_fold is not None:
@@ -108,10 +121,8 @@ class ModelData:
                 )
             if self.cv_fold.null_count() > 0:
                 raise ValueError("cv_fold must be non-null (no missing values)")
-            if self.cv_fold.n_unique() < 2:
-                raise ValueError(
-                    f"cv_fold must have at least 2 unique values, got {self.cv_fold.n_unique()}"
-                )
+            if require_multiple_folds and self.cv_fold.n_unique() < 2:
+                raise ValueError("cv_fold must have at least 2 unique values")
 
         # --- comparisons validation ---
         if self.comparisons is not None:
@@ -129,8 +140,44 @@ class ModelData:
                     raise ValueError(
                         f"comparisons column '{col}' must be strictly positive (> 0)"
                     )
+                if col_series.null_count() or col_series.is_nan().any() or col_series.is_infinite().any():
+                    raise ValueError(f"comparisons column '{col}' must be finite and non-null")
 
         return self
+
+    def validate_for_prediction(self) -> "ModelData":
+        """Validate fields used for scoring without requiring a meaningful target."""
+        n = self.n_rows
+        if n == 0:
+            raise ValueError("features must contain at least one row")
+        if len(set(self.feature_names)) != len(self.feature_names):
+            raise ValueError("feature_names must be unique")
+        missing = [name for name in self.feature_names if name not in self.features.columns]
+        if missing:
+            raise ValueError(f"features DataFrame missing columns: {missing}")
+        for name, values in (("exposure", self.exposure), ("weight", self.weight),
+                             ("offset", self.offset)):
+            if values is None:
+                continue
+            if values.len() != n:
+                raise ValueError(f"{name} row count {values.len()} != features row count {n}")
+            self._validate_numeric_series(name, values, finite=True)
+        if self.exposure is not None and (self.exposure <= 0).any():
+            raise ValueError("exposure must be positive and non-zero")
+        if self.weight is not None and (self.weight < 0).any():
+            raise ValueError("weight must be non-negative")
+        return self
+
+    @staticmethod
+    def _validate_numeric_series(name: str, values: pl.Series, *, finite: bool) -> None:
+        if values.dtype not in _NUMERIC_DTYPES:
+            raise ValueError(f"{name} must have a numeric dtype, got {values.dtype!r}")
+        if values.null_count() > 0:
+            raise ValueError(f"{name} must be non-null")
+        if finite:
+            array = values.to_numpy()
+            if not np.isfinite(array).all():
+                raise ValueError(f"{name} must contain only finite values")
 
     def with_features(self, features: pl.DataFrame) -> "ModelData":
         """Return a copy with replaced features and updated feature_names."""

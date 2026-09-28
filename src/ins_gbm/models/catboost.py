@@ -101,10 +101,14 @@ class CatBoostModel:
         X = replace_value_with_nan(X, _NUMERIC_FILL)
         y = series_to_fit_array(data.target)
 
-        baseline: Optional[np.ndarray] = None
+        baseline_parts: list[np.ndarray] = []
         if objective == "poisson" and data.exposure is not None:
-            if _catboost_supports_offset():
-                baseline = np.log(series_to_fit_array(data.exposure))
+            baseline_parts.append(np.log(series_to_fit_array(data.exposure)))
+        if data.offset is not None:
+            baseline_parts.append(series_to_fit_array(data.offset))
+        baseline = np.sum(baseline_parts, axis=0) if baseline_parts else None
+        if baseline is not None and not _catboost_supports_offset():
+            raise ValueError("This CatBoost version does not support exposure or offsets")
 
         sample_weight: Optional[np.ndarray] = None
         if data.weight is not None:
@@ -139,9 +143,14 @@ class CatBoostModel:
             )
             X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
 
-            pred_baseline: Optional[np.ndarray] = None
-            if objective == "poisson" and pred_data.exposure is not None and has_offset:
-                pred_baseline = np.log(series_to_fit_array(pred_data.exposure))
+            baseline_parts: list[np.ndarray] = []
+            if objective == "poisson" and pred_data.exposure is not None:
+                baseline_parts.append(np.log(series_to_fit_array(pred_data.exposure)))
+            if pred_data.offset is not None:
+                baseline_parts.append(series_to_fit_array(pred_data.offset))
+            pred_baseline = np.sum(baseline_parts, axis=0) if baseline_parts else None
+            if pred_baseline is not None and not has_offset:
+                raise ValueError("This CatBoost version does not support exposure or offsets")
 
             pred_pool_kwargs = {
                 "data": X_pred,
@@ -150,19 +159,19 @@ class CatBoostModel:
             if pred_baseline is not None:
                 pred_pool_kwargs["baseline"] = pred_baseline
             pred_pool = Pool(**pred_pool_kwargs)
-            raw = model.predict(pred_pool)
+            link = model.predict(pred_pool, prediction_type="RawFormulaVal")
+            response = np.exp(link)
 
             if objective == "poisson":
                 if prediction_type == "response":
-                    return pl.Series(raw)
+                    return pl.Series(response)
                 elif prediction_type == "rate":
                     if pred_data.exposure is not None:
-                        return pl.Series(raw / pred_data.exposure.to_numpy())
-                    return pl.Series(raw)
+                        return pl.Series(response / pred_data.exposure.to_numpy())
+                    return pl.Series(response)
                 else:
-                    return pl.Series(np.log(np.maximum(raw, 1e-10)))
-            else:
-                return pl.Series(raw)
+                    return pl.Series(link)
+            return pl.Series(link if prediction_type == "link" else response)
 
         def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
             # These types produce one scalar per input feature.  Interaction

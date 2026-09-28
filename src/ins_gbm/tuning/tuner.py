@@ -17,6 +17,7 @@ import polars as pl
 from tqdm.auto import tqdm
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
+from ins_gbm.data.folds import CVConfig
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.evaluation.metrics import (
     _poisson_rate_metric_inputs,
@@ -68,6 +69,7 @@ class _ObjectiveConfig:
     fold_splits: list[tuple[np.ndarray, np.ndarray]]
     search_space: dict[str, Any]
     metric: str
+    base_params: dict[str, Any]
     cancellation_path: Optional[str] = None
 
 
@@ -107,10 +109,11 @@ def _evaluate_trial(
     """Evaluate one Optuna trial from serializable configuration."""
     import optuna
 
-    params = {
+    params = dict(config.base_params)
+    params.update({
         name: _suggest_from_distribution(trial, name, dist)
         for name, dist in config.search_space.items()
-    }
+    })
     metric_fn = _METRIC_FN[config.metric]
 
     fold_scores: list[float] = []
@@ -199,9 +202,10 @@ class HyperparameterTuner:
     """
     n_trials: int = 20
     cv_folds: int = 5
-    metric: str = "poisson_deviance"
+    metric: Optional[str] = None
     seed: int = 42
-    use_data_folds: bool = False
+    use_data_folds: Optional[bool] = None
+    cv: Optional[CVConfig] = None
     n_jobs: int = 1
     backend: Literal["thread", "process"] = "thread"
     journal_path: Optional[str | os.PathLike[str]] = None
@@ -220,6 +224,7 @@ class HyperparameterTuner:
         feature_names: Optional[list[str]] = None,
         progress: Optional[ProgressCallback] = None,
         should_stop: Optional[Any] = None,
+        base_params: Optional[dict] = None,
     ) -> tuple[dict, pl.DataFrame]:
         """Run hyperparameter search and return (best_params, trial_history).
 
@@ -252,7 +257,7 @@ class HyperparameterTuner:
             plus one column per hyperparameter.
         """
         import optuna
-        from sklearn.model_selection import KFold
+        from ins_gbm.data.folds import resolve_folds
 
         if (
             not isinstance(self.n_jobs, int)
@@ -267,10 +272,17 @@ class HyperparameterTuner:
             raise ValueError(
                 "journal_path is only supported with backend='process'"
             )
-        if self.metric not in _METRIC_FN:
+        metric = self.metric or (
+            "gamma_deviance" if (getattr(model, "objective", None) or data.objective) == "gamma"
+            else "poisson_deviance"
+        )
+        if metric not in _METRIC_FN:
             raise ValueError(
-                f"Unknown metric: {self.metric!r}. Choose from {list(_METRIC_FN)}"
+                f"Unknown metric: {metric!r}. Choose from {list(_METRIC_FN)}"
             )
+        objective = getattr(model, "objective", None) or data.objective or "poisson"
+        if metric in {"poisson_deviance", "gamma_deviance"} and not metric.startswith(objective):
+            raise ValueError(f"metric {metric!r} is incompatible with objective {objective!r}")
 
         tuning_data = (
             data.select_features(feature_names)
@@ -294,18 +306,17 @@ class HyperparameterTuner:
 
         validate_preprocessing_steps(preprocessing_chain)
 
-        if self.use_data_folds:
-            if tuning_data.cv_fold is None:
-                raise ValueError("use_data_folds=True but data.cv_fold is None")
-            folds_arr = tuning_data.cv_fold.to_numpy()
-            unique_folds = np.unique(folds_arr)
-            fold_splits = [
-                (np.where(folds_arr != f)[0], np.where(folds_arr == f)[0])
-                for f in unique_folds
-            ]
-        else:
-            kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
-            fold_splits = list(kf.split(range(tuning_data.n_rows)))
+        if self.cv is not None and self.use_data_folds is not None:
+            raise ValueError("Pass either cv or use_data_folds, not both")
+        cv_config = self.cv or CVConfig(
+            n_splits=self.cv_folds,
+            seed=self.seed,
+            folds=(
+                "auto" if self.use_data_folds is None
+                else ("predefined" if self.use_data_folds else "random")
+            ),
+        )
+        _, fold_splits = resolve_folds(tuning_data, cv_config)
 
         config = _ObjectiveConfig(
             tuning_data=tuning_data,
@@ -316,7 +327,8 @@ class HyperparameterTuner:
             encoder_schema=encoder_schema,
             fold_splits=fold_splits,
             search_space=search_space,
-            metric=self.metric,
+            metric=metric,
+            base_params=dict(base_params or {}),
         )
 
         stop_lock = Lock()
@@ -357,7 +369,7 @@ class HyperparameterTuner:
         finally:
             trial_progress.close()
 
-        return best_params, history
+        return {**dict(base_params or {}), **best_params}, history
 
     def _optimize_threads(
         self,

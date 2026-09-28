@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extras: [minimal, all]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install minimal dependencies
+        if: matrix.extras == 'minimal'
+        run: uv sync --extra dev
+      - name: Install all model integrations
+        if: matrix.extras == 'all'
+        run: uv sync --all-extras --dev
+      - name: Run tests
+        run: uv run python -m pytest

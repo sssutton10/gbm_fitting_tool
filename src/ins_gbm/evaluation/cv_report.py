@@ -8,8 +8,8 @@ import polars as pl
 from tqdm.auto import tqdm
 
 from ins_gbm.data.model_data import ModelData, slice_model_data
+from ins_gbm.data.folds import CVConfig, resolve_folds
 from ins_gbm.data.schema import FeatureSchema
-from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -30,6 +30,7 @@ class CVResult:
     weight: Optional[pl.Series] = None
     objective: Optional["Objective"] = None
     feature_names: Optional[list[str]] = None
+    fold_params: Optional[dict] = None
 
     def double_lift_score(
         self,
@@ -125,6 +126,7 @@ class CrossValidationReport:
     fold_col: Optional[str] = None
     seed: int = 42
     show_progress_bar: bool = True
+    cv: Optional[CVConfig] = None
 
     def run(self, feature_names: Optional[list[str]] = None) -> CVResult:
         """Run CV, optionally using an ordered subset of raw predictor features."""
@@ -135,20 +137,26 @@ class CrossValidationReport:
             double_lift_table,
         )
 
+        self.data.validate()
         self._validate()
 
         features = self.data.features
 
         if self.fold_col is not None:
             fold_id_series = features[self.fold_col]
-            unique_folds = fold_id_series.drop_nulls().unique().sort().to_list()
         else:
-            fold_id_series = None
-            unique_folds = list(range(self.n_folds))
+            fold_id_series = self.data.cv_fold
 
         benchmark_preds: Optional[pl.Series] = None
         if self.benchmark_col is not None:
             benchmark_preds = features[self.benchmark_col]
+        elif self.data.comparisons is not None:
+            if self.data.comparisons.width != 1:
+                raise ValueError(
+                    "Cross-validation accepts one comparison prediction; "
+                    "select one before constructing ModelData"
+                )
+            benchmark_preds = self.data.comparisons.to_series(0)
 
         cols_to_drop = []
         if self.fold_col is not None:
@@ -164,13 +172,20 @@ class CrossValidationReport:
             features=clean_features,
             feature_names=list(clean_features.columns),
             schema=clean_schema,
+            cv_fold=fold_id_series,
         )
         if feature_names is not None:
             clean_data = clean_data.select_features(feature_names)
 
-        folds = self._make_folds(fold_id_series, unique_folds, clean_data.n_rows)
+        config = self.cv or CVConfig(
+            n_splits=self.n_folds,
+            seed=self.seed,
+            folds="predefined" if fold_id_series is not None else "random",
+        )
+        unique_folds, folds = resolve_folds(clean_data, config)
         all_fold_rows: list[dict] = []
         oof_gbm = np.full(clean_data.n_rows, np.nan, dtype=np.float64)
+        fold_params: dict = {}
 
         fold_progress = tqdm(
             zip(unique_folds, folds),
@@ -183,23 +198,18 @@ class CrossValidationReport:
             train_data = slice_model_data(clean_data, train_idx)
             held_data = slice_model_data(clean_data, held_idx)
 
-            current_train, current_held = _apply_recipe_fold_transforms(
-                self.recipe, train_data, held_data
-            )
-
-            fitted_model = self.recipe.model.fit(
-                current_train,
-                params=self.recipe.params,
-            )
-            gbm_preds = fitted_model.predict(current_held, prediction_type="response")
+            from ins_gbm.pipeline import ModelPipeline
+            fitted_pipeline = ModelPipeline(train_data, self.recipe).run()
+            fold_params[fold_id] = dict(fitted_pipeline.fitted_model.params)
+            gbm_preds = fitted_pipeline.predict(held_data, prediction_type="response")
             oof_gbm[held_idx] = gbm_preds.to_numpy()
 
             gbm_metrics = compute_metrics(
                 objective=clean_data.objective,
-                actual=current_held.target,
+                actual=held_data.target,
                 predicted=gbm_preds,
-                exposure=current_held.exposure,
-                weight=current_held.weight,
+                exposure=held_data.exposure,
+                weight=held_data.weight,
             )
             for row in gbm_metrics.iter_rows(named=True):
                 all_fold_rows.append({"fold": fold_id, "model": GBM_MODEL_LABEL, **row})
@@ -208,10 +218,10 @@ class CrossValidationReport:
                 bench_held = benchmark_preds.gather(held_idx.tolist())
                 bench_metrics = compute_metrics(
                     objective=clean_data.objective,
-                    actual=current_held.target,
+                    actual=held_data.target,
                     predicted=bench_held,
-                    exposure=current_held.exposure,
-                    weight=current_held.weight,
+                    exposure=held_data.exposure,
+                    weight=held_data.weight,
                 )
                 for row in bench_metrics.iter_rows(named=True):
                     all_fold_rows.append({"fold": fold_id, "model": "benchmark", **row})
@@ -220,11 +230,11 @@ class CrossValidationReport:
                     dl_actual, dl_gbm, dl_benchmark, dl_weights = (
                         _double_lift_metric_inputs(
                             clean_data.objective,
-                            current_held.target,
+                            held_data.target,
                             gbm_preds,
                             bench_held,
-                            current_held.exposure,
-                            current_held.weight,
+                            held_data.exposure,
+                            held_data.weight,
                         )
                     )
                     dl_table = double_lift_table(
@@ -264,17 +274,20 @@ class CrossValidationReport:
         return CVResult(
             fold_metrics=fold_metrics,
             summary=summary,
-            fold_col=self.fold_col,
+            fold_col=self.fold_col or ("cv_fold" if fold_id_series is not None else None),
             predictions=pl.DataFrame(prediction_columns),
             actual=self.data.target,
             exposure=self.data.exposure,
             weight=self.data.weight,
             objective=self.data.objective,
             feature_names=list(clean_data.feature_names),
+            fold_params=fold_params,
         )
 
     def _validate(self) -> None:
-        if self.fold_col is None:
+        if self.cv is not None:
+            pass
+        elif self.fold_col is None:
             if self.n_folds < 2:
                 raise ValueError(f"n_folds must be >= 2, got {self.n_folds}")
             if self.n_folds > self.data.n_rows:

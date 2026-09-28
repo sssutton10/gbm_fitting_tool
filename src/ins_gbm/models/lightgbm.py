@@ -125,7 +125,10 @@ class LightGBMModel:
                 pred_data.features, pred_data.feature_names
             )
             X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
-            raw_scores = booster.predict(X_pred)
+            # LightGBM's default prediction is already on the response scale.
+            # Request the tree contribution on the link scale so exposure and
+            # user offsets can be applied exactly once.
+            tree_link = booster.predict(X_pred, raw_score=True)
 
             offset = (
                 series_to_fit_array(pred_data.offset)
@@ -134,27 +137,23 @@ class LightGBMModel:
             )
 
             if objective == "poisson":
-                # raw_scores = log(rate) on link scale; exposure and offset add on link scale
-                link = raw_scores if offset is None else raw_scores + offset
+                link = tree_link.copy()
+                if pred_data.exposure is not None:
+                    link = link + np.log(series_to_fit_array(pred_data.exposure))
+                if offset is not None:
+                    link = link + offset
+                response = np.exp(link)
                 if prediction_type == "response":
-                    response = np.exp(link)
-                    if pred_data.exposure is not None:
-                        response = response * pred_data.exposure.to_numpy()
                     return pl.Series(response)
                 elif prediction_type == "rate":
-                    return pl.Series(np.exp(link))
+                    if pred_data.exposure is None:
+                        return pl.Series(response)
+                    return pl.Series(response / series_to_fit_array(pred_data.exposure))
                 else:  # link
                     return pl.Series(link)
-            else:  # gamma — raw_scores are on response scale (log link used internally)
-                if prediction_type == "response":
-                    if offset is not None:
-                        return pl.Series(raw_scores * np.exp(offset))
-                    return pl.Series(raw_scores)
-                else:  # link = log(response) + offset
-                    link = np.log(raw_scores)
-                    if offset is not None:
-                        link = link + offset
-                    return pl.Series(link)
+            else:
+                link = tree_link if offset is None else tree_link + offset
+                return pl.Series(link if prediction_type == "link" else np.exp(link))
 
         def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
             importance_type = importance_type or "gain"

@@ -64,6 +64,8 @@ class RandomForestModel:
         )
         data = transform_result.data
         objective = resolve_objective(self.objective, data)
+        if data.offset is not None:
+            raise ValueError("RandomForestModel does not support offsets")
 
         p = dict(params or {})
         p.setdefault("random_state", 42)
@@ -96,6 +98,8 @@ class RandomForestModel:
 
         feature_names = list(data.feature_names)
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
+            if pred_data.offset is not None:
+                raise ValueError("RandomForestModel does not support offsets")
             X_pred = frame_to_fit_array(
                 pred_data.features, pred_data.feature_names
             )
@@ -112,10 +116,14 @@ class RandomForestModel:
                     return pl.Series(np.maximum(response, 1e-10))
                 elif prediction_type == "rate":
                     return pl.Series(np.maximum(raw, 1e-10))
-                else:  # link
-                    return pl.Series(np.log(np.maximum(raw, 1e-10)))
+                else:  # link is log expected response, including exposure
+                    response = raw
+                    if pred_data.exposure is not None:
+                        response = response * pred_data.exposure.to_numpy()
+                    return pl.Series(np.log(np.maximum(response, 1e-10)))
             else:  # gamma
-                return pl.Series(np.maximum(raw, 1e-10))
+                response = np.maximum(raw, 1e-10)
+                return pl.Series(np.log(response) if prediction_type == "link" else response)
 
         def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
             importance_type = importance_type or "impurity"

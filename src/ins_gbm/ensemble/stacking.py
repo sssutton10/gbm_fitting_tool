@@ -8,7 +8,9 @@ import polars as pl
 
 from ins_gbm.data.dtypes import FIT_DTYPE, series_to_fit_array
 from ins_gbm.data.model_data import ModelData, slice_model_data
-from ins_gbm.ensemble._utils import _apply_recipe_fold_transforms, _predict_from_pipeline
+from ins_gbm.ensemble._utils import (_apply_pipeline_recipe_fold_transforms,
+                                     _predict_from_pipeline,
+                                     _validate_ensemble_pipelines)
 
 if TYPE_CHECKING:
     from ins_gbm.pipeline import FittedPipeline
@@ -58,11 +60,15 @@ class StackingEnsemble:
     cv_folds: int = 5
     seed: int = 42
     meta_learner: Optional[Any] = None
+    refit: str = "fixed"
 
     def fit(self, fitted_pipelines: list["FittedPipeline"]) -> FittedStackingEnsemble:
         from sklearn.linear_model import Ridge
         from sklearn.model_selection import KFold
 
+        _validate_ensemble_pipelines(fitted_pipelines)
+        if self.refit not in {"fixed", "retune"}:
+            raise ValueError("refit must be 'fixed' or 'retune'")
         meta = self.meta_learner if self.meta_learner is not None else Ridge()
         training_data = [
             pipeline._require_raw_train_data() for pipeline in fitted_pipelines
@@ -80,11 +86,24 @@ class StackingEnsemble:
             for train_idx, val_idx in fold_splits:
                 fold_train = slice_model_data(pipeline_data, train_idx)
                 fold_val = slice_model_data(pipeline_data, val_idx)
-                current_train, current_val = _apply_recipe_fold_transforms(
-                    pipeline.recipe, fold_train, fold_val
-                )
-                fitted_model = pipeline.recipe.model.fit(current_train)
-                oof_matrix[val_idx, p_idx] = fitted_model.predict(current_val, "response").to_numpy()
+                if self.refit == "retune" and pipeline.recipe.tuning is not None:
+                    from ins_gbm.pipeline import ModelPipeline
+                    run_kwargs = (
+                        {"feature_names": pipeline.selected_features, "feature_stage": "encoded"}
+                        if pipeline.recipe.selection is None and pipeline.selected_features is not None
+                        else {}
+                    )
+                    fold_pipeline = ModelPipeline(fold_train, pipeline.recipe).run(**run_kwargs)
+                    predictions = fold_pipeline.predict(fold_val, "response")
+                else:
+                    current_train, current_val = _apply_pipeline_recipe_fold_transforms(
+                        pipeline, fold_train, fold_val
+                    )
+                    fitted_model = pipeline.recipe.model.fit(
+                        current_train, params=pipeline.fitted_model.params
+                    )
+                    predictions = fitted_model.predict(current_val, "response")
+                oof_matrix[val_idx, p_idx] = predictions.to_numpy()
 
         meta.fit(oof_matrix, series_to_fit_array(ref_train.target))
 

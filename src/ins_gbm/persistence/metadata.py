@@ -17,6 +17,9 @@ class ReproducibilityMetadata:
     selection_stages: Optional[list[dict]]
     objective: Literal["poisson", "gamma"]
     prediction_scale: str
+    artifact_version: int = 2
+    selection_scope: str = "fold"
+    tuning_metric: Optional[str] = None
 
 
 def _package_version(name: str) -> str:
@@ -33,6 +36,8 @@ def build_metadata(
     tuning_seed: Optional[int] = None,
     input_feature_names: Optional[list[str]] = None,
     selection_stages: Optional[list[dict]] = None,
+    selection_scope: str = "fold",
+    tuning_metric: Optional[str] = None,
 ) -> ReproducibilityMetadata:
     packages = ["ins_gbm", "polars", "numpy", "scikit-learn", "optuna",
                 "lightgbm", "xgboost", "catboost"]
@@ -58,4 +63,6 @@ def build_metadata(
         selection_stages=selection_stages,
         objective=fitted_model.objective,
         prediction_scale="response",
+        selection_scope=selection_scope,
+        tuning_metric=tuning_metric,
     )

@@ -65,6 +65,8 @@ def fit_transform_chain(
 ) -> TransformFitResult:
     """Fit an ordered transform chain without modifying or retaining its matrix."""
 
+    data.validate(require_multiple_folds=False)
+
     preprocessing_chain = list(preprocessing or [])
     validate_preprocessing_steps(preprocessing_chain)
 

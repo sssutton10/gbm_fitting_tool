@@ -85,9 +85,12 @@ class XGBoostModel:
         X = frame_to_fit_array(data.features, data.feature_names)
         y = series_to_fit_array(data.target)
 
-        base_margin: Optional[np.ndarray] = None
+        margin_parts: list[np.ndarray] = []
         if objective == "poisson" and data.exposure is not None:
-            base_margin = np.log(series_to_fit_array(data.exposure))
+            margin_parts.append(np.log(series_to_fit_array(data.exposure)))
+        if data.offset is not None:
+            margin_parts.append(series_to_fit_array(data.offset))
+        base_margin = np.sum(margin_parts, axis=0) if margin_parts else None
 
         sample_weight: Optional[np.ndarray] = None
         if data.weight is not None:
@@ -118,9 +121,12 @@ class XGBoostModel:
                 pred_data.features, pred_data.feature_names
             )
 
-            pred_margin: Optional[np.ndarray] = None
+            pred_margin_parts: list[np.ndarray] = []
             if objective == "poisson" and pred_data.exposure is not None:
-                pred_margin = np.log(series_to_fit_array(pred_data.exposure))
+                pred_margin_parts.append(np.log(series_to_fit_array(pred_data.exposure)))
+            if pred_data.offset is not None:
+                pred_margin_parts.append(series_to_fit_array(pred_data.offset))
+            pred_margin = np.sum(pred_margin_parts, axis=0) if pred_margin_parts else None
 
             dtest_kwargs = {
                 "feature_names": feature_names,
@@ -129,19 +135,19 @@ class XGBoostModel:
             if pred_margin is not None:
                 dtest_kwargs["base_margin"] = pred_margin
             dtest = xgb.DMatrix(X_pred, **dtest_kwargs)
-            raw = booster.predict(dtest)
+            link = booster.predict(dtest, output_margin=True)
+            response = np.exp(link)
 
             if objective == "poisson":
                 if prediction_type == "response":
-                    return pl.Series(raw)
+                    return pl.Series(response)
                 elif prediction_type == "rate":
                     if pred_data.exposure is not None:
-                        return pl.Series(raw / pred_data.exposure.to_numpy())
-                    return pl.Series(raw)
+                        return pl.Series(response / pred_data.exposure.to_numpy())
+                    return pl.Series(response)
                 else:  # link
-                    return pl.Series(np.log(raw))
-            else:  # gamma
-                return pl.Series(raw)
+                    return pl.Series(link)
+            return pl.Series(link if prediction_type == "link" else response)
 
         def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
             importance_type = importance_type or "gain"

@@ -17,7 +17,18 @@ def resolve_objective(
     data: ModelData,
 ) -> Objective:
     """Resolve an objective from model configuration, data, then legacy default."""
+    if model_objective is not None and data.objective is not None and model_objective != data.objective:
+        raise ValueError(
+            f"model objective {model_objective!r} conflicts with data objective {data.objective!r}"
+        )
     return model_objective or data.objective or "poisson"
+
+
+def validate_prediction_type(prediction_type: str, objective: Objective) -> None:
+    if prediction_type not in {"response", "rate", "link"}:
+        raise ValueError("prediction_type must be 'response', 'rate', or 'link'")
+    if prediction_type == "rate" and objective == "gamma":
+        raise ValueError("prediction_type='rate' is invalid for gamma objective")
 
 
 @dataclass(frozen=True)
@@ -46,9 +57,11 @@ class FittedModel:
         data: ModelData,
         prediction_type: PredictionType = "response",
     ) -> pl.Series:
-        if prediction_type == "rate" and self.objective == "gamma":
+        validate_prediction_type(prediction_type, self.objective)
+        data.validate_for_prediction()
+        if data.objective is not None and data.objective != self.objective:
             raise ValueError(
-                "prediction_type='rate' is invalid for gamma objective"
+                f"prediction data objective {data.objective!r} conflicts with fitted objective {self.objective!r}"
             )
         current = (
             self.transform_chain.transform(data)

@@ -11,17 +11,60 @@ learning libraries used for frequency and severity models.
 The library is not a command line application. Most usage happens through Python
 imports and object construction.
 
+## Current Public Workflow and Migration Notes
+
+The preferred common workflow is now:
+
+```python
+from ins_gbm import CVConfig, LightGBMModel, ModelRecipe, load_model_data
+
+data = load_model_data(
+    "training.parquet", target="claim_count", exposure="exposure",
+    objective="poisson", cv_fold="fold_id",
+)
+recipe = ModelRecipe(model=LightGBMModel())
+cv_result = recipe.cross_validate(data, cv=CVConfig(folds="auto"))
+fitted = recipe.fit(data)
+predictions = fitted.predict(data.features, exposure=data.exposure)
+fitted.save("output/model")
+```
+
+The original `ModelPipeline(data, recipe).run()`, `predict_raw()`,
+`save_pipeline()`, `load_pipeline()`, and deep module imports remain supported.
+The shorter API delegates to those same implementations.
+
+Behavioral changes made during the 2026 correctness review:
+
+- LightGBM predictions no longer exponentiate an already transformed response.
+- `link` consistently means `log(response)` for Poisson and Gamma. For Poisson
+  it therefore includes exposure; use `log(rate)` when a log rate is required.
+- Explicit offsets are additive on the link scale in LightGBM, XGBoost, and
+  supported CatBoost versions. Random Forest rejects offsets.
+- Targets, exposures, weights, offsets, and comparison predictions receive
+  finite/non-null validation before fitting or evaluation.
+- `CVConfig(folds="auto")` uses `ModelData.cv_fold` when present and otherwise
+  creates shuffled folds. Fold IDs remain row metadata rather than predictors.
+- Encoding, learned feature selection, and preprocessing are fold-local during
+  tuning by default. `ModelRecipe(selection_scope="fixed")` retains the previous
+  conditional tuning workflow explicitly.
+- Ensemble OOF refits preserve the fitted base model's effective parameters.
+- `HyperparameterTuner(metric=None)` infers objective-specific deviance and merges
+  trial suggestions over `ModelRecipe.params`.
+
+Artifacts created before these fixes contain cloudpickled prediction closures and
+may retain their original behavior. Refit old models when corrected numerical
+semantics matter; loading cannot safely rewrite those closures in place.
+
 ## Quick Orientation
 
 At a high level, the tool does this:
 
 1. Load a policy-level parquet file into a `ModelData` object.
 2. Validate basic target, exposure, weight, offset, fold, and comparison fields.
-3. Optionally select a raw-feature subset, encode it, and complete feature
-   selection on all supplied training rows.
-4. Optionally tune model hyperparameters on the fixed final selection with
-   fold-local preprocessing, then fit preprocessing and the model on all
-   training rows.
+3. Optionally choose a raw-feature subset and configure encoding, selection, and
+   preprocessing.
+4. Optionally tune with every learned transform refit within each fold, then fit
+   the transforms and model on all training rows.
 5. Evaluate an explicitly supplied holdout with the fitted artifacts.
 6. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
@@ -102,6 +145,7 @@ src/ins_gbm/
     progress.py
     pipeline.py
     data/
+        folds.py
         __init__.py
         loader.py
         model_data.py
@@ -147,16 +191,13 @@ src/ins_gbm/
         metadata.py
 ```
 
-Many package `__init__.py` files are empty or expose only a small subset of the
-implementation. Prefer explicit module imports such as:
+Common workflow objects are exported at package level:
 
 ```python
-from ins_gbm.data.loader import load_model_data
-from ins_gbm.models.lightgbm import LightGBMModel
-from ins_gbm.pipeline import ModelPipeline, ModelRecipe
+from ins_gbm import load_model_data, LightGBMModel, ModelRecipe
 ```
 
-Do not assume that `from ins_gbm.models import LightGBMModel` works.
+Deep imports remain available for specialized and internal-facing objects.
 
 ## Main Concepts
 
@@ -179,7 +220,8 @@ Prediction scales use the `PredictionType` literal from `models/base.py`:
 - `rate`: expected claim count divided by exposure when exposure is supplied;
   otherwise the same unadjusted Poisson response. Invalid for Gamma and raises
   in `FittedModel.predict()`.
-- `link`: model-specific link scale where implemented.
+- `link`: `log(response)` for both objectives. For Poisson this includes
+  `log(exposure)` when exposure is supplied.
 
 ### Polars Public API
 
@@ -274,10 +316,8 @@ Core fields:
 
 Additional fields:
 
-- `offset`: optional numeric link-scale offset. LightGBM currently honors this
-  field directly. See model-specific caveats below.
-- `cv_fold`: optional integer fold ID series used by `HyperparameterTuner` when
-  `use_data_folds=True`.
+- `offset`: optional numeric link-scale offset honored by the native GBM wrappers.
+- `cv_fold`: optional integer fold ID series used by shared CV resolution.
 - `comparisons`: optional DataFrame of external model predictions used for
   report comparisons.
 
@@ -299,21 +339,17 @@ Validation rules currently implemented:
 - `target`, `exposure`, and `weight` row counts must match `features`.
 - `feature_names` must be unique.
 - Every `feature_name` must exist in `features`.
-- If `exposure` is supplied, it must be non-null and positive.
+- Target, exposure, weight, offset, and comparison values must be numeric where
+  applicable, non-null, and finite.
+- If `exposure` is supplied, it must be positive.
+- Weights must be nonnegative and have positive total weight.
 - Poisson objective requires non-negative target values; exposure is optional.
 - Gamma objective requires strictly positive target values.
-- `offset`, if supplied, must match row count, be numeric, non-null, and not
-  contain infinity.
+- `offset`, if supplied, must match row count.
 - `cv_fold`, if supplied, must match row count, be integer, non-null, and have
   at least two unique values.
 - `comparisons`, if supplied, must match row count, contain numeric columns, and
-  every value must be strictly positive.
-
-Important validation pitfall: `validate()` does not comprehensively enforce
-finite, non-null values for every row-level field. In particular, null targets,
-null weights, null comparison predictions, `NaN` values, and negative weights
-are not all rejected. Objective checks may still catch some bad data, but
-callers should clean these fields before constructing `ModelData`.
+  every value must be finite and strictly positive.
 
 ### `load_model_data`
 
@@ -813,10 +849,10 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 1. Optionally restrict the raw input to `feature_names`, or defer a fixed
    `feature_names` subset until after encoding with `feature_stage="encoded"`.
-2. Fit the encoder and complete feature selection on all supplied training rows.
-3. Optionally tune hyperparameters on that fixed final feature selection, with
-   preprocessors fit independently in each tuning fold.
-4. Fit the full preprocessing chain and model on all supplied data.
+2. If tuning, fit the encoder, selector, and preprocessors independently inside
+   each tuning fold by default.
+3. Choose effective parameters by merging trial suggestions over recipe params.
+4. Fit the encoder, selection, preprocessing, and model on all supplied data.
 5. Build reproducibility metadata and return `FittedPipeline`.
 
 Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
@@ -829,17 +865,20 @@ If `recipe.tuning` is supplied, pipeline tuning calls:
 
 ```python
 self.recipe.tuning.tune(
-    selected_train_data,
+    raw_train_data,
     self.recipe.model,
+    encoder=self.recipe.encoder,
+    selector=self.recipe.selection,
     preprocessors=self.recipe.preprocessing,
+    base_params=self.recipe.params,
     progress=self.progress,
     should_stop=self.should_stop,
 )
 ```
 
-The selected matrix is fixed before this call. The full preprocessing chain is
-fit and applied on each fold's training data, then applied to that fold's
-validation data.
+Every learned transform is fold-local in the default `selection_scope="fold"`
+mode. `selection_scope="fixed"` retains the older workflow where selection is
+completed on all supplied training rows before tuning.
 
 When the pipeline is started with `ModelPipeline.run(feature_names=...)`, that
 ordered raw-feature subset is applied before encoding and selection. Tuning
@@ -1180,10 +1219,9 @@ Returns `CVResult`:
 `CVResult.double_lift_score()` returns their signed score, and fold/summary
 metrics include `double_lift_score`.
 
-Fold modes:
-
-- random folds if `fold_col=None`.
-- predefined folds if `fold_col` is a column in `data.features`.
+Fold modes are configured with `CVConfig`: `auto` uses `ModelData.cv_fold` when
+present, `random` forces shuffled folds, and `predefined` requires `cv_fold`.
+The legacy `fold_col` adapter remains supported.
 
 Benchmark mode:
 
@@ -1191,12 +1229,8 @@ Benchmark mode:
 - The benchmark column is dropped before fitting the GBM recipe.
 - Fold metrics include both `gbm` and `benchmark` rows.
 
-`CrossValidationReport` applies recipe transforms and fits with
-`recipe.params`; it does not start nested `recipe.tuning`.
-
-Important distinction: `HyperparameterTuner(use_data_folds=True)` uses
-`ModelData.cv_fold`. `CrossValidationReport(fold_col=...)` expects the fold
-column to be present in `data.features`.
+`CrossValidationReport` fits the complete recipe. When tuning is configured,
+each outer training partition performs inner tuning.
 
 ### Report Comparison
 
@@ -1740,15 +1774,10 @@ the model should include that exposure adjustment.
 
 `prediction_type="rate"` is invalid for Gamma and raises.
 
-### Confusing `cv_fold` and `fold_col`
+### Fold metadata
 
-There are two fold mechanisms:
-
-- `ModelData.cv_fold` is used by `HyperparameterTuner(use_data_folds=True)`.
-- `CrossValidationReport(fold_col=...)` expects a fold column inside
-  `data.features`.
-
-They are not the same API.
+Store predefined folds in `ModelData.cv_fold` and use `CVConfig`. The older
+feature-column `fold_col` argument is a compatibility adapter only.
 
 ### Managing Holdouts
 
@@ -1775,11 +1804,10 @@ The full ordered preprocessor list participates in tuning and the final
 full-training refit. Steps are sequential: each receives the transformed frame
 from the preceding step, so they are not fitted concurrently.
 
-### Relying on Custom Offset Outside LightGBM
+### Offsets and Random Forest
 
-`ModelData.offset` is currently honored directly by LightGBM. XGBoost and
-CatBoost implement exposure-related base margins or baselines in their wrappers,
-but they do not currently add the optional `ModelData.offset` series.
+LightGBM, XGBoost, and compatible CatBoost versions apply `ModelData.offset` on
+the link scale. Random Forest rejects offsets because it cannot honor that model.
 
 ### Assuming Optional Dependencies Are Installed
 
@@ -1811,11 +1839,12 @@ The ensemble code expects fitted pipelines to be compatible. Make sure base
 pipelines share the same objective, row basis, and intended evaluation
 holdout.
 
-### Expecting Tuned Params in Ensemble OOF Refits
+### Ensemble OOF Refits
 
-Stacking and OOF blending refit base recipes inside folds. The current fold
-refit path calls `recipe.model.fit(current_train)` without passing tuned best
-params or manual recipe params.
+Stacking and OOF blending refit learned transforms inside folds and pass the
+base pipeline's effective fitted parameters to each fold model by default.
+Set `refit="retune"` to run a recipe's tuner inside every outer ensemble fold;
+this is substantially more expensive but evaluates tuning without global params.
 
 ### Persisting Across Incompatible Environments
 
@@ -1829,9 +1858,8 @@ The main invariant to preserve is final-holdout isolation:
 
 - fit the main pipeline encoder and selector only on the supplied training
   data, never on the final holdout.
-- finish selection before tuning and keep the selected feature matrix fixed
-  throughout hyperparameter CV.
-- fit reducers only on each CV training fold during tuning.
+- fit encoding, learned selection, and reducers only on each CV training fold
+  during tuning unless fixed selection was explicitly requested.
 - optimize blend weights or stacking meta-learners without the final holdout.
 - evaluate once on a caller-provided final holdout.
 

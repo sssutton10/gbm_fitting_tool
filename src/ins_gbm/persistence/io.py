@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import warnings
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -72,6 +73,13 @@ def load_pipeline(
             "Was save_pipeline() called with the same output_dir?"
         )
 
+    if getattr(fitted_pipeline.metadata, "artifact_version", 1) < 2:
+        warnings.warn(
+            "This artifact predates prediction-contract version 2; refit it "
+            "to obtain corrected prediction scales and offset behavior.",
+            UserWarning,
+            stacklevel=2,
+        )
     if training_data is None:
         return fitted_pipeline
 
@@ -93,3 +101,8 @@ def load_pipeline(
         raw_train_data=attached_data,
         input_schema=fitted_pipeline._input_schema() or attached_data.schema,
     )
+
+
+def load_model(output_dir: str, training_data: Optional["ModelData"] = None) -> "FittedPipeline":
+    """Load a fitted model artifact (public convenience alias)."""
+    return load_pipeline(output_dir, training_data=training_data)

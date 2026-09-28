@@ -29,9 +29,17 @@ class ModelRecipe:
     selection: Optional[Any] = None
     preprocessing: list = field(default_factory=list)
     tuning: Optional[HyperparameterTuner] = None
-    # Manual hyperparameters used when ``tuning`` is None. Ignored when tuning
-    # is enabled (the tuned best params take precedence).
+    # Fixed/base hyperparameters. Tuning suggestions override overlapping keys.
     params: Optional[dict] = None
+    selection_scope: Literal["fold", "fixed"] = "fold"
+
+    def fit(self, data: ModelData, **kwargs) -> "FittedPipeline":
+        """Fit this recipe; convenient equivalent of ``ModelPipeline(...).run()``."""
+        return ModelPipeline(data=data, recipe=self).run(**kwargs)
+
+    def cross_validate(self, data: ModelData, *, cv=None, feature_names=None):
+        from ins_gbm.evaluation.cv_report import CrossValidationReport
+        return CrossValidationReport(recipe=self, data=data, cv=cv).run(feature_names)
 
 
 @dataclass
@@ -86,17 +94,19 @@ class FittedPipeline:
             preprocessors=self.preprocessors,
         ).transform(data)
 
-    def predict(
-        self,
-        data: ModelData,
-        prediction_type: PredictionType = "response",
-    ) -> pl.Series:
+    def predict(self, data, prediction_type: PredictionType = "response", *,
+                exposure=None, weight=None, offset=None) -> pl.Series:
         """Apply the fitted transform chain to *data* and return predictions.
 
         Applies transforms in the same order as ModelPipeline.run():
         encode → select → preprocess → model.predict().
         Pass raw (pre-transform) data; the fitted transformers handle encoding.
         """
+        if isinstance(data, pl.DataFrame):
+            return self.predict_raw(data, exposure=exposure, weight=weight,
+                                    offset=offset, prediction_type=prediction_type)
+        if any(value is not None for value in (exposure, weight, offset)):
+            raise ValueError("exposure, weight, and offset cannot override fields of ModelData")
         current = self._prepare_data(data)
         return self.fitted_model.predict(current, prediction_type=prediction_type)
 
@@ -105,6 +115,7 @@ class FittedPipeline:
         features: pl.DataFrame,
         exposure: Optional[pl.Series] = None,
         weight: Optional[pl.Series] = None,
+        offset: Optional[pl.Series] = None,
         prediction_type: PredictionType = "response",
     ) -> pl.Series:
         """Score a raw feature DataFrame without a target column.
@@ -121,6 +132,8 @@ class FittedPipeline:
             raise ValueError(
                 f"weight length {len(weight)} != features height {n}"
             )
+        if offset is not None and len(offset) != n:
+            raise ValueError(f"offset length {len(offset)} != features height {n}")
         obj = self.fitted_model.objective
         placeholder = (
             pl.Series("_target", [0.0] * n)
@@ -135,6 +148,7 @@ class FittedPipeline:
             feature_names=list(features.columns),
             schema=self._input_schema(),
             objective=obj,
+            offset=offset,
         )
         return self.predict(data, prediction_type=prediction_type)
 
@@ -146,8 +160,8 @@ class FittedPipeline:
         """
         from ins_gbm.evaluation.report import EvaluationReport
 
+        holdout_data.validate()
         current = self._prepare_data(holdout_data)
-
         comparison_predictions = None
         if current.comparisons is not None:
             comparison_predictions = {
@@ -159,6 +173,11 @@ class FittedPipeline:
             train_data=None,
             comparison_predictions=comparison_predictions,
         )
+
+    def save(self, output_dir: str) -> None:
+        """Persist this fitted pipeline."""
+        from ins_gbm.persistence.io import save_pipeline
+        save_pipeline(self, output_dir)
 
     def retune(
         self,
@@ -205,6 +224,7 @@ class FittedPipeline:
             preprocessors=self.recipe.preprocessing,
             progress=progress,
             should_stop=should_stop,
+            base_params=self.recipe.params,
         )
         check_cancel()
 
@@ -234,6 +254,8 @@ class FittedPipeline:
             input_feature_names=self.input_feature_names,
             tuning_seed=getattr(tuner, "seed", None),
             selection_stages=getattr(self.metadata, "selection_stages", None),
+            selection_scope="fixed",
+            tuning_metric=(getattr(tuner, "metric", None) or f"{fitted_model.objective}_deviance"),
         )
 
         return replace(
@@ -287,6 +309,7 @@ class ModelPipeline:
         from ins_gbm.persistence.metadata import build_metadata
         from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
+        self.data.validate(require_multiple_folds=False)
         validate_preprocessing_steps(self.recipe.preprocessing)
         if feature_stage not in ("raw", "encoded"):
             raise ValueError("feature_stage must be 'raw' or 'encoded'")
@@ -312,6 +335,31 @@ class ModelPipeline:
         input_feature_names = list(train_data.feature_names)
         raw_train_data = train_data
         self._check_cancel()
+
+        if self.recipe.selection_scope not in {"fold", "fixed"}:
+            raise ValueError("selection_scope must be 'fold' or 'fixed'")
+
+        tuning_history: Optional[pl.DataFrame] = None
+        best_params: dict = {}
+        fold_local_tuning = (
+            self.recipe.tuning is not None
+            and self.recipe.selection_scope == "fold"
+            and feature_stage == "raw"
+        )
+        if fold_local_tuning:
+            self._emit("tuning", "starting fold-local hyperparameter tuning",
+                       total=self.recipe.tuning.n_trials)
+            best_params, tuning_history = self.recipe.tuning.tune(
+                train_data,
+                self.recipe.model,
+                encoder=self.recipe.encoder,
+                selector=self.recipe.selection,
+                preprocessors=self.recipe.preprocessing,
+                base_params=self.recipe.params,
+                progress=self.progress,
+                should_stop=self.should_stop,
+            )
+            self._check_cancel()
 
         # ── 1. Encode and complete feature selection ─────────────────────────
         current_train = train_data
@@ -359,9 +407,7 @@ class ModelPipeline:
             )
 
         # ── 2. Tune on the fixed final feature selection (optional) ───────────
-        tuning_history: Optional[pl.DataFrame] = None
-        best_params: dict = {}
-        if self.recipe.tuning is not None:
+        if self.recipe.tuning is not None and not fold_local_tuning:
             self._emit(
                 "tuning", "starting hyperparameter tuning",
                 total=self.recipe.tuning.n_trials,
@@ -370,6 +416,7 @@ class ModelPipeline:
                 current_train,
                 self.recipe.model,
                 preprocessors=self.recipe.preprocessing,
+                base_params=self.recipe.params,
                 progress=self.progress,
                 should_stop=self.should_stop,
             )
@@ -407,6 +454,12 @@ class ModelPipeline:
                 else None
             ),
             selection_stages=selection_metadata,
+            selection_scope=self.recipe.selection_scope,
+            tuning_metric=(
+                getattr(self.recipe.tuning, "metric", None)
+                or f"{fitted_model.objective}_deviance"
+                if self.recipe.tuning else None
+            ),
         )
 
         return FittedPipeline(

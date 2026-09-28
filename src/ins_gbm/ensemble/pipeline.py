@@ -88,6 +88,7 @@ class EnsemblePipeline:
     cv_folds: int = 5
     seed: int = 42
     meta_learner: Optional[Any] = None
+    refit: str = "fixed"
 
     def run(self) -> EnsembleResult:
         """Fit the ensemble using the base pipelines' complete training data."""
@@ -113,6 +114,7 @@ class EnsemblePipeline:
             weights=self.blend_weights,
             cv_folds=self.cv_folds,
             seed=self.seed,
+            refit=self.refit,
         )
         return blender.fit(self.fitted_pipelines, validation_data=self.validation_data)
 
@@ -122,5 +124,6 @@ class EnsemblePipeline:
             cv_folds=self.cv_folds,
             seed=self.seed,
             meta_learner=self.meta_learner,
+            refit=self.refit,
         )
         return stacker.fit(self.fitted_pipelines)
