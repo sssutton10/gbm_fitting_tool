@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -19,6 +20,35 @@ if TYPE_CHECKING:
 GBM_MODEL_LABEL: str = "gbm"
 
 
+def _cv_data_signature(
+    objective: str,
+    actual: pl.Series,
+    exposure: Optional[pl.Series],
+    weight: Optional[pl.Series],
+    row_folds: pl.Series,
+) -> str:
+    """Fingerprint ordered evaluation inputs and assignments, not features."""
+    digest = hashlib.sha256()
+    digest.update(f"cv-v1:{objective}:{len(actual)}".encode())
+    for name, series in (
+        ("actual", actual), ("exposure", exposure), ("weight", weight),
+    ):
+        digest.update(name.encode())
+        if series is None:
+            digest.update(b":absent")
+        else:
+            values = np.asarray(series.to_numpy(), dtype="<f8")
+            digest.update(values.tobytes())
+    digest.update(b"folds:")
+    # Fold labels may be integers or strings. Length-prefixed values avoid
+    # ambiguous concatenation and keep the hash independent of Polars internals.
+    for value in row_folds.to_list():
+        encoded = f"{type(value).__name__}:{value}".encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "little"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
 @dataclass
 class CVResult:
     fold_metrics: pl.DataFrame   # columns: fold, model, metric, value
@@ -31,6 +61,14 @@ class CVResult:
     objective: Optional["Objective"] = None
     feature_names: Optional[list[str]] = None
     fold_params: Optional[dict] = None
+    row_folds: Optional[pl.Series] = None
+    cv_config: Optional[dict] = None
+    data_signature: Optional[str] = None
+
+    def save(self, output_dir: str) -> None:
+        """Save metrics and aligned OOF predictions, without training data."""
+        from ins_gbm.persistence.cv_io import save_cv_result
+        save_cv_result(self, output_dir)
 
     def double_lift_score(
         self,
@@ -182,9 +220,13 @@ class CrossValidationReport:
             seed=self.seed,
             folds="predefined" if fold_id_series is not None else "random",
         )
+        uses_predefined = config.folds == "predefined" or (
+            config.folds == "auto" and fold_id_series is not None
+        )
         unique_folds, folds = resolve_folds(clean_data, config)
         all_fold_rows: list[dict] = []
         oof_gbm = np.full(clean_data.n_rows, np.nan, dtype=np.float64)
+        row_folds: list = [None] * clean_data.n_rows
         fold_params: dict = {}
 
         fold_progress = tqdm(
@@ -195,6 +237,9 @@ class CrossValidationReport:
             disable=not self.show_progress_bar,
         )
         for fold_id, (train_idx, held_idx) in fold_progress:
+            fold_id = fold_id.item() if isinstance(fold_id, np.generic) else fold_id
+            for row_idx in held_idx:
+                row_folds[int(row_idx)] = fold_id
             train_data = slice_model_data(clean_data, train_idx)
             held_data = slice_model_data(clean_data, held_idx)
 
@@ -271,10 +316,11 @@ class CrossValidationReport:
         if benchmark_preds is not None:
             prediction_columns["benchmark"] = benchmark_preds.rename("benchmark")
 
+        row_folds_series = pl.Series("fold", row_folds)
         return CVResult(
             fold_metrics=fold_metrics,
             summary=summary,
-            fold_col=self.fold_col or ("cv_fold" if fold_id_series is not None else None),
+            fold_col=(self.fold_col or "cv_fold") if uses_predefined else None,
             predictions=pl.DataFrame(prediction_columns),
             actual=self.data.target,
             exposure=self.data.exposure,
@@ -282,6 +328,16 @@ class CrossValidationReport:
             objective=self.data.objective,
             feature_names=list(clean_data.feature_names),
             fold_params=fold_params,
+            row_folds=row_folds_series,
+            cv_config={
+                "folds": "predefined" if uses_predefined else "random",
+                "n_splits": len(folds),
+                "seed": None if uses_predefined else config.seed,
+            },
+            data_signature=_cv_data_signature(
+                clean_data.objective, clean_data.target, clean_data.exposure,
+                clean_data.weight, row_folds_series,
+            ),
         )
 
     def _validate(self) -> None:

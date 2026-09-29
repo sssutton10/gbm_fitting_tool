@@ -1,12 +1,100 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import polars as pl
 
 if TYPE_CHECKING:
     from ins_gbm.evaluation.report import EvaluationReport
     from ins_gbm.evaluation.cv_report import CVResult
+    from ins_gbm.data.model_data import ModelData
+
+
+def compare_cv_double_lift(
+    reference: "CVResult",
+    candidate: "CVResult",
+    *,
+    data: Optional["ModelData"] = None,
+    n_bins: int = 10,
+    deviation: str = "absolute",
+) -> pl.DataFrame:
+    """Score aligned OOF predictions; positive scores favor the candidate.
+
+    If *candidate* was loaded from disk, supply the original training data in
+    its original row order. No training data is stored in the CV artifact.
+    """
+    import numpy as np
+
+    from ins_gbm.evaluation.cv_report import GBM_MODEL_LABEL, _cv_data_signature
+    from ins_gbm.evaluation.metrics import (
+        _double_lift_metric_inputs, double_lift_score, double_lift_table,
+    )
+
+    for label, result in (("reference", reference), ("candidate", candidate)):
+        if (
+            result.predictions is None or result.row_folds is None
+            or result.data_signature is None or result.objective is None
+            or GBM_MODEL_LABEL not in result.predictions.columns
+        ):
+            raise ValueError(f"{label} CVResult lacks aligned OOF predictions or provenance")
+    if reference.data_signature != candidate.data_signature:
+        raise ValueError(
+            "CV results have different evaluation rows, weights, or fold assignments"
+        )
+    if (
+        reference.predictions.height != candidate.predictions.height
+        or not reference.row_folds.equals(candidate.row_folds)
+    ):
+        raise ValueError("CV results have different row or fold alignment")
+
+    if data is not None:
+        data.validate(require_multiple_folds=False)
+        actual, exposure, weight, objective = (
+            data.target, data.exposure, data.weight, data.objective,
+        )
+    else:
+        actual, exposure, weight, objective = (
+            candidate.actual, candidate.exposure, candidate.weight,
+            candidate.objective,
+        )
+    if actual is None:
+        raise ValueError(
+            "Evaluation data is needed for double lift; pass data=original_training_data"
+        )
+    if objective != candidate.objective or _cv_data_signature(
+        objective, actual, exposure, weight, candidate.row_folds,
+    ) != candidate.data_signature:
+        raise ValueError("Evaluation data does not match the CV results or row order")
+
+    prediction_a = reference.predictions[GBM_MODEL_LABEL]
+    prediction_b = candidate.predictions[GBM_MODEL_LABEL]
+
+    def score(indices: np.ndarray) -> float:
+        take = indices.tolist()
+        a, p_a, p_b, w = _double_lift_metric_inputs(
+            objective,
+            actual.gather(take),
+            prediction_a.gather(take),
+            prediction_b.gather(take),
+            exposure.gather(take) if exposure is not None else None,
+            weight.gather(take) if weight is not None else None,
+        )
+        table = double_lift_table(
+            a, p_a, p_b, weights=w, n_bins=min(n_bins, len(indices)),
+        )
+        return double_lift_score(table, deviation=deviation)
+
+    n_rows = candidate.predictions.height
+    rows = [{"scope": "overall", "fold": None, "n_rows": n_rows,
+             "score": score(np.arange(n_rows))}]
+    folds = candidate.row_folds.to_numpy()
+    for fold in candidate.row_folds.unique(maintain_order=True).to_list():
+        indices = np.flatnonzero(folds == fold)
+        rows.append({
+            "scope": "fold", "fold": str(fold), "n_rows": len(indices),
+            "score": score(indices) if len(indices) >= 2 else None,
+        })
+    return pl.DataFrame(rows)
 
 
 def compare_reports(
@@ -17,6 +105,7 @@ def compare_reports(
     Returns a DataFrame with one row per metric, one column per report key,
     and a 'preferred' column indicating which report wins on each metric.
     CV values are formatted as 'mean +/- std'; single test-set values as 'mean'.
+    Pairwise CV double-lift scores are excluded; use compare_cv_double_lift().
     """
     from ins_gbm.evaluation.report import EvaluationReport
     from ins_gbm.evaluation.cv_report import CVResult, GBM_MODEL_LABEL
@@ -36,6 +125,9 @@ def compare_reports(
     for name, report in reports.items():
         if isinstance(report, CVResult):
             gbm_rows = report.summary.filter(pl.col("model") == GBM_MODEL_LABEL)
+            # Double lift is a score for a specific pair of predictions, not
+            # a standalone model metric comparable across unrelated reports.
+            gbm_rows = gbm_rows.filter(pl.col("metric") != "double_lift_score")
             d: dict[str, tuple[float, float | None]] = {}
             for row in gbm_rows.iter_rows(named=True):
                 d[row["metric"]] = (row["mean"], row["std"])

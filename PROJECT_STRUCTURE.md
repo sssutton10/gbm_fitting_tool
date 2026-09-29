@@ -27,6 +27,7 @@ cv_result = recipe.cross_validate(data, cv=CVConfig(folds="auto"))
 fitted = recipe.fit(data)
 predictions = fitted.predict(data.features, exposure=data.exposure)
 fitted.save("output/model")
+cv_result.save("output/model/cv_report")
 ```
 
 The original `ModelPipeline(data, recipe).run()`, `predict_raw()`,
@@ -187,6 +188,7 @@ src/ins_gbm/
         pipeline.py
     persistence/
         __init__.py
+        cv_io.py
         io.py
         metadata.py
 ```
@@ -838,14 +840,14 @@ Fields:
 - `preprocessing`: optional ordered list of preprocessors or
   `PreprocessingStep` wrappers.
 - `tuning`: optional `HyperparameterTuner`.
-- `params`: optional manual params used when tuning is not enabled.
+- `params`: optional base params; tuning suggestions override overlapping keys.
 
 Pitfall: if `tuning` is present, tuned best params take precedence over
 `recipe.params`.
 
 ### Run Order
 
-`ModelPipeline.run()` executes in this order:
+`recipe.fit(data)` delegates to `ModelPipeline.run()`, which executes in this order:
 
 1. Optionally restrict the raw input to `feature_names`, or defer a fixed
    `feature_names` subset until after encoding with `feature_stage="encoded"`.
@@ -880,7 +882,7 @@ Every learned transform is fold-local in the default `selection_scope="fold"`
 mode. `selection_scope="fixed"` retains the older workflow where selection is
 completed on all supplied training rows before tuning.
 
-When the pipeline is started with `ModelPipeline.run(feature_names=...)`, that
+When fitting with `recipe.fit(data, feature_names=...)`, that
 ordered raw-feature subset is applied before encoding and selection. Tuning
 then receives the encoded, final selected columns derived from that subset, and
 the final full-data model uses the same selected columns. Direct tuner calls can
@@ -892,7 +894,8 @@ stored as the pipeline's fixed final selection, and tuning and prediction reuse
 that selection. This mode cannot be combined with `recipe.selection`.
 
 ```python
-fixed_fit = ModelPipeline(data=data, recipe=recipe_without_selector).run(
+fixed_fit = recipe_without_selector.fit(
+    data,
     feature_names=["age", "territory__urban", "territory__rural"],
     feature_stage="encoded",
 )
@@ -907,7 +910,7 @@ Pitfalls:
 
 ### FittedPipeline
 
-`FittedPipeline` is the result object returned by `ModelPipeline.run()`.
+`FittedPipeline` is the result object returned by `recipe.fit(data)`.
 
 Important fields:
 
@@ -1190,34 +1193,40 @@ prediction series.
 
 Defined in `evaluation/cv_report.py`.
 
-`CrossValidationReport` runs repeated fold fits and reports fold stability:
+`recipe.cross_validate()` runs repeated fold fits and reports fold stability:
 
 ```python
-result = CrossValidationReport(
-    recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    data=data,
-    n_folds=5,
-    benchmark_col=None,
-    fold_col=None,
-    seed=42,
-).run(feature_names=["x1", "x3"])
+from ins_gbm import CVConfig, LightGBMModel, ModelRecipe
+
+recipe = ModelRecipe(model=LightGBMModel(objective="poisson"))
+result = recipe.cross_validate(
+    data, cv=CVConfig(n_splits=5, seed=42, folds="auto"),
+    feature_names=["x1", "x3"],
+)
 ```
 
 Returns `CVResult`:
 
 - `fold_metrics`: columns `fold`, `model`, `metric`, `value`.
 - `summary`: columns `model`, `metric`, `mean`, `std`.
-- `fold_col`: name of fold column if predefined feature folds were used.
+- `fold_col`: name of the predefined fold field when one was used.
 - `predictions`: out-of-fold predictions used for comparison charts.
+- `row_folds`: the fold assignment for each prediction row.
 - `actual`, `exposure`, `weight`, and `objective`: aligned row-level context for
-  the stored out-of-fold predictions.
+  in-memory out-of-fold predictions. Target, exposure, and weight are omitted
+  when the result is saved.
 - `feature_names`: the ordered runtime feature subset.
+- `cv_config`, `data_signature`, and `fold_params`: effective CV settings,
+  an ordered evaluation-input fingerprint, and fitted parameters by fold.
 
-`run(feature_names=...)` selects raw predictors without removing a
+`cross_validate(..., feature_names=...)` selects raw predictors without removing a
 `benchmark_col` or `fold_col` from its special role. In benchmark mode,
 `CVResult.plot_double_lift()` plots the OOF GBM and benchmark predictions,
 `CVResult.double_lift_score()` returns their signed score, and fold/summary
 metrics include `double_lift_score`.
+
+Use `CrossValidationReport(...)` directly when `benchmark_col`, `fold_col`, or
+`show_progress_bar` needs explicit configuration.
 
 Fold modes are configured with `CVConfig`: `auto` uses `ModelData.cv_fold` when
 present, `random` forces shuffled folds, and `predefined` requires `cv_fold`.
@@ -1232,6 +1241,11 @@ Benchmark mode:
 `CrossValidationReport` fits the complete recipe. When tuning is configured,
 each outer training partition performs inner tuning.
 
+Save a CV report explicitly with `result.save("output/model/cv_report")` and
+reload it with `load_cv_result(...)`. The report stores metrics, aligned OOF
+predictions, fold assignments, and provenance, but no targets, weights, or
+features. A saved fitted model alone cannot reconstruct its CV predictions.
+
 ### Report Comparison
 
 Defined in `evaluation/comparison.py`.
@@ -1245,12 +1259,11 @@ table = compare_reports({
 })
 ```
 
-The output has one row per metric, one column per report name, and a `preferred`
-column. Direction comes from `METRIC_DIRECTIONS`:
+The output has one row per standard metric, one column per report name, and a
+`preferred` column. Direction comes from `METRIC_DIRECTIONS`:
 
 - higher is better for `gini`.
-- lower is better for deviance, RMSE, MAE, and `double_lift_score` when the
-  report's focal model is model 1.
+- lower is better for deviance, RMSE, and MAE.
 
 Single evaluation values are formatted to four decimals. CV values are
 formatted as `mean +/- std`.
@@ -1258,6 +1271,25 @@ formatted as `mean +/- std`.
 When a single-model `EvaluationReport` also contains external comparison
 predictions, `compare_reports()` compares the fitted model's metrics rather
 than the benchmark rows.
+
+Pairwise CV double lift is calculated separately because its score depends on
+both models. For two CV results created from the same rows in the same order and
+using the same folds:
+
+```python
+from ins_gbm import compare_cv_double_lift, compare_reports, load_cv_result
+
+saved = load_cv_result("output/baseline/cv_report")
+candidate = candidate_recipe.cross_validate(data, cv=cv)
+metrics = compare_reports({"baseline": saved, "candidate": candidate})
+double_lift = compare_cv_double_lift(saved, candidate)
+```
+
+`double_lift` has a pooled score and one score per fold; positive values favor
+the candidate. If both results are loaded from disk, supply the original rows
+with `compare_cv_double_lift(saved, candidate, data=data)`. The comparison
+checks a fingerprint of ordered targets, exposure, weights, and fold assignments.
+The pooled score is calculated from all OOF rows, not averaged from fold scores.
 
 Pitfall: comparison-mode `EvaluationReport` objects from
 `EvaluationReport.compare()` cannot be passed into `compare_reports()`. Pass
@@ -1362,12 +1394,13 @@ Persistence lives in `src/ins_gbm/persistence/`.
 
 ### Saving
 
-Defined in `persistence/io.py`.
+Model artifacts are implemented in `persistence/io.py`.
 
 ```python
-from ins_gbm.persistence.io import save_pipeline
+from ins_gbm import load_model
 
-save_pipeline(result, "output/my_model")
+result.save("output/my_model")
+loaded = load_model("output/my_model")
 ```
 
 Artifacts written:
@@ -1376,15 +1409,29 @@ Artifacts written:
 - `metadata.json`: `ReproducibilityMetadata` as JSON.
 - `tuning_history.parquet`: only when tuning history exists.
 
+CV reports are independent artifacts implemented in `persistence/cv_io.py`:
+
+```python
+from ins_gbm import load_cv_result
+
+cv_result.save("output/my_model/cv_report")
+saved_cv = load_cv_result("output/my_model/cv_report")
+```
+
+The CV directory contains `fold_metrics.parquet`, `summary.parquet`,
+`predictions.parquet`, and `metadata.json`. The predictions file has a row per
+original training row, with OOF predictions and its fold ID. The metadata holds
+the objective, features, fold settings, fold parameters, row count, and an
+evaluation-input fingerprint. Training features, targets, exposure, and weights
+remain outside the CV artifact.
+
 ### Loading
 
 ```python
-from ins_gbm.persistence.io import load_pipeline
-
-loaded = load_pipeline("output/my_model")
+from ins_gbm import load_model
 
 # Reattach the original rows only for train_data or OOF ensemble fitting.
-loaded_for_oof = load_pipeline(
+loaded_for_oof = load_model(
     "output/my_model",
     training_data=original_training_data,
 )
@@ -1398,7 +1445,7 @@ Pitfalls:
   Reattached rows must be the original training dataset in its original order.
 - A fitted UMAP reducer may retain training-derived matrices that its transform
   implementation needs even though `raw_train_data` itself is omitted.
-- Loading is safest in an environment with compatible package versions.
+- Loading model pickles is safest in an environment with compatible package versions.
 - `metadata.json` is useful for auditing but does not recreate the pipeline by
   itself.
 
@@ -1462,7 +1509,7 @@ pipeline does not currently emit `split` or `evaluate` events.
 ```python
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
-from ins_gbm.pipeline import ModelPipeline, ModelRecipe
+from ins_gbm import ModelRecipe
 
 data = load_model_data(
     path="frequency.parquet",
@@ -1477,10 +1524,7 @@ recipe = ModelRecipe(
     params={"n_estimators": 100},
 )
 
-result = ModelPipeline(
-    data=data,
-    recipe=recipe,
-).run()
+result = recipe.fit(data)
 
 report = result.evaluate(holdout_data)
 metrics = report.metrics()
@@ -1492,7 +1536,7 @@ preds = result.predict(holdout_data, prediction_type="response")
 ```python
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
-from ins_gbm.pipeline import ModelPipeline, ModelRecipe
+from ins_gbm import ModelRecipe
 
 data = load_model_data(
     path="severity.parquet",
@@ -1502,10 +1546,8 @@ data = load_model_data(
     objective="gamma",
 )
 
-result = ModelPipeline(
-    data=data,
-    recipe=ModelRecipe(model=LightGBMModel()),  # inherits "gamma" from data
-).run()
+recipe = ModelRecipe(model=LightGBMModel())  # inherits "gamma" from data
+result = recipe.fit(data)
 ```
 
 ### Categorical Features with One-Hot Encoding
@@ -1558,15 +1600,12 @@ recipe = ModelRecipe(
     ),
 )
 
-result = ModelPipeline(data=data, recipe=recipe).run(
-    feature_names=["x1", "x3"],
-)
+result = recipe.fit(data, feature_names=["x1", "x3"])
 history = result.tuning_history
 ```
 
-This pipeline fits the encoder, completes Boruta, and fixes
-`result.selected_features` before the first Optuna trial begins. Tuning folds
-refit the preprocessing chain, if present, against that fixed feature set.
+This fit relearns the encoder, selector, and preprocessing inside tuning folds.
+It then fits them on all training rows for the returned model.
 
 ### Predefined Folds for Tuning
 
@@ -1592,27 +1631,26 @@ Remember that this uses `ModelData.cv_fold`, not a feature column.
 ### Cross-Validation Report
 
 ```python
-from ins_gbm.evaluation.cv_report import CrossValidationReport
+from ins_gbm import CVConfig, LightGBMModel, ModelRecipe
 
-cv_result = CrossValidationReport(
-    recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
-    data=data,
-    n_folds=5,
-    seed=42,
-    show_progress_bar=True,
-).run(feature_names=["x1", "x3"])
+recipe = ModelRecipe(model=LightGBMModel(objective="poisson"))
+cv_result = recipe.cross_validate(
+    data, cv=CVConfig(n_splits=5, seed=42, folds="auto"),
+    feature_names=["x1", "x3"],
+)
 
 fold_metrics = cv_result.fold_metrics
 summary = cv_result.summary
+cv_result.save("output/frequency_model/cv_report")
 ```
 
 ### Saving and Loading a Pipeline
 
 ```python
-from ins_gbm.persistence.io import save_pipeline, load_pipeline
+from ins_gbm import load_model
 
-save_pipeline(result, "output/frequency_model")
-loaded = load_pipeline("output/frequency_model")
+result.save("output/frequency_model")
+loaded = load_model("output/frequency_model")
 ```
 
 ### Fixed-Weight Blend
@@ -1744,10 +1782,11 @@ from ins_gbm.pipeline import ModelPipeline
 
 Do not use `gbm_fitting` for this project.
 
-### Assuming Root Package Exports Everything
+### Finding Public Imports
 
-`src/ins_gbm/__init__.py` exposes `__version__` and progress-related types only.
-Import most classes from their concrete modules.
+The root `ins_gbm` package exports the common fitting, evaluation, CV report,
+and persistence functions used in the examples. More specialized helpers remain
+available through their concrete modules.
 
 ### Treating `FittedPipeline.train_data` as Raw Data
 
@@ -1782,7 +1821,7 @@ feature-column `fold_col` argument is a compatibility adapter only.
 ### Managing Holdouts
 
 The caller owns holdout construction. Keep final holdout rows separate from
-the `ModelData` passed to `ModelPipeline.run()` and pass them only to
+the `ModelData` passed to `recipe.fit()` and pass them only to
 `FittedPipeline.evaluate()`.
 
 ### Using `ImportancePruner` Directly in `ModelRecipe.selection`

@@ -49,13 +49,30 @@ supported. The shorter methods delegate to the same implementation.
 ## Tune and cross-validate
 
 ```python
-from ins_gbm import CVConfig, HyperparameterTuner
+from ins_gbm import (
+    CVConfig, HyperparameterTuner, compare_cv_double_lift,
+    compare_reports, load_cv_result,
+)
 
 recipe.tuning = HyperparameterTuner(n_trials=30, cv_folds=5, seed=42)
 fitted = recipe.fit(training)
 cv_result = recipe.cross_validate(
     training, cv=CVConfig(n_splits=5, seed=42, folds="auto"),
 )
+cv_result.save("output/frequency_model/cv_report")
+
+# Later, run a candidate on the same rows, in the same order and folds.
+saved_cv = load_cv_result("output/frequency_model/cv_report")
+candidate_recipe = ModelRecipe(
+    model=LightGBMModel(), encoder=OneHotEncoder(), params={"num_leaves": 16},
+)
+candidate_cv = candidate_recipe.cross_validate(
+    training, cv=CVConfig(n_splits=5, seed=42, folds="auto"),
+)
+metric_comparison = compare_reports({"saved": saved_cv, "candidate": candidate_cv})
+double_lift = compare_cv_double_lift(saved_cv, candidate_cv)
+# double_lift has an overall score and one score per fold;
+# positive scores favor the candidate.
 ```
 
 `auto` uses `ModelData.cv_fold` when present and otherwise uses shuffled K-fold
@@ -63,6 +80,15 @@ splits. Encoding, supervised selection, and preprocessing are refit within tunin
 folds by default. Set `selection_scope="fixed"` only when tuning scores should be
 conditional on selection learned from all supplied training rows. Outer CV of a
 tuned recipe is nested CV.
+
+The CV artifact stores fold metrics, out-of-fold predictions, fold assignments,
+and provenance. It does not store targets, exposure, weights, or features. If both
+CV results are loaded from disk, pass the original training data to
+`compare_cv_double_lift(saved_cv, candidate_cv, data=training)`. Results must use
+the same ordered rows and fold assignments. `compare_reports()` compares standard
+metrics; double lift is calculated separately because it depends on the model pair.
+The overall double-lift score is calculated from all out-of-fold rows, rather
+than averaging the fold scores.
 
 `HyperparameterTuner(metric=None)` infers Poisson or Gamma deviance. Recipe params
 are base parameters; trial suggestions override overlapping keys.

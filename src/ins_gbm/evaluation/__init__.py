@@ -5,7 +5,7 @@ from ins_gbm.evaluation.metrics import (
     double_lift_table,
 )
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
-from ins_gbm.evaluation.comparison import compare_reports
+from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 
 __all__ = [
     "compute_metrics",
@@ -14,5 +14,6 @@ __all__ = [
     "METRIC_DIRECTIONS",
     "CrossValidationReport",
     "CVResult",
+    "compare_cv_double_lift",
     "compare_reports",
 ]

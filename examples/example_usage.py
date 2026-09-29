@@ -2,7 +2,7 @@
 
 Run from the repository root after installing the LightGBM extra:
     python examples/example_usage.py --output output/example
-Add --cross-validate to demonstrate the complete recipe CV workflow.
+Add --cross-validate to save CV reports and compare a new candidate.
 """
 
 from __future__ import annotations
@@ -13,7 +13,10 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from ins_gbm import CVConfig, LightGBMModel, ModelData, ModelRecipe, load_model
+from ins_gbm import (
+    CVConfig, LightGBMModel, ModelData, ModelRecipe,
+    compare_cv_double_lift, compare_reports, load_cv_result, load_model,
+)
 
 
 def frequency_data(seed: int = 42) -> tuple[ModelData, ModelData]:
@@ -92,6 +95,22 @@ def main() -> None:
     frequency_fit.save(str(args.output / "frequency"))
     restored = load_model(str(args.output / "frequency"))
     np.testing.assert_allclose(restored.predict(frequency_holdout), counts)
+
+    if args.cross_validate:
+        cv_path = args.output / "frequency" / "cv_report"
+        cv.save(str(cv_path))
+        saved_cv = load_cv_result(str(cv_path))
+        candidate_recipe = ModelRecipe(
+            model=LightGBMModel(),
+            params={"n_estimators": 10, "num_leaves": 16, "verbose": -1},
+        )
+        candidate_cv = candidate_recipe.cross_validate(
+            frequency_train, cv=CVConfig(folds="auto"),
+        )
+        print("Saved versus candidate CV metrics")
+        print(compare_reports({"saved": saved_cv, "candidate": candidate_cv}))
+        print("CV double lift (positive favors candidate)")
+        print(compare_cv_double_lift(saved_cv, candidate_cv))
 
     severity_train, severity_holdout = severity_data()
     severity_fit = ModelRecipe(

@@ -19,8 +19,9 @@ from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
 from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.io import load_model, load_pipeline, save_pipeline
+from ins_gbm.persistence.cv_io import load_cv_result
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
-from ins_gbm.evaluation.comparison import compare_reports
+from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "ImportanceSelectionStage", "ModelRecipe", "OneHotEncoder", "PCAReducer",
     "PLSReducer", "PipelineCancelled", "PreprocessingStep",
     "ProgressCallback", "ProgressEvent", "RandomForestModel", "XGBoostModel",
-    "StagedImportanceSelector", "compare_reports", "load_model",
-    "load_model_data", "load_pipeline", "save_pipeline",
+    "StagedImportanceSelector", "compare_cv_double_lift", "compare_reports",
+    "load_cv_result", "load_model", "load_model_data", "load_pipeline",
+    "save_pipeline",
 ]
