@@ -66,6 +66,7 @@ class _ObjectiveConfig:
     selector: Optional[Any]
     preprocessing_chain: list[Any]
     encoder_schema: Optional[Any]
+    model_selected_features: Optional[list[str]]
     fold_splits: list[tuple[np.ndarray, np.ndarray]]
     search_space: dict[str, Any]
     metric: str
@@ -136,6 +137,7 @@ def _evaluate_trial(
             selector=config.selector,
             preprocessing=config.preprocessing_chain,
             schema=config.encoder_schema,
+            model_selected_features=config.model_selected_features,
         )
         train_data = transform_result.data
         val_data = transform_result.chain.transform(val_data)
@@ -222,6 +224,7 @@ class HyperparameterTuner:
         schema: Optional[Any] = None,
         *,
         feature_names: Optional[list[str]] = None,
+        model_selected_features: Optional[list[str]] = None,
         progress: Optional[ProgressCallback] = None,
         should_stop: Optional[Any] = None,
         base_params: Optional[dict] = None,
@@ -325,6 +328,7 @@ class HyperparameterTuner:
             selector=selector,
             preprocessing_chain=preprocessing_chain,
             encoder_schema=encoder_schema,
+            model_selected_features=model_selected_features,
             fold_splits=fold_splits,
             search_space=search_space,
             metric=metric,

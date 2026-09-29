@@ -46,6 +46,52 @@ restored = load_model("output/frequency_model")
 `ModelPipeline(data, recipe).run()` and the original persistence functions remain
 supported. The shorter methods delegate to the same implementation.
 
+## Prune fitted model columns
+
+`ImportancePruner` ranks the columns actually fitted by a model, including
+one-hot indicators and preprocessing outputs. Pass a fitted model or pipeline;
+the raw training data is not needed for pruning. Pass the fitted pruning result
+as `feature_names` to apply it after the new recipe's transforms:
+
+```python
+from ins_gbm.selection import ImportancePruner
+
+selection = ImportancePruner(top_n=20).fit(fitted)
+pruned = recipe.fit(training, feature_names=selection)
+```
+
+The new recipe must produce the selected model columns. Plain `feature_names`
+lists still refer to raw inputs unless `feature_stage="encoded"` or
+`feature_stage="model"` is specified.
+
+## Screen features across CV folds
+
+`cv_feature_importance` fits a shallow XGBoost model on the training rows of
+each fold and returns every input feature, including those with zero importance.
+Its default columns are `feature`, `n_folds_selected`, `mean_weight`,
+`mean_gain`, and `mean_cover`. The count is the number of folds where at least
+one requested importance measure is positive; averages include zero scores.
+
+```python
+import polars as pl
+from ins_gbm import CVConfig, cv_feature_importance
+
+# Uses training.cv_fold if present, otherwise five shuffled folds.
+ranking = cv_feature_importance(training)
+ranking = cv_feature_importance(
+    training,
+    cv=CVConfig(folds="random", n_splits=10, seed=42),
+    feature_names=["driver_age", "vehicle_age", "annual_miles"],
+    importance_types=("weight", "gain", "cover", "total_gain"),
+)
+candidates = ranking.filter(pl.col("n_folds_selected") >= 7)["feature"].to_list()
+final_fit = recipe.fit(training, feature_names=candidates)
+```
+
+The supplied features must be fit-ready numeric columns. For another model
+wrapper, pass its supported `importance_types`; for example, LightGBM supports
+`("split", "gain")`. `params` can override the shallow fitting defaults.
+
 ## Tune and cross-validate
 
 ```python

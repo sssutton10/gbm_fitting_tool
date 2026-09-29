@@ -10,6 +10,8 @@ from ins_gbm.preprocessing.encoder import OneHotEncoder
 from ins_gbm.preprocessing.pca import PCAReducer
 from ins_gbm.preprocessing.steps import PreprocessingStep
 from ins_gbm.tuning.tuner import HyperparameterTuner
+from ins_gbm.selection.importance import ImportancePruner
+from ins_gbm.persistence.io import load_pipeline
 
 
 def _data(path):
@@ -246,6 +248,58 @@ def test_encoded_feature_stage_works_without_encoder(poisson_parquet):
     assert result.input_feature_names == ["x1", "x3"]
     assert result.selected_features == ["x3"]
     assert result.train_data.features.columns == ["x3"]
+
+
+@pytest.mark.parametrize("selection_scope", ["fold", "fixed"])
+def test_pruned_model_columns_replay_through_tuning_cv_and_persistence(
+    poisson_parquet, tmp_path, selection_scope,
+):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x2", "x3"],
+        objective="poisson",
+    )
+    preprocessing = [PreprocessingStep(
+        name="x1_pca", preprocessor=PCAReducer(n_components=1),
+        feature_names=["x1"],
+    )]
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(), preprocessing=preprocessing,
+        params={"n_estimators": 5, "verbose": -1},
+        selection_scope=selection_scope,
+    )
+    original = recipe.fit(data)
+    selection = ImportancePruner(threshold=0).fit(original)
+    recipe.tuning = HyperparameterTuner(
+        n_trials=1, cv_folds=2, show_progress_bar=False,
+    )
+    fitted = recipe.fit(data, feature_names=selection)
+    assert fitted.train_data.feature_names == selection.selected_features()
+    assert fitted.tuning_history.height == 1
+
+    from ins_gbm.ensemble._utils import _apply_pipeline_recipe_fold_transforms
+    fold_train, fold_val = _apply_pipeline_recipe_fold_transforms(
+        fitted, slice_model_data(data, range(200)),
+        slice_model_data(data, range(200, data.n_rows)),
+    )
+    assert fold_train.feature_names == selection.selected_features()
+    assert fold_val.feature_names == selection.selected_features()
+
+    cv = recipe.cross_validate(
+        data, feature_names=selection,
+    )
+    assert cv.predictions.height == data.n_rows
+
+    retuned = fitted.retune(HyperparameterTuner(
+        n_trials=1, cv_folds=2, show_progress_bar=False,
+    ))
+    assert retuned.train_data.feature_names == selection.selected_features()
+
+    fitted.save(str(tmp_path))
+    loaded = load_pipeline(str(tmp_path))
+    assert loaded.model_selected_features == selection.selected_features()
+    assert loaded.predict(data).to_list() == pytest.approx(fitted.predict(data).to_list())
 
 
 def test_encoded_feature_stage_validates_configuration(poisson_parquet):

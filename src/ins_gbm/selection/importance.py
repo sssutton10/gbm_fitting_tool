@@ -31,10 +31,31 @@ class ImportancePruner:
         elif n_set > 1:
             raise ValueError("Set only one of: threshold, percentile, top_n")
 
-    def fit(self, data: ModelData, fitted_model: FittedModel) -> "FittedImportancePruner":
+    def fit(
+        self, data: ModelData | FittedModel | Any = None,
+        fitted_model: FittedModel | Any = None,
+    ) -> "FittedImportancePruner":
+        """Rank the fitted model's columns, including encoded and reduced columns.
+
+        ``fit(data, model)`` remains accepted for older callers. The data's raw
+        feature names cannot describe the fitted design, so they are not used.
+        """
+        if fitted_model is not None and data is not None:
+            if not isinstance(data, ModelData):
+                raise TypeError("fit(data, fitted_model) requires ModelData first")
+        elif fitted_model is None:
+            fitted_model = data
+        fitted_model = getattr(fitted_model, "fitted_model", fitted_model)
+        if not isinstance(fitted_model, FittedModel):
+            raise TypeError("fit requires a FittedModel or FittedPipeline")
         imp = fitted_model.feature_importance()
         names = imp["feature"].to_list()
         scores = imp["importance"].to_numpy().astype(float)
+        original_order = list(fitted_model.feature_names)
+        if len(names) != len(original_order) or set(names) != set(original_order):
+            raise ValueError("Feature importance names do not match fitted model columns")
+        if not np.isfinite(scores).all():
+            raise ValueError("Feature importance scores must be finite")
 
         if self.top_n is not None:
             order = np.argsort(-scores)
@@ -47,7 +68,6 @@ class ImportancePruner:
             keep = [n for n, s in zip(names, scores) if s >= cutoff]
 
         # Preserve original feature order
-        original_order = list(data.feature_names)
         keep_set = set(keep)
         selected = [f for f in original_order if f in keep_set]
 

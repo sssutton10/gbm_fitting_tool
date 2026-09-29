@@ -161,6 +161,7 @@ src/ins_gbm/
     selection/
         __init__.py
         boruta.py
+        cv_importance.py
         importance.py
     models/
         __init__.py
@@ -524,6 +525,30 @@ steps should be ordered deliberately.
 
 Feature selection lives in `src/ins_gbm/selection/`.
 
+### Cross-Validated Feature Importance
+
+Defined in `selection/cv_importance.py` and exported as
+`ins_gbm.cv_feature_importance`. This standalone screen fits one shallow model
+on the training rows of each CV fold and returns a Polars DataFrame. With the
+default XGBoost model, it reports `feature`, `n_folds_selected`, `mean_weight`,
+`mean_gain`, and `mean_cover`. Every input feature appears in input order,
+including features with zero importance. The count is the number of folds where
+any requested importance is positive; means include zero scores for unused
+features and are divided by the total fold count.
+
+`CVConfig(folds="auto")` uses `ModelData.cv_fold` if present and otherwise
+creates shuffled folds. `CVConfig(folds="random", n_splits=..., seed=...)`
+forces random splits; `folds="predefined"` requires stored fold IDs. The
+`feature_names` argument limits the candidate pool. Built-in wrappers use
+shallow tree defaults, which `params` may override. Other frameworks require
+their own importance names: for example, LightGBM uses `("split", "gain")`
+and CatBoost uses `("PredictionValuesChange", "LossFunctionChange")`.
+
+This utility takes fit-ready columns and returns a ranking for a later fit; it
+does not implement the pipeline selector hook. If the resulting feature list is
+chosen using CV data, evaluate that choice on a separate holdout or repeat the
+screen inside each outer CV training fold.
+
 ### Boruta Selector
 
 Defined in `selection/boruta.py`.
@@ -610,11 +635,19 @@ Selection modes:
 
 Exactly one mode should be set. If none is set, the default threshold is `0.0`.
 
-Important pitfall: `ImportancePruner.fit()` has this signature:
+`ImportancePruner.fit()` accepts a fitted model or pipeline and ranks its fitted
+model columns, including one-hot indicators and preprocessing outputs:
 
 ```python
-fit(data: ModelData, fitted_model: FittedModel)
+selection = ImportancePruner(top_n=20).fit(fitted_model)
+refit = recipe.fit(data, feature_names=selection)
 ```
+
+The two-argument `fit(data, fitted_model)` call remains supported, but the
+fitted model's column names determine the result. A fitted pruner result passed
+as `feature_names` is applied after preprocessing. A plain list still defaults
+to raw feature names; use `feature_stage="encoded"` or `"model"` to place a
+plain list at a later stage.
 
 Pipeline-compatible selector hooks call:
 
@@ -622,9 +655,8 @@ Pipeline-compatible selector hooks call:
 selector.fit(current_train)
 ```
 
-That means `ImportancePruner` is useful as a standalone post-fit utility, but it
-does not currently fit the pipeline selector contract without an adapter or code
-change.
+`ImportancePruner` remains a post-fit utility. For selection learned during
+pipeline fitting, use `StagedImportanceSelector`.
 
 ## Model Wrappers
 
@@ -905,8 +937,8 @@ Pitfalls:
 
 - Preprocessors are an ordered transform chain, not concurrent jobs.
 - `ImportancePruner` requires an already-fitted model and does not match the
-  pipeline selector signature. Use `StagedImportanceSelector` for in-pipeline
-  importance pruning.
+  pipeline selector signature. Pass its fitted result as `feature_names` for a
+  later fit, or use `StagedImportanceSelector` for in-pipeline importance pruning.
 
 ### FittedPipeline
 
@@ -1696,8 +1728,8 @@ Major areas:
 - `tests/preprocessing/`: one-hot encoding and reducers.
 - `tests/models/`: base contracts and model wrapper behavior.
 - `tests/tuning/`: Optuna tuning and predefined folds.
-- `tests/selection/`: Boruta, standalone importance pruning, and staged
-  importance selection.
+- `tests/selection/`: Boruta, CV importance screening, standalone importance
+  pruning, and staged importance selection.
 - `tests/evaluation/`: metrics, plots, reports, CV reports, comparison helpers.
 - `tests/ensemble/`: blending, stacking, and ensemble pipeline.
 - `tests/persistence/`: save/load behavior.

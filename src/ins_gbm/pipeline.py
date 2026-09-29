@@ -11,10 +11,11 @@ from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
 from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
-from ins_gbm.preprocessing.chain import FittedTransformChain
+from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
+from ins_gbm.selection.importance import FittedImportancePruner
 
 
-FeatureStage = Literal["raw", "encoded"]
+FeatureStage = Literal["raw", "encoded", "model"]
 
 
 @dataclass
@@ -62,6 +63,7 @@ class FittedPipeline:
     preprocessors: list
     metadata: ReproducibilityMetadata
     input_schema: Optional[FeatureSchema] = None
+    model_selected_features: Optional[list[str]] = None
 
     @property
     def train_data(self) -> ModelData:
@@ -92,6 +94,7 @@ class FittedPipeline:
             encoder=self.encoder,
             selected_features=self.selected_features,
             preprocessors=self.preprocessors,
+            model_selected_features=getattr(self, "model_selected_features", None),
         ).transform(data)
 
     def predict(self, data, prediction_type: PredictionType = "response", *,
@@ -225,6 +228,11 @@ class FittedPipeline:
             progress=progress,
             should_stop=should_stop,
             base_params=self.recipe.params,
+            **(
+                {"model_selected_features": self.model_selected_features}
+                if getattr(self, "model_selected_features", None) is not None
+                else {}
+            ),
         )
         check_cancel()
 
@@ -239,6 +247,10 @@ class FittedPipeline:
             )
             fitted_preprocessors.append(fitted_prep)
 
+        model_selected_features = getattr(self, "model_selected_features", None)
+        if model_selected_features is not None:
+            current_train = select_model_features(current_train, model_selected_features)
+
         emit("fit", "fitting model on full training data")
         check_cancel()
         fitted_model = self.recipe.model.fit(
@@ -251,6 +263,7 @@ class FittedPipeline:
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=self.selected_features,
+            model_selected_features=model_selected_features,
             input_feature_names=self.input_feature_names,
             tuning_seed=getattr(tuner, "seed", None),
             selection_stages=getattr(self.metadata, "selection_stages", None),
@@ -301,22 +314,27 @@ class ModelPipeline:
 
     def run(
         self,
-        feature_names: Optional[list[str]] = None,
+        feature_names: list[str] | FittedImportancePruner | None = None,
         *,
         feature_stage: FeatureStage = "raw",
     ) -> FittedPipeline:
-        """Fit the recipe with an optional raw or post-encoding feature subset."""
+        """Fit with an optional raw, encoded, or fitted-model feature subset."""
         from ins_gbm.persistence.metadata import build_metadata
         from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
         self.data.validate(require_multiple_folds=False)
         validate_preprocessing_steps(self.recipe.preprocessing)
-        if feature_stage not in ("raw", "encoded"):
-            raise ValueError("feature_stage must be 'raw' or 'encoded'")
-        if feature_stage == "encoded":
+        if isinstance(feature_names, FittedImportancePruner):
+            if feature_stage != "raw":
+                raise ValueError("feature_stage is inferred from a fitted pruner result")
+            feature_names = feature_names.selected_features()
+            feature_stage = "model"
+        if feature_stage not in ("raw", "encoded", "model"):
+            raise ValueError("feature_stage must be 'raw', 'encoded', or 'model'")
+        if feature_stage in ("encoded", "model"):
             if feature_names is None:
                 raise ValueError(
-                    "feature_names is required when feature_stage='encoded'"
+                    f"feature_names is required when feature_stage={feature_stage!r}"
                 )
             if not feature_names:
                 raise ValueError("feature_names must contain at least one feature")
@@ -324,8 +342,8 @@ class ModelPipeline:
                 raise ValueError("feature_names must be unique")
             if self.recipe.selection is not None:
                 raise ValueError(
-                    "feature_stage='encoded' cannot be combined with "
-                    "recipe.selection; encoded feature_names are the fixed "
+                    f"feature_stage={feature_stage!r} cannot be combined with "
+                    "recipe.selection; supplied feature_names are the fixed "
                     "final selection"
                 )
 
@@ -343,8 +361,10 @@ class ModelPipeline:
         best_params: dict = {}
         fold_local_tuning = (
             self.recipe.tuning is not None
-            and self.recipe.selection_scope == "fold"
-            and feature_stage == "raw"
+            and (
+                feature_stage == "model"
+                or (self.recipe.selection_scope == "fold" and feature_stage == "raw")
+            )
         )
         if fold_local_tuning:
             self._emit("tuning", "starting fold-local hyperparameter tuning",
@@ -355,6 +375,10 @@ class ModelPipeline:
                 encoder=self.recipe.encoder,
                 selector=self.recipe.selection,
                 preprocessors=self.recipe.preprocessing,
+                **(
+                    {"model_selected_features": list(feature_names)}
+                    if feature_stage == "model" else {}
+                ),
                 base_params=self.recipe.params,
                 progress=self.progress,
                 should_stop=self.should_stop,
@@ -435,6 +459,12 @@ class ModelPipeline:
             )
             fitted_preprocessors.append(fitted_prep)
 
+        model_selected_features = (
+            list(feature_names) if feature_stage == "model" else None
+        )
+        if model_selected_features is not None:
+            current_train = select_model_features(current_train, model_selected_features)
+
         self._emit("fit", "fitting model on full training data")
         self._check_cancel()
         fitted_model = self.recipe.model.fit(
@@ -447,6 +477,7 @@ class ModelPipeline:
         metadata = build_metadata(
             fitted_model=fitted_model,
             selected_features=selected_features,
+            model_selected_features=model_selected_features,
             input_feature_names=input_feature_names,
             tuning_seed=(
                 getattr(self.recipe.tuning, "seed", None)
@@ -469,6 +500,7 @@ class ModelPipeline:
             raw_train_data=raw_train_data,
             input_schema=raw_train_data.schema,
             selected_features=selected_features,
+            model_selected_features=model_selected_features,
             selection_results=selection_results,
             tuning_history=tuning_history,
             encoder=fitted_encoder,

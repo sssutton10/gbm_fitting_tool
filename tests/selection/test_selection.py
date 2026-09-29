@@ -6,6 +6,9 @@ from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.selection.importance import ImportancePruner
 from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
+from ins_gbm.preprocessing.encoder import OneHotEncoder
+from ins_gbm.preprocessing.pca import PCAReducer
+from ins_gbm.preprocessing.steps import PreprocessingStep
 
 
 # ── Boruta ─────────────────────────────────────────────────────────────────────
@@ -101,6 +104,67 @@ def test_importance_pruner_threshold(poisson_parquet):
     pruner = ImportancePruner(threshold=0.0)
     fitted_pruner = pruner.fit(data, fitted_model)
     assert len(fitted_pruner.selected_features()) == 2
+
+
+def test_importance_pruner_uses_fitted_one_hot_columns(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x2", "x3"],
+        objective="poisson",
+    )
+    model = LightGBMModel(objective="poisson").fit(
+        data, params={"n_estimators": 5, "verbose": -1}, encoder=OneHotEncoder(),
+    )
+    pruner = ImportancePruner(threshold=0)
+    selected = pruner.fit(model)
+
+    assert selected.selected_features() == model.feature_names
+    assert any(name.startswith("x2__") for name in selected.selected_features())
+    assert pruner.fit(data, model).selected_features() == model.feature_names
+    assert pruner.fit(data, fitted_model=model).selected_features() == model.feature_names
+    assert pruner.fit(data=data, fitted_model=model).selected_features() == model.feature_names
+
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        params={"n_estimators": 5, "verbose": -1},
+    )
+    refit = recipe.fit(data, feature_names=selected)
+    assert refit.model_selected_features == selected.selected_features()
+    assert refit.train_data.feature_names == model.feature_names
+    assert refit.predict(data).len() == data.n_rows
+
+    model.importance_fn = lambda: pl.DataFrame({
+        "feature": ["x1"], "importance": [1.0],
+    })
+    with pytest.raises(ValueError, match="do not match fitted model columns"):
+        pruner.fit(model)
+
+
+def test_importance_pruner_result_selects_after_preprocessing(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count",
+        exposure="exposure", feature_cols=["x1", "x2", "x3"],
+        objective="poisson",
+    )
+    preprocessing = [PreprocessingStep(
+        name="x1_pca", preprocessor=PCAReducer(n_components=1),
+        feature_names=["x1"],
+    )]
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        preprocessing=preprocessing, params={"n_estimators": 5, "verbose": -1},
+    )
+    original = recipe.fit(data)
+    selected = ImportancePruner(threshold=0).fit(original)
+    assert "x1_pca__pca_1" in selected.selected_features()
+
+    refit = recipe.fit(data, feature_names=selected)
+    assert refit.train_data.feature_names == selected.selected_features()
+    assert refit.predict(data).len() == data.n_rows
+
+    selected.selected_feature_names = ["absent_output"]
+    with pytest.raises(ValueError, match="Model features missing after preprocessing"):
+        recipe.fit(data, feature_names=selected)
 
 
 # ── StagedImportanceSelector ──────────────────────────────────────────────────

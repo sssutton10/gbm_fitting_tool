@@ -41,16 +41,7 @@ def _validate_ensemble_pipelines(
 
 def _apply_pipeline_transforms(pipeline: "FittedPipeline", data: ModelData) -> ModelData:
     """Apply a fitted pipeline's encoder, selector, and preprocessors to *data*."""
-    current = data.select_features(pipeline.input_feature_names)
-    if pipeline.encoder is not None:
-        current = current.with_features(pipeline.encoder.transform(current.features))
-    if pipeline.selected_features is not None:
-        current = current.with_features(
-            current.features.select(pipeline.selected_features)
-        )
-    for prep in pipeline.preprocessors:
-        current = current.with_features(prep.transform(current.features))
-    return current
+    return pipeline._prepare_data(data)
 
 
 def _predict_from_pipeline(pipeline: "FittedPipeline", data: ModelData) -> np.ndarray:
@@ -84,7 +75,8 @@ def _apply_pipeline_recipe_fold_transforms(
     fold_train: ModelData,
     fold_val: ModelData,
 ) -> tuple[ModelData, ModelData]:
-    """Refit recipe transforms while preserving a manual encoded selection."""
+    """Refit recipe transforms while preserving fixed feature selections."""
+    model_selected = getattr(pipeline, "model_selected_features", None)
     if pipeline.recipe.selection is None and pipeline.selected_features is not None:
         encoded = fit_transform_chain(fold_train, encoder=pipeline.recipe.encoder)
         train, val = encoded.data, encoded.chain.transform(fold_val)
@@ -97,7 +89,15 @@ def _apply_pipeline_recipe_fold_transforms(
         train = train.with_features(train.features.select(pipeline.selected_features))
         val = val.with_features(val.features.select(pipeline.selected_features))
         processed = fit_transform_chain(
-            train, preprocessing=pipeline.recipe.preprocessing
+            train, preprocessing=pipeline.recipe.preprocessing,
+            model_selected_features=model_selected,
         )
         return processed.data, processed.chain.transform(val)
+    if model_selected is not None:
+        result = fit_transform_chain(
+            fold_train, encoder=pipeline.recipe.encoder,
+            preprocessing=pipeline.recipe.preprocessing,
+            model_selected_features=model_selected,
+        )
+        return result.data, result.chain.transform(fold_val)
     return _apply_recipe_fold_transforms(pipeline.recipe, fold_train, fold_val)

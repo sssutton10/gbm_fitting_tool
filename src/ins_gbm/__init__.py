@@ -17,6 +17,7 @@ from ins_gbm.preprocessing.pca import PCAReducer
 from ins_gbm.preprocessing.pls import PLSReducer
 from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
 from ins_gbm.selection.boruta import BorutaSelector
+from ins_gbm.selection.cv_importance import cv_feature_importance
 from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.io import load_model, load_pipeline, save_pipeline
 from ins_gbm.persistence.cv_io import load_cv_result
@@ -33,6 +34,7 @@ __all__ = [
     "PLSReducer", "PipelineCancelled", "PreprocessingStep",
     "ProgressCallback", "ProgressEvent", "RandomForestModel", "XGBoostModel",
     "StagedImportanceSelector", "compare_cv_double_lift", "compare_reports",
+    "cv_feature_importance",
     "load_cv_result", "load_model", "load_model_data", "load_pipeline",
     "save_pipeline",
 ]

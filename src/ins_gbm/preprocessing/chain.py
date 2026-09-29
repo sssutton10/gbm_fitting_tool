@@ -9,6 +9,14 @@ from ins_gbm.data.model_data import ModelData
 from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
 
+def select_model_features(data: ModelData, feature_names: list[str]) -> ModelData:
+    """Apply a fixed selection to the post-preprocessing model matrix."""
+    missing = [name for name in feature_names if name not in data.features.columns]
+    if missing:
+        raise ValueError(f"Model features missing after preprocessing: {missing}")
+    return data.with_features(data.features.select(feature_names))
+
+
 @dataclass
 class FittedTransformChain:
     """Fitted, replayable transforms between raw data and a model matrix."""
@@ -17,6 +25,7 @@ class FittedTransformChain:
     encoder: Optional[Any] = None
     selected_features: Optional[list[str]] = None
     preprocessors: list[Any] = field(default_factory=list)
+    model_selected_features: Optional[list[str]] = None
 
     def transform(self, data: ModelData) -> ModelData:
         current = data.select_features(self.input_feature_names)
@@ -41,6 +50,8 @@ class FittedTransformChain:
             current = current.with_features(
                 preprocessor.transform(current.features)
             )
+        if self.model_selected_features is not None:
+            current = select_model_features(current, self.model_selected_features)
         return current
 
 
@@ -62,6 +73,7 @@ def fit_transform_chain(
     selector: Optional[Any] = None,
     preprocessing: Optional[list[Any]] = None,
     schema: Optional[Any] = None,
+    model_selected_features: Optional[list[str]] = None,
 ) -> TransformFitResult:
     """Fit an ordered transform chain without modifying or retaining its matrix."""
 
@@ -104,6 +116,9 @@ def fit_transform_chain(
         current = current.with_features(fitted.transform(current.features))
         fitted_preprocessors.append(fitted)
 
+    if model_selected_features is not None:
+        current = select_model_features(current, model_selected_features)
+
     return TransformFitResult(
         data=current,
         raw_data=raw_data,
@@ -112,6 +127,7 @@ def fit_transform_chain(
             encoder=fitted_encoder,
             selected_features=selected_features,
             preprocessors=fitted_preprocessors,
+            model_selected_features=model_selected_features,
         ),
         fitted_selector=fitted_selector,
     )

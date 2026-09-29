@@ -212,7 +212,12 @@ class CrossValidationReport:
             schema=clean_schema,
             cv_fold=fold_id_series,
         )
-        if feature_names is not None:
+        from ins_gbm.selection.importance import FittedImportancePruner
+        model_selection = (
+            feature_names if isinstance(feature_names, FittedImportancePruner)
+            else None
+        )
+        if feature_names is not None and model_selection is None:
             clean_data = clean_data.select_features(feature_names)
 
         config = self.cv or CVConfig(
@@ -244,7 +249,9 @@ class CrossValidationReport:
             held_data = slice_model_data(clean_data, held_idx)
 
             from ins_gbm.pipeline import ModelPipeline
-            fitted_pipeline = ModelPipeline(train_data, self.recipe).run()
+            fitted_pipeline = ModelPipeline(train_data, self.recipe).run(
+                feature_names=model_selection
+            )
             fold_params[fold_id] = dict(fitted_pipeline.fitted_model.params)
             gbm_preds = fitted_pipeline.predict(held_data, prediction_type="response")
             oof_gbm[held_idx] = gbm_preds.to_numpy()

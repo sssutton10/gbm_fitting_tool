@@ -88,7 +88,10 @@ class StackingEnsemble:
                 fold_val = slice_model_data(pipeline_data, val_idx)
                 if self.refit == "retune" and pipeline.recipe.tuning is not None:
                     from ins_gbm.pipeline import ModelPipeline
+                    model_selected = getattr(pipeline, "model_selected_features", None)
                     run_kwargs = (
+                        {"feature_names": model_selected, "feature_stage": "model"}
+                        if model_selected is not None else
                         {"feature_names": pipeline.selected_features, "feature_stage": "encoded"}
                         if pipeline.recipe.selection is None and pipeline.selected_features is not None
                         else {}
