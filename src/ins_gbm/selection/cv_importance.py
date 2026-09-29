@@ -33,6 +33,7 @@ def cv_feature_importance(
     model: Any = None,
     cv: CVConfig | None = None,
     feature_names: Sequence[str] | None = None,
+    encoder: Any = None,
     importance_types: Sequence[str] | str = ("weight", "gain", "cover"),
     params: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
@@ -45,15 +46,15 @@ def cv_feature_importance(
 
     ``n_folds_selected`` counts folds where *any requested measure* is > 0.
     ``mean_<type>`` averages over every fold, including zero for a feature
-    absent from a fold's importance output. Rows retain the input feature order.
-    Features must be directly fit-ready; encode them before calling if needed.
+    absent from a fold's importance output. Without ``encoder``, rows retain
+    the input feature order. With an encoder, it is fitted separately on each
+    fold's training rows and rows report the union of encoded columns.
     For other model wrappers, supply importance types supported by that model.
     Explicit ``params`` override the shallow defaults for built-in wrappers.
     """
     data.validate()
     selected = data.select_features(list(feature_names)) if feature_names is not None else data
-    names = list(selected.feature_names)
-    if not names:
+    if not selected.feature_names:
         raise ValueError("feature_names must contain at least one feature")
 
     if isinstance(importance_types, str):
@@ -70,32 +71,55 @@ def cv_feature_importance(
         raise ValueError("model does not support feature importance")
     fit_params = {**_shallow_params(model), **(params or {})}
     _, splits = resolve_folds(selected, cv or CVConfig())
-    scores = {kind: np.zeros((len(splits), len(names)), dtype=float) for kind in types}
-    name_set = set(names)
+    names: list[str] = []
+    name_set: set[str] = set()
+    scores: dict[str, list[dict[str, float]]] = {kind: [] for kind in types}
 
-    for fold_index, (train_indices, _) in enumerate(splits):
-        fitted = model.fit(slice_model_data(selected, train_indices), params=dict(fit_params))
+    for train_indices, _ in splits:
+        train_data = slice_model_data(selected, train_indices)
+        if encoder is not None:
+            fitted_encoder = encoder.fit(train_data.features, train_data.schema)
+            train_data = train_data.with_features(
+                fitted_encoder.transform(train_data.features)
+            )
+        fold_names = list(train_data.feature_names)
+        if len(fold_names) != len(set(fold_names)):
+            raise ValueError("encoded feature names must be unique")
+        for name in fold_names:
+            if name not in name_set:
+                name_set.add(name)
+                names.append(name)
+        fitted = model.fit(train_data, params=dict(fit_params))
         for kind in types:
             importance = fitted.feature_importance(kind)
             if not {"feature", "importance"}.issubset(importance.columns):
                 raise ValueError("feature importance must contain 'feature' and 'importance' columns")
             reported = importance["feature"].to_list()
-            if len(reported) != len(set(reported)) or not set(reported).issubset(name_set):
+            if len(reported) != len(set(reported)) or not set(reported).issubset(set(fold_names)):
                 raise ValueError("feature importance contains duplicate or unknown features")
             try:
-                by_name = dict(zip(reported, importance["importance"].to_list()))
-                fold_scores = np.array([float(by_name.get(name, 0.0)) for name in names])
+                by_name = {
+                    name: float(score)
+                    for name, score in zip(reported, importance["importance"].to_list())
+                }
             except (TypeError, ValueError) as exc:
                 raise ValueError("feature importance scores must be numeric") from exc
-            if not np.isfinite(fold_scores).all():
+            if not np.isfinite(list(by_name.values())).all():
                 raise ValueError("feature importance scores must be finite")
-            scores[kind][fold_index] = fold_scores
+            scores[kind].append(by_name)
 
-    selected_in_fold = np.logical_or.reduce([scores[kind] > 0 for kind in types])
+    arrays = {
+        kind: np.array(
+            [[fold.get(name, 0.0) for name in names] for fold in scores[kind]],
+            dtype=float,
+        )
+        for kind in types
+    }
+    selected_in_fold = np.logical_or.reduce([arrays[kind] > 0 for kind in types])
     columns: dict[str, Any] = {
         "feature": names,
         "n_folds_selected": selected_in_fold.sum(axis=0).tolist(),
     }
     for kind in types:
-        columns[f"mean_{kind}"] = scores[kind].mean(axis=0).tolist()
+        columns[f"mean_{kind}"] = arrays[kind].mean(axis=0).tolist()
     return pl.DataFrame(columns)

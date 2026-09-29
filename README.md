@@ -88,9 +88,29 @@ candidates = ranking.filter(pl.col("n_folds_selected") >= 7)["feature"].to_list(
 final_fit = recipe.fit(training, feature_names=candidates)
 ```
 
-The supplied features must be fit-ready numeric columns. For another model
-wrapper, pass its supported `importance_types`; for example, LightGBM supports
-`("split", "gain")`. `params` can override the shallow fitting defaults.
+Without an encoder, the supplied features must be fit-ready numeric columns.
+For another model wrapper, pass its supported `importance_types`; for example,
+LightGBM supports `("split", "gain")`. `params` can override the shallow
+fitting defaults.
+
+To rank one-hot levels separately, supply the same encoder used by the final
+recipe. It is fitted within each CV training fold. The returned names then
+include levels such as `territory__north`:
+
+```python
+ranking = cv_feature_importance(
+    training,
+    model=LightGBMModel(),
+    encoder=OneHotEncoder(),
+    importance_types=("split", "gain"),
+)
+selected = ranking.filter(pl.col("n_folds_selected") >= 3)["feature"].to_list()
+fitted = recipe.fit(training, feature_names=selected, feature_stage="encoded")
+```
+
+Plain raw feature names use `recipe.fit(training, feature_names=selected)`.
+Encoded names require `feature_stage="encoded"`; the final recipe must produce
+every selected encoded column.
 
 ## Tune and cross-validate
 

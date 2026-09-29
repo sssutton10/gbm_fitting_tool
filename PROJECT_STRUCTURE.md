@@ -529,25 +529,73 @@ Feature selection lives in `src/ins_gbm/selection/`.
 
 Defined in `selection/cv_importance.py` and exported as
 `ins_gbm.cv_feature_importance`. This standalone screen fits one shallow model
-on the training rows of each CV fold and returns a Polars DataFrame. With the
-default XGBoost model, it reports `feature`, `n_folds_selected`, `mean_weight`,
-`mean_gain`, and `mean_cover`. Every input feature appears in input order,
-including features with zero importance. The count is the number of folds where
-any requested importance is positive; means include zero scores for unused
-features and are divided by the total fold count.
+on **the training rows** of each CV fold. The held-out rows choose the training
+partition but are not used for fitting or importance calculation. The result is
+a Polars DataFrame; it does not select a threshold or fit the final model.
 
-`CVConfig(folds="auto")` uses `ModelData.cv_fold` if present and otherwise
-creates shuffled folds. `CVConfig(folds="random", n_splits=..., seed=...)`
-forces random splits; `folds="predefined"` requires stored fold IDs. The
-`feature_names` argument limits the candidate pool. Built-in wrappers use
-shallow tree defaults, which `params` may override. Other frameworks require
-their own importance names: for example, LightGBM uses `("split", "gain")`
-and CatBoost uses `("PredictionValuesChange", "LossFunctionChange")`.
+The function accepts a `ModelData`, an optional model and `encoder`, optional
+raw `feature_names`, `CVConfig`, framework-native `importance_types`, and
+parameter overrides. `CVConfig(folds="auto")` uses `ModelData.cv_fold` if present
+and otherwise creates shuffled folds. `folds="predefined"` requires stored fold
+IDs; `CVConfig(folds="random", n_splits=5, seed=42)` forces random splits even
+when `cv_fold` exists. The `feature_names` argument restricts the raw inputs
+*before* encoding. When no encoder is supplied, these columns must already be
+fit-ready numeric features and the result uses their names directly.
 
-This utility takes fit-ready columns and returns a ranking for a later fit; it
-does not implement the pipeline selector hook. If the resulting feature list is
-chosen using CV data, evaluate that choice on a separate holdout or repeat the
-screen inside each outer CV training fold.
+When `encoder=OneHotEncoder()` is supplied, a fresh encoder is fitted on each
+fold's training rows, then its output is passed to the shallow model. A source
+column such as `territory` is represented by rows such as
+`territory__north` and `territory__south`; there is no separate `territory`
+importance row. Numeric columns pass through with their original names. The
+result contains the union of encoded columns seen across fold training sets.
+If a level is absent from a particular training set, it contributes zero for
+that fold. The final recipe fits its own encoder on all supplied training rows,
+so use the same encoder configuration and input features for the final fit.
+
+The result has `feature`, `n_folds_selected`, and one `mean_<type>` column for
+each requested importance type. `n_folds_selected` counts a fold when **any**
+requested type has importance strictly greater than zero. Each mean uses every
+fold as its denominator; unused or absent columns contribute zero. Zero-score
+columns remain in the result. Without an encoder, row order follows the input
+columns; with an encoder, rows follow the order their output columns first
+appear across fold fits. The default model is XGBoost and the default types are
+`("weight", "gain", "cover")`, producing `mean_weight`, `mean_gain`, and
+`mean_cover`. LightGBM supports `("split", "gain")`; CatBoost supports
+`("FeatureImportance", "PredictionValuesChange", "LossFunctionChange")`;
+Random Forest supports `("impurity",)`.
+
+Built-in screening fits default to 50 trees of depth two (CatBoost uses 50
+iterations; LightGBM also sets four leaves). `params` overrides these values
+for the screening models only. It does not alter the final recipe's parameters.
+
+To use the result, filter the `feature` column to an ordered, nonempty list.
+Pass **raw names** to `recipe.fit(data, feature_names=raw_names)`, which uses
+`feature_stage="raw"` by default and restricts the inputs before encoding.
+Pass **encoded names** to the same recipe with `feature_stage="encoded"`:
+
+```python
+ranking = cv_feature_importance(
+    training,
+    model=LightGBMModel(),
+    encoder=OneHotEncoder(),
+    importance_types=("split", "gain"),
+    cv=CVConfig(folds="predefined"),
+)
+encoded_names = ranking.filter(pl.col("n_folds_selected") >= 3)["feature"].to_list()
+recipe = ModelRecipe(model=LightGBMModel(), encoder=OneHotEncoder())
+fitted = recipe.fit(training, feature_names=encoded_names, feature_stage="encoded")
+```
+
+At `feature_stage="encoded"`, the recipe fits its encoder, checks that every
+requested name exists, keeps exactly those encoded columns in the requested
+order, and then fits preprocessing and the final model. A missing name raises
+`ValueError`. This stage cannot be combined with `recipe.selection` because
+the supplied names are already the fixed selection. Prediction still accepts
+raw input data; the fitted pipeline replays the encoder and column selection.
+With recipe tuning, this fixed encoded subset makes the tuning results
+conditional on that selection. To estimate the performance of the *selection
+procedure*, repeat the screen inside each outer CV training partition or use
+a separate holdout that was excluded from screening and tuning.
 
 ### Boruta Selector
 
