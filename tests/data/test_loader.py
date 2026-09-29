@@ -1,9 +1,14 @@
-import pytest
 import polars as pl
+
 from ins_gbm.data.loader import load_model_data
 
 
 def test_load_poisson_from_parquet(poisson_parquet):
+    """Verify load poisson from parquet.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -24,6 +29,11 @@ def test_load_poisson_from_parquet(poisson_parquet):
 
 
 def test_load_gamma_from_parquet(gamma_parquet):
+    """Verify load gamma from parquet.
+
+    Args:
+        gamma_parquet (object): The gamma parquet.
+    """
     data = load_model_data(
         path=str(gamma_parquet),
         target="severity",
@@ -37,6 +47,11 @@ def test_load_gamma_from_parquet(gamma_parquet):
 
 
 def test_load_infers_feature_cols(poisson_parquet):
+    """Verify load infers feature cols.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",

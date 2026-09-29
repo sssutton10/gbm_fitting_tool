@@ -6,10 +6,10 @@ from .steps import (
 )
 
 __all__ = [
+    "FittedPreprocessingStep",
     "FittedTransformChain",
+    "PreprocessingStep",
     "TransformFitResult",
     "fit_transform_chain",
-    "FittedPreprocessingStep",
-    "PreprocessingStep",
     "validate_preprocessing_steps",
 ]

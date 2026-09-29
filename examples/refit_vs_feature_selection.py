@@ -40,6 +40,7 @@ from ins_gbm import (
 
 
 def main() -> None:
+    """Run a subprocess tuning worker from command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train", required=True)
     parser.add_argument("--holdout", required=True)
@@ -48,12 +49,17 @@ def main() -> None:
     parser.add_argument("--exposure")
     parser.add_argument("--weight")
     parser.add_argument("--fold-col", help="Predefined folds in the training file only")
-    parser.add_argument("--existing", nargs="+", required=True, help="Existing RAW features")
-    parser.add_argument("--candidates", nargs="+", required=True, help="Full RAW candidate pool")
+    parser.add_argument(
+        "--existing", nargs="+", required=True, help="Existing RAW features"
+    )
+    parser.add_argument(
+        "--candidates", nargs="+", required=True, help="Full RAW candidate pool"
+    )
     parser.add_argument("--stage-sizes", nargs=2, type=int, default=[100, 30])
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument(
-        "--cross-validate", action="store_true",
+        "--cross-validate",
+        action="store_true",
         help="Save nested CV reports and compare the two sets of OOF predictions",
     )
     parser.add_argument("--output", type=Path, default=Path("output/refit_comparison"))
@@ -66,10 +72,13 @@ def main() -> None:
         parser.error("--trials must be positive")
 
     # Explicit predictor lists exclude IDs, targets, and benchmark predictions.
-    columns = dict(
-        target=args.target, exposure=args.exposure, weight=args.weight,
-        objective=args.objective, feature_cols=args.candidates,
-    )
+    columns = {
+        "target": args.target,
+        "exposure": args.exposure,
+        "weight": args.weight,
+        "objective": args.objective,
+        "feature_cols": args.candidates,
+    }
     training = load_model_data(args.train, cv_fold=args.fold_col, **columns)
     holdout = load_model_data(args.holdout, **columns)
 
@@ -79,6 +88,11 @@ def main() -> None:
     base_params = {"seed": 42, "num_threads": 2, "verbose": -1}
 
     def make_recipe(selection=None):
+        """Make recipe.
+
+        Args:
+            selection (object): Optional feature selection configuration.
+        """
         return ModelRecipe(
             model=LightGBMModel(),
             encoder=OneHotEncoder(),
@@ -86,23 +100,33 @@ def main() -> None:
             selection_scope="fold",  # Relearn selection within every tuning fold.
             params=dict(base_params),  # Trial suggestions override overlapping keys.
             tuning=HyperparameterTuner(
-                n_trials=args.trials, cv=cv, seed=42, metric=None, n_jobs=1,
+                n_trials=args.trials,
+                cv=cv,
+                seed=42,
+                metric=None,
+                n_jobs=1,
             ),  # metric=None infers Poisson/Gamma deviance; lower is better.
         )
 
     baseline_recipe = make_recipe()
-    selector = StagedImportanceSelector(stages=[
-        ImportanceSelectionStage(
-            name="broad_screen", model=LightGBMModel(),
-            max_features=args.stage_sizes[0], importance_type="gain",
-            params={**base_params, "n_estimators": 100, "num_leaves": 16},
-        ),
-        ImportanceSelectionStage(
-            name="refined_screen", model=LightGBMModel(),
-            max_features=args.stage_sizes[1], importance_type="gain",
-            params={**base_params, "n_estimators": 250, "num_leaves": 31},
-        ),
-    ])
+    selector = StagedImportanceSelector(
+        stages=[
+            ImportanceSelectionStage(
+                name="broad_screen",
+                model=LightGBMModel(),
+                max_features=args.stage_sizes[0],
+                importance_type="gain",
+                params={**base_params, "n_estimators": 100, "num_leaves": 16},
+            ),
+            ImportanceSelectionStage(
+                name="refined_screen",
+                model=LightGBMModel(),
+                max_features=args.stage_sizes[1],
+                importance_type="gain",
+                params={**base_params, "n_estimators": 250, "num_leaves": 31},
+            ),
+        ]
+    )
     challenger_recipe = make_recipe(selector)
 
     # Stage settings are illustrative, not tuned by the final model's tuner.
@@ -116,20 +140,26 @@ def main() -> None:
         # Outer folds refit the whole recipe, including inner tuning and selection.
         # Predefined outer folds need at least three IDs for inner CV.
         baseline_cv = baseline_recipe.cross_validate(
-            training, cv=cv, feature_names=args.existing,
+            training,
+            cv=cv,
+            feature_names=args.existing,
         )
         baseline_cv.save(str(args.output / "existing_features" / "cv_report"))
         saved_baseline_cv = load_cv_result(
             str(args.output / "existing_features" / "cv_report")
         )
         challenger_cv = challenger_recipe.cross_validate(
-            training, cv=cv, feature_names=args.candidates,
+            training,
+            cv=cv,
+            feature_names=args.candidates,
         )
         challenger_cv.save(str(args.output / "staged_selection" / "cv_report"))
-        comparison = compare_reports({
-            "existing_features": saved_baseline_cv,
-            "staged_selection": challenger_cv,
-        })
+        comparison = compare_reports(
+            {
+                "existing_features": saved_baseline_cv,
+                "staged_selection": challenger_cv,
+            }
+        )
         double_lift = compare_cv_double_lift(saved_baseline_cv, challenger_cv)
         print(comparison)  # Includes pooled double lift.
         print("CV double lift by fold (positive favors staged_selection)")
@@ -139,8 +169,13 @@ def main() -> None:
 
     # Do not compare best tuning-trial scores as unbiased test estimates.
     # fitted.retune(...) freezes selection; it does not revalidate discovery.
-    for name, fitted in [("existing_features", baseline), ("staged_selection", challenger)]:
-        reports.append(fitted.evaluate(holdout).metrics().with_columns(pl.lit(name).alias("model")))
+    for name, fitted in [
+        ("existing_features", baseline),
+        ("staged_selection", challenger),
+    ]:
+        reports.append(
+            fitted.evaluate(holdout).metrics().with_columns(pl.lit(name).alias("model"))
+        )
         fitted.save(str(args.output / name))
         fitted.tuning_history.write_csv(args.output / f"{name}_tuning.csv")
     metrics = pl.concat(reports).select("model", "metric", "value")
@@ -151,9 +186,12 @@ def main() -> None:
     for stage in challenger.selection_results:
         print(f"{stage.name}: {stage.selected_feature_names}")
         stage.ranking.write_csv(args.output / f"{stage.name}_ranking.csv")
-    print("Existing encoded columns removed:", sorted(
-        set(baseline.fitted_model.feature_names) - set(challenger.selected_features)
-    ))
+    print(
+        "Existing encoded columns removed:",
+        sorted(
+            set(baseline.fitted_model.feature_names) - set(challenger.selected_features)
+        ),
+    )
     # Poisson predict(holdout) returns counts; prediction_type="rate" returns rates.
     # Use a validation set / nested CV for further experimentation, keeping a fresh
     # final test set if this holdout has already guided repeated model changes.

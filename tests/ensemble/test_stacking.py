@@ -7,8 +7,24 @@ from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
 
 def test_stacking_uses_full_training_data(poisson_parquet):
-    data = load_model_data(path=str(poisson_parquet), target="claim_count", exposure="exposure", feature_cols=["x1", "x3"], objective="poisson")
-    pipelines = [ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run() for _ in range(2)]
+    """Verify stacking uses full training data.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
+    data = load_model_data(
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
+    )
+    pipelines = [
+        ModelPipeline(
+            data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))
+        ).run()
+        for _ in range(2)
+    ]
     ensemble = StackingEnsemble(cv_folds=2).fit(pipelines)
     assert len(ensemble.predict(data)) == data.n_rows
     assert ensemble.oof_predictions.dtype == np.float32

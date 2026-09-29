@@ -3,30 +3,46 @@ import pytest
 
 from ins_gbm.preprocessing.pca import PCAReducer
 from ins_gbm.preprocessing.pls import PLSReducer
-from ins_gbm.preprocessing.umap import UMAPReducer
 from ins_gbm.preprocessing.steps import PreprocessingStep, validate_preprocessing_steps
+from ins_gbm.preprocessing.umap import UMAPReducer
 
 
 def _numeric_df(n=100):
+    """Numeric df.
+
+    Args:
+        n (object): The n. Defaults to 100.
+    """
     import numpy as np
+
     rng = np.random.default_rng(42)
-    return pl.DataFrame({
-        "a": rng.normal(0, 1, n),
-        "b": rng.normal(0, 1, n),
-        "c": rng.normal(0, 1, n),
-        "d": rng.normal(0, 1, n),
-    })
+    return pl.DataFrame(
+        {
+            "a": rng.normal(0, 1, n),
+            "b": rng.normal(0, 1, n),
+            "c": rng.normal(0, 1, n),
+            "d": rng.normal(0, 1, n),
+        }
+    )
 
 
 def _target(n=100):
+    """Target.
+
+    Args:
+        n (object): The n. Defaults to 100.
+    """
     import numpy as np
+
     rng = np.random.default_rng(42)
     return pl.Series(rng.normal(0, 1, n))
 
 
 # ── PCA ────────────────────────────────────────────────────────────────────────
 
+
 def test_pca_reduces_dimensions():
+    """Verify pca reduces dimensions."""
     df = _numeric_df()
     fitted = PCAReducer(n_components=2).fit(df)
     out = fitted.transform(df)
@@ -35,6 +51,7 @@ def test_pca_reduces_dimensions():
 
 
 def test_pca_component_names():
+    """Verify pca component names."""
     df = _numeric_df()
     fitted = PCAReducer(n_components=2).fit(df)
     names = fitted.output_feature_names()
@@ -43,6 +60,7 @@ def test_pca_component_names():
 
 
 def test_pca_component_mapping():
+    """Verify pca component mapping."""
     df = _numeric_df()
     fitted = PCAReducer(n_components=2).fit(df)
     mapping = fitted.component_mapping()
@@ -51,6 +69,7 @@ def test_pca_component_mapping():
 
 
 def test_pca_transform_matches_fit_dimensions():
+    """Verify pca transform matches fit dimensions."""
     df = _numeric_df(100)
     test_df = _numeric_df(20)
     fitted = PCAReducer(n_components=3).fit(df)
@@ -59,6 +78,7 @@ def test_pca_transform_matches_fit_dimensions():
 
 
 def test_targeted_preprocessing_replaces_inputs_and_passes_through():
+    """Verify targeted preprocessing replaces inputs and passes through."""
     df = _numeric_df()
     fitted = PreprocessingStep(
         name="ab",
@@ -75,6 +95,7 @@ def test_targeted_preprocessing_replaces_inputs_and_passes_through():
 
 
 def test_targeted_preprocessing_steps_can_run_sequentially():
+    """Verify targeted preprocessing steps can run sequentially."""
     df = _numeric_df()
     first = PreprocessingStep(
         name="ab",
@@ -94,6 +115,7 @@ def test_targeted_preprocessing_steps_can_run_sequentially():
 
 
 def test_targeted_preprocessing_rejects_duplicate_step_names():
+    """Verify targeted preprocessing rejects duplicate step names."""
     steps = [
         PreprocessingStep("same", PCAReducer(n_components=1), ["a"]),
         PreprocessingStep("same", PCAReducer(n_components=1), ["b"]),
@@ -105,7 +127,9 @@ def test_targeted_preprocessing_rejects_duplicate_step_names():
 
 # ── PLS ────────────────────────────────────────────────────────────────────────
 
+
 def test_pls_reduces_dimensions():
+    """Verify pls reduces dimensions."""
     df = _numeric_df()
     target = _target()
     fitted = PLSReducer(n_components=2).fit(df, target=target)
@@ -115,12 +139,14 @@ def test_pls_reduces_dimensions():
 
 
 def test_pls_requires_target_at_fit():
+    """Verify pls requires target at fit."""
     df = _numeric_df()
     with pytest.raises((ValueError, TypeError)):
         PLSReducer(n_components=2).fit(df, target=None)
 
 
 def test_pls_component_names():
+    """Verify pls component names."""
     df = _numeric_df()
     target = _target()
     fitted = PLSReducer(n_components=2).fit(df, target=target)
@@ -129,7 +155,9 @@ def test_pls_component_names():
 
 # ── UMAP ───────────────────────────────────────────────────────────────────────
 
+
 def test_umap_reduces_dimensions():
+    """Verify umap reduces dimensions."""
     pytest.importorskip("umap", reason="umap-learn is an optional dependency")
     df = _numeric_df()
     fitted = UMAPReducer(n_components=2, n_neighbors=5).fit(df)
@@ -139,6 +167,7 @@ def test_umap_reduces_dimensions():
 
 
 def test_umap_component_names():
+    """Verify umap component names."""
     pytest.importorskip("umap", reason="umap-learn is an optional dependency")
     df = _numeric_df()
     fitted = UMAPReducer(n_components=2, n_neighbors=5).fit(df)
@@ -146,6 +175,7 @@ def test_umap_component_names():
 
 
 def test_umap_transform_new_data():
+    """Verify umap transform new data."""
     pytest.importorskip("umap", reason="umap-learn is an optional dependency")
     df = _numeric_df(80)
     test_df = _numeric_df(20)

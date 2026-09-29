@@ -6,19 +6,50 @@ from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
 
 def _pipelines(path):
-    data = load_model_data(path=str(path), target="claim_count", exposure="exposure", feature_cols=["x1", "x3"], objective="poisson")
-    first = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params={"n_estimators": 10})).run()
-    second = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params={"n_estimators": 15})).run()
+    """Pipelines.
+
+    Args:
+        path (object): Path to the input data file.
+    """
+    data = load_model_data(
+        path=str(path),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
+    )
+    first = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"), params={"n_estimators": 10}
+        ),
+    ).run()
+    second = ModelPipeline(
+        data=data,
+        recipe=ModelRecipe(
+            model=LightGBMModel(objective="poisson"), params={"n_estimators": 15}
+        ),
+    ).run()
     return data, first, second
 
 
 def test_ensemble_run_does_not_evaluate(poisson_parquet):
+    """Verify ensemble run does not evaluate.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     _, first, second = _pipelines(poisson_parquet)
     result = EnsemblePipeline([first, second], blend_weights=[0.5, 0.5]).run()
     assert not hasattr(result, "report")
 
 
 def test_ensemble_evaluate_uses_explicit_holdout(poisson_parquet):
+    """Verify ensemble evaluate uses explicit holdout.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data, first, second = _pipelines(poisson_parquet)
     result = EnsemblePipeline([first, second], blend_weights=[0.5, 0.5]).run()
     holdout = slice_model_data(data, range(100))

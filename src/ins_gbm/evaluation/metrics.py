@@ -1,5 +1,6 @@
 """Actuarial evaluation metrics for Poisson frequency and Gamma severity models."""
-from typing import Literal, Optional
+
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -8,18 +9,28 @@ from ins_gbm.data.model_data import Objective
 
 
 def _to_numpy(s: pl.Series) -> np.ndarray:
+    """Convert a Polars series to a NumPy array.
+
+    Args:
+        s (pl.Series): Input numeric series.
+    """
     return s.to_numpy().astype(np.float64)
 
 
 def poisson_deviance(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
 ) -> float:
     """Mean Poisson deviance, optionally observation-weighted.
 
     d_i = 2 * (y_i * log(y_i / mu_i) - (y_i - mu_i))
     Convention: 0 * log(0) = 0.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
     """
     y = _to_numpy(actual)
     mu = _to_numpy(predicted)
@@ -41,15 +52,21 @@ def poisson_deviance(
 def _poisson_rate_metric_inputs(
     actual: pl.Series,
     predicted: pl.Series,
-    exposure: Optional[pl.Series],
-    weight: Optional[pl.Series],
-) -> tuple[pl.Series, pl.Series, Optional[pl.Series]]:
+    exposure: pl.Series | None,
+    weight: pl.Series | None,
+) -> tuple[pl.Series, pl.Series, pl.Series | None]:
     """Return rate-scale inputs and their effective observation weights.
 
     Frequency data enters the modeling API as claim counts and expected claim
     counts.  Dividing both by exposure and weighting by exposure gives the
     standard actuarial rate formulation without applying exposure twice.  A
     separate model weight multiplies exposure when supplied.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        exposure (Optional[pl.Series]): Positive exposure series aligned with rows, when used.
+        weight (Optional[pl.Series]): Nonnegative observation weight series aligned with rows.
     """
     if exposure is None:
         return actual, predicted, weight
@@ -63,10 +80,19 @@ def _double_lift_metric_inputs(
     actual: pl.Series,
     predicted_a: pl.Series,
     predicted_b: pl.Series,
-    exposure: Optional[pl.Series],
-    weight: Optional[pl.Series],
-) -> tuple[pl.Series, pl.Series, pl.Series, Optional[pl.Series]]:
-    """Return consistently scaled comparison inputs for double-lift metrics."""
+    exposure: pl.Series | None,
+    weight: pl.Series | None,
+) -> tuple[pl.Series, pl.Series, pl.Series, pl.Series | None]:
+    """Return consistently scaled comparison inputs for double-lift metrics.
+
+    Args:
+        objective (Objective): Model objective: "poisson" or "gamma".
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted_a (pl.Series): Predictions from the reference model.
+        predicted_b (pl.Series): Predictions from the candidate model.
+        exposure (Optional[pl.Series]): Positive exposure series aligned with rows, when used.
+        weight (Optional[pl.Series]): Nonnegative observation weight series aligned with rows.
+    """
     if objective == "poisson" and exposure is not None:
         effective_weight = exposure if weight is None else exposure * weight
         return (
@@ -81,11 +107,16 @@ def _double_lift_metric_inputs(
 def gamma_deviance(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
 ) -> float:
     """Mean Gamma deviance, optionally weight-adjusted.
 
     d_i = 2 * (-log(y_i / mu_i) + (y_i - mu_i) / mu_i)
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
     """
     y = _to_numpy(actual)
     mu = _to_numpy(predicted)
@@ -106,21 +137,33 @@ def gamma_deviance(
 def normalized_gini(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
 ) -> float:
     """Normalized Gini coefficient.
 
     Sort by predicted descending, compute Lorenz curve, compare to perfect model.
     Returns value in [-1, 1]; 1.0 = perfect ranking, 0.0 = random.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
     """
     y = _to_numpy(actual)
     p = _to_numpy(predicted)
     w = _to_numpy(weights) if weights is not None else np.ones(len(y))
 
     def _gini(order: np.ndarray) -> float:
+        """Calculate the weighted Gini coefficient for an ordering.
+
+        Args:
+            order (np.ndarray): Indices sorting observations by predicted value.
+        """
         sorted_y = y[order]
         sorted_w = w[order]
-        cum_actual = np.cumsum(sorted_y * sorted_w) / max(np.sum(sorted_y * sorted_w), 1e-15)
+        cum_actual = np.cumsum(sorted_y * sorted_w) / max(
+            np.sum(sorted_y * sorted_w), 1e-15
+        )
         cum_weight = np.cumsum(sorted_w) / max(np.sum(sorted_w), 1e-15)
         # Prepend (0, 0) for trapezoidal integration
         cum_actual = np.concatenate([[0.0], cum_actual])
@@ -138,9 +181,15 @@ def normalized_gini(
 def rmse(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
 ) -> float:
-    """Root mean squared error, optionally weighted."""
+    """Root mean squared error, optionally weighted.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+    """
     y = _to_numpy(actual)
     p = _to_numpy(predicted)
     residuals = (y - p) ** 2
@@ -153,9 +202,15 @@ def rmse(
 def mae(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
 ) -> float:
-    """Mean absolute error, optionally weighted."""
+    """Mean absolute error, optionally weighted.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+    """
     y = _to_numpy(actual)
     p = _to_numpy(predicted)
     residuals = np.abs(y - p)
@@ -170,22 +225,24 @@ def _double_lift_bucket_ids(
     weights: np.ndarray,
     n_bins: int,
 ) -> np.ndarray:
-    """Assign stable, approximately equal-weight double-lift buckets."""
+    """Assign stable, approximately equal-weight double-lift buckets.
+
+    Args:
+        scores (np.ndarray): Values used to order observations into bins.
+        weights (np.ndarray): Nonnegative blending or observation weights.
+        n_bins (int): Number of bins used to summarize predictions.
+    """
     if (
         not isinstance(n_bins, int)
         or isinstance(n_bins, bool)
         or n_bins < 2
         or n_bins > len(scores)
     ):
-        raise ValueError(
-            f"n_bins must be an integer from 2 through {len(scores)}"
-        )
+        raise ValueError(f"n_bins must be an integer from 2 through {len(scores)}")
 
     order = np.argsort(scores, kind="mergesort")
     cumulative_midpoints = np.cumsum(weights[order]) - weights[order] / 2.0
-    raw_ids = np.floor(
-        cumulative_midpoints / weights.sum() * n_bins
-    ).astype(int)
+    raw_ids = np.floor(cumulative_midpoints / weights.sum() * n_bins).astype(int)
     raw_ids = np.clip(raw_ids, 0, n_bins - 1)
 
     bucket_ids = np.empty(len(scores), dtype=int)
@@ -202,7 +259,7 @@ def double_lift_table(
     actual: pl.Series,
     predicted_a: pl.Series,
     predicted_b: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
     n_bins: int = 10,
 ) -> pl.DataFrame:
     """Summarize two models in buckets ordered by the B/A prediction ratio.
@@ -210,6 +267,13 @@ def double_lift_table(
     Buckets are approximately equal-weight. ``model1`` is ``predicted_a`` and
     ``model2`` is ``predicted_b``; this ordering also defines the sign of
     :func:`double_lift_score`.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted_a (pl.Series): Predictions from the reference model.
+        predicted_b (pl.Series): Predictions from the candidate model.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
     """
     y = _to_numpy(actual)
     model1 = _to_numpy(predicted_a)
@@ -236,11 +300,7 @@ def double_lift_table(
         w = _to_numpy(weights)
         if len(w) != len(y):
             raise ValueError("weights must have the same length as actual")
-        if (
-            not np.all(np.isfinite(w))
-            or np.any(w < 0)
-            or w.sum() <= 0
-        ):
+        if not np.all(np.isfinite(w)) or np.any(w < 0) or w.sum() <= 0:
             raise ValueError(
                 "weights must be finite, non-negative, and have a positive total"
             )
@@ -258,14 +318,16 @@ def double_lift_table(
         bucket_weight = float(w[mask].sum())
         if bucket_weight <= 0:
             continue
-        rows.append({
-            "bucket": bucket,
-            "actual": float(np.dot(y[mask], w[mask]) / bucket_weight),
-            "model1": float(np.dot(model1[mask], w[mask]) / bucket_weight),
-            "model2": float(np.dot(model2[mask], w[mask]) / bucket_weight),
-            "ratio_mean": float(np.dot(ratio[mask], w[mask]) / bucket_weight),
-            "weight": bucket_weight,
-        })
+        rows.append(
+            {
+                "bucket": bucket,
+                "actual": float(np.dot(y[mask], w[mask]) / bucket_weight),
+                "model1": float(np.dot(model1[mask], w[mask]) / bucket_weight),
+                "model2": float(np.dot(model2[mask], w[mask]) / bucket_weight),
+                "ratio_mean": float(np.dot(ratio[mask], w[mask]) / bucket_weight),
+                "weight": bucket_weight,
+            }
+        )
     return pl.DataFrame(rows)
 
 
@@ -278,13 +340,16 @@ def double_lift_score(
     The absolute score is ``sum(|model1 - actual| - |model2 - actual|)``.
     Positive values favor model 2, negative values favor model 1, and zero is
     a tie. Relative deviation applies the same comparison on ratio errors.
+
+    Args:
+        dl_table (pl.DataFrame): Double-lift summary table to score.
+        deviation (Literal['absolute', 'relative']): Deviation measure: "absolute" or
+            "relative". Defaults to 'absolute'.
     """
     required = {"actual", "model1", "model2"}
     missing = sorted(required - set(dl_table.columns))
     if missing:
-        raise ValueError(
-            f"dl_table is missing required columns: {missing}"
-        )
+        raise ValueError(f"dl_table is missing required columns: {missing}")
     if deviation not in {"absolute", "relative"}:
         raise ValueError("deviation must be 'absolute' or 'relative'")
 
@@ -302,20 +367,11 @@ def double_lift_score(
         )
 
     if deviation == "absolute":
-        return float(
-            (np.abs(model1 - actual) - np.abs(model2 - actual)).sum()
-        )
+        return float((np.abs(model1 - actual) - np.abs(model2 - actual)).sum())
 
     if np.any(np.abs(model1) < 1e-12) or np.any(np.abs(model2) < 1e-12):
-        raise ValueError(
-            "relative double-lift score requires non-zero model values"
-        )
-    return float(
-        (
-            np.abs(actual / model1 - 1.0)
-            - np.abs(actual / model2 - 1.0)
-        ).sum()
-    )
+        raise ValueError("relative double-lift score requires non-zero model values")
+    return float((np.abs(actual / model1 - 1.0) - np.abs(actual / model2 - 1.0)).sum())
 
 
 Direction = Literal["higher", "lower"]
@@ -335,8 +391,8 @@ def compute_metrics(
     objective: Objective,
     actual: pl.Series,
     predicted: pl.Series,
-    exposure: Optional[pl.Series] = None,
-    weight: Optional[pl.Series] = None,
+    exposure: pl.Series | None = None,
+    weight: pl.Series | None = None,
 ) -> pl.DataFrame:
     """Compute all standard metrics for a given objective.
 
@@ -371,29 +427,33 @@ def compute_metrics(
         metric_actual, metric_predicted, metric_weight = _poisson_rate_metric_inputs(
             actual, predicted, exposure, weight
         )
-        rows.append({
-            "metric": "poisson_deviance",
-            "value": poisson_deviance(
-                metric_actual, metric_predicted, weights=metric_weight
-            ),
-        })
+        rows.append(
+            {
+                "metric": "poisson_deviance",
+                "value": poisson_deviance(
+                    metric_actual, metric_predicted, weights=metric_weight
+                ),
+            }
+        )
         gini_actual = metric_actual
         gini_predicted = metric_predicted
         gini_weights = metric_weight
     else:
-        rows.append({
-            "metric": "gamma_deviance",
-            "value": gamma_deviance(actual, predicted, weights=weight),
-        })
+        rows.append(
+            {
+                "metric": "gamma_deviance",
+                "value": gamma_deviance(actual, predicted, weights=weight),
+            }
+        )
         gini_actual = actual
         gini_predicted = predicted
         gini_weights = weight
-    rows.append({
-        "metric": "gini",
-        "value": normalized_gini(
-            gini_actual, gini_predicted, weights=gini_weights
-        )
-    })
+    rows.append(
+        {
+            "metric": "gini",
+            "value": normalized_gini(gini_actual, gini_predicted, weights=gini_weights),
+        }
+    )
     rows.append({"metric": "rmse", "value": rmse(actual, predicted)})
     rows.append({"metric": "mae", "value": mae(actual, predicted)})
     return pl.DataFrame(rows)

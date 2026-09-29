@@ -1,21 +1,26 @@
 import polars as pl
-import pytest
+
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.preprocessing.encoder import OneHotEncoder
 
 
 def _df():
-    return pl.DataFrame({
-        "num": [1.0, 2.0, 3.0],
-        "cat": ["A", "B", "A"],
-    })
+    """Df."""
+    return pl.DataFrame(
+        {
+            "num": [1.0, 2.0, 3.0],
+            "cat": ["A", "B", "A"],
+        }
+    )
 
 
 def _schema():
+    """Schema."""
     return FeatureSchema(numeric=["num"], categorical=["cat"])
 
 
 def test_fit_and_transform_basic():
+    """Verify fit and transform basic."""
     df = _df()
     encoder = OneHotEncoder()
     fitted = encoder.fit(df, _schema())
@@ -28,12 +33,14 @@ def test_fit_and_transform_basic():
 
 
 def test_output_feature_names_stable():
+    """Verify output feature names stable."""
     df = _df()
     fitted = OneHotEncoder().fit(df, _schema())
     assert fitted.output_feature_names() == fitted.output_feature_names()
 
 
 def test_unknown_category_produces_zero_row():
+    """Verify unknown category produces zero row."""
     df = _df()
     fitted = OneHotEncoder().fit(df, _schema())
     unseen = pl.DataFrame({"num": [9.0], "cat": ["Z"]})
@@ -43,6 +50,7 @@ def test_unknown_category_produces_zero_row():
 
 
 def test_missing_category_treated_as_explicit_level():
+    """Verify missing category treated as explicit level."""
     df = pl.DataFrame({"num": [1.0, 2.0, 3.0], "cat": ["A", None, "B"]})
     schema = FeatureSchema(numeric=["num"], categorical=["cat"])
     fitted = OneHotEncoder().fit(df, schema)
@@ -51,6 +59,7 @@ def test_missing_category_treated_as_explicit_level():
 
 
 def test_numeric_passthrough():
+    """Verify numeric passthrough."""
     df = _df()
     fitted = OneHotEncoder().fit(df, _schema())
     out = fitted.transform(df)
@@ -58,6 +67,7 @@ def test_numeric_passthrough():
 
 
 def test_column_order_stable_across_calls():
+    """Verify column order stable across calls."""
     df = _df()
     fitted = OneHotEncoder().fit(df, _schema())
     out1 = fitted.transform(df)

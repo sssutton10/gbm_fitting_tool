@@ -44,6 +44,10 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-v"
 
+[tool.ruff.lint]
+# Source and test files retain executable bits in this repository.
+ignore = ["EXE002"]
+
 [dependency-groups]
 dev = [
     "lightgbm>=4.6.0",

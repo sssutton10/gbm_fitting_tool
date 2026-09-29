@@ -5,7 +5,23 @@ from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 
 
 def test_fixed_blending_uses_full_training_data(poisson_parquet):
-    data = load_model_data(path=str(poisson_parquet), target="claim_count", exposure="exposure", feature_cols=["x1", "x3"], objective="poisson")
-    pipelines = [ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run() for _ in range(2)]
+    """Verify fixed blending uses full training data.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
+    data = load_model_data(
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
+    )
+    pipelines = [
+        ModelPipeline(
+            data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))
+        ).run()
+        for _ in range(2)
+    ]
     ensemble = BlendingEnsemble(mode="fixed", weights=[0.5, 0.5]).fit(pipelines)
     assert len(ensemble.predict(data)) == data.n_rows

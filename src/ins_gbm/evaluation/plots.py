@@ -1,23 +1,39 @@
 """Actuarial evaluation plots for insurance GBM models."""
+
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
 
+if TYPE_CHECKING:
+    import matplotlib.figure
+
 
 def _to_numpy(s: pl.Series) -> np.ndarray:
+    """Convert a Polars series to a NumPy array.
+
+    Args:
+        s (pl.Series): Input numeric series.
+    """
     return s.to_numpy().astype(np.float64)
 
 
 def _decile_summary(
     actual: np.ndarray,
     predicted: np.ndarray,
-    weights: Optional[np.ndarray],
+    weights: np.ndarray | None,
     n_bins: int = 10,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sort by predicted, bin into deciles, return (bin_label, mean_actual, mean_predicted)."""
+    """Sort by predicted, bin into deciles, return (bin_label, mean_actual, mean_predicted).
+
+    Args:
+        actual (np.ndarray): Observed outcomes aligned with predictions.
+        predicted (np.ndarray): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[np.ndarray]): Nonnegative blending or observation weights.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+    """
     order = np.argsort(predicted)
     actual_s = actual[order]
     predicted_s = predicted[order]
@@ -33,11 +49,21 @@ def _decile_summary(
 def plot_lift(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
     n_bins: int = 10,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     title: str = "Ordered Lift Chart",
-) -> "matplotlib.figure.Figure":
+) -> matplotlib.figure.Figure:
+    """Plot observed and predicted outcomes by ordered prediction bin.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+        output_path (Optional[str]): Optional file path for the generated figure.
+        title (str): Title displayed above the figure. Defaults to 'Ordered Lift Chart'.
+    """
     import matplotlib.pyplot as plt
 
     y = _to_numpy(actual)
@@ -66,12 +92,24 @@ def plot_double_lift(
     actual: pl.Series,
     predicted_a: pl.Series,
     predicted_b: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
     n_bins: int = 10,
     labels: tuple[str, str] = ("Model A", "Model B"),
-    output_path: Optional[str] = None,
-) -> "matplotlib.figure.Figure":
+    output_path: str | None = None,
+) -> matplotlib.figure.Figure:
+    """Plot double lift.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted_a (pl.Series): Predictions from the reference model.
+        predicted_b (pl.Series): Predictions from the candidate model.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+        labels (tuple[str, str]): Labels for the two plotted models.
+        output_path (Optional[str]): Optional file path for the generated figure.
+    """
     import matplotlib.pyplot as plt
+
     from ins_gbm.evaluation.metrics import double_lift_table
 
     summary = double_lift_table(
@@ -100,6 +138,7 @@ def plot_double_lift(
     if output_path:
         fig.savefig(output_path, dpi=100)
         import matplotlib.pyplot as _plt
+
         _plt.close(fig)
     return fig
 
@@ -107,11 +146,19 @@ def plot_double_lift(
 def plot_ave(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
     n_bins: int = 10,
-    output_path: Optional[str] = None,
-) -> "matplotlib.figure.Figure":
-    """Actual vs Expected plot by predicted decile."""
+    output_path: str | None = None,
+) -> matplotlib.figure.Figure:
+    """Actual vs Expected plot by predicted decile.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+        output_path (Optional[str]): Optional file path for the generated figure.
+    """
     import matplotlib.pyplot as plt
 
     y = _to_numpy(actual)
@@ -140,11 +187,19 @@ def plot_ave(
 def plot_calibration(
     actual: pl.Series,
     predicted: pl.Series,
-    weights: Optional[pl.Series] = None,
+    weights: pl.Series | None = None,
     n_bins: int = 10,
-    output_path: Optional[str] = None,
-) -> "matplotlib.figure.Figure":
-    """Calibration curve: mean predicted vs mean actual per bin."""
+    output_path: str | None = None,
+) -> matplotlib.figure.Figure:
+    """Calibration curve: mean predicted vs mean actual per bin.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        weights (Optional[pl.Series]): Nonnegative blending or observation weights. Optional.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+        output_path (Optional[str]): Optional file path for the generated figure.
+    """
     import matplotlib.pyplot as plt
 
     y = _to_numpy(actual)
@@ -155,8 +210,10 @@ def plot_calibration(
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.scatter(mean_pred, mean_actual, color="steelblue", zorder=3)
-    lim = [min(mean_pred.min(), mean_actual.min()) * 0.9,
-           max(mean_pred.max(), mean_actual.max()) * 1.1]
+    lim = [
+        min(mean_pred.min(), mean_actual.min()) * 0.9,
+        max(mean_pred.max(), mean_actual.max()) * 1.1,
+    ]
     ax.plot(lim, lim, "r--", label="Perfect calibration")
     ax.set_xlim(lim)
     ax.set_ylim(lim)
@@ -176,9 +233,16 @@ def plot_calibration(
 def plot_feature_importance(
     importance_df: pl.DataFrame,
     top_n: int = 20,
-    output_path: Optional[str] = None,
-) -> "matplotlib.figure.Figure":
-    """Horizontal bar chart of feature importance (top_n features)."""
+    output_path: str | None = None,
+) -> matplotlib.figure.Figure:
+    """Horizontal bar chart of feature importance (top_n features).
+
+    Args:
+        importance_df (pl.DataFrame): Feature importance table to plot.
+        top_n (int): Maximum number of highest-ranked features to keep or display. Defaults to
+            20.
+        output_path (Optional[str]): Optional file path for the generated figure.
+    """
     import matplotlib.pyplot as plt
 
     df = importance_df.sort("importance", descending=True).head(top_n)
@@ -204,9 +268,18 @@ def plot_loss_ratio(
     loss: pl.Series,
     premium: pl.Series,
     n_bins: int = 10,
-    output_path: Optional[str] = None,
-) -> "matplotlib.figure.Figure":
-    """Loss ratio by predicted frequency/severity decile."""
+    output_path: str | None = None,
+) -> matplotlib.figure.Figure:
+    """Loss ratio by predicted frequency/severity decile.
+
+    Args:
+        actual (pl.Series): Observed outcomes aligned with predictions.
+        predicted (pl.Series): Predicted outcomes aligned with actual outcomes.
+        loss (pl.Series): Observed claim loss used in the ratio.
+        premium (pl.Series): Earned premium used as the ratio denominator.
+        n_bins (int): Number of bins used to summarize predictions. Defaults to 10.
+        output_path (Optional[str]): Optional file path for the generated figure.
+    """
     import matplotlib.pyplot as plt
 
     p = _to_numpy(predicted)
@@ -219,14 +292,14 @@ def plot_loss_ratio(
 
     bins = np.array_split(np.arange(len(p)), n_bins)
     bin_labels = np.arange(1, n_bins + 1)
-    loss_ratio = np.array([
-        loss_s[b].sum() / max(prem_s[b].sum(), 1e-15) for b in bins
-    ])
+    loss_ratio = np.array([loss_s[b].sum() / max(prem_s[b].sum(), 1e-15) for b in bins])
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.bar(bin_labels, loss_ratio, color="steelblue", alpha=0.7)
     overall_lr = loss_np.sum() / max(prem_np.sum(), 1e-15)
-    ax.axhline(overall_lr, color="red", linestyle="--", label=f"Overall LR = {overall_lr:.2%}")
+    ax.axhline(
+        overall_lr, color="red", linestyle="--", label=f"Overall LR = {overall_lr:.2%}"
+    )
     ax.set_xlabel("Decile (sorted by predicted)")
     ax.set_ylabel("Loss Ratio")
     ax.set_title("Loss Ratio by Predicted Decile")

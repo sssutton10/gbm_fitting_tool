@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -10,7 +10,6 @@ from ins_gbm.data.dtypes import frame_to_fit_array, series_to_fit_array
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
-
 
 Objective = Literal["poisson", "gamma"]
 
@@ -24,10 +23,15 @@ class RandomForestModel:
     approximation. For Gamma severity, log-transformed target with MSE is used.
     Both are documented limitations — this model is a benchmark, not a GLM-style
     objective wrapper.
+
+    Args:
+        objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
     """
-    objective: Optional[Objective] = None
+
+    objective: Objective | None = None
 
     def capabilities(self) -> ModelCapabilities:
+        """Describe supported objectives and model features."""
         return ModelCapabilities(
             supports_poisson=True,
             supports_gamma=True,
@@ -37,7 +41,9 @@ class RandomForestModel:
         )
 
     def default_search_space(self) -> dict:
+        """Return Optuna distributions for tunable model parameters."""
         import optuna
+
         return {
             "n_estimators": optuna.distributions.IntDistribution(50, 300),
             "max_depth": optuna.distributions.IntDistribution(3, 15),
@@ -48,12 +54,22 @@ class RandomForestModel:
     def fit(
         self,
         data: ModelData,
-        params: Optional[dict] = None,
+        params: dict | None = None,
         *,
-        feature_names: Optional[list[str]] = None,
-        encoder: Optional[object] = None,
-        preprocessing: Optional[list[object]] = None,
+        feature_names: list[str] | None = None,
+        encoder: object | None = None,
+        preprocessing: list[object] | None = None,
     ) -> FittedModel:
+        """Fit the model on training data and return a fitted wrapper.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            params (Optional[dict]): Optional model or estimator parameter mapping.
+            feature_names (Optional[list[str]]): Ordered names of input features to use. Optional.
+            encoder (Optional[object]): Optional encoder applied before model fitting.
+            preprocessing (Optional[list[object]]): Ordered preprocessing steps applied before
+                fitting. Optional.
+        """
         from sklearn.ensemble import RandomForestRegressor
 
         transform_result = fit_transform_chain(
@@ -79,10 +95,7 @@ class RandomForestModel:
             y_fit = y / exposure  # fit on claim rate
             sample_weight = exposure
             if data.weight is not None:
-                sample_weight = (
-                    sample_weight
-                    * series_to_fit_array(data.weight)
-                )
+                sample_weight = sample_weight * series_to_fit_array(data.weight)
         elif data.weight is not None:
             y_fit = y
             sample_weight = series_to_fit_array(data.weight)
@@ -97,12 +110,18 @@ class RandomForestModel:
             rf.fit(X, y_fit, sample_weight=sample_weight)
 
         feature_names = list(data.feature_names)
+
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
+            """Predict from the fitted estimator on the requested scale.
+
+            Args:
+                pred_data (ModelData): Prepared model data to score.
+                prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
+                    unavailable for Gamma.
+            """
             if pred_data.offset is not None:
                 raise ValueError("RandomForestModel does not support offsets")
-            X_pred = frame_to_fit_array(
-                pred_data.features, pred_data.feature_names
-            )
+            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
             raw = rf.predict(X_pred)  # predicted claim rate or severity
 
             if objective == "poisson":
@@ -123,18 +142,25 @@ class RandomForestModel:
                     return pl.Series(np.log(np.maximum(response, 1e-10)))
             else:  # gamma
                 response = np.maximum(raw, 1e-10)
-                return pl.Series(np.log(response) if prediction_type == "link" else response)
+                return pl.Series(
+                    np.log(response) if prediction_type == "link" else response
+                )
 
-        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+        def _importance(importance_type: str | None = None) -> pl.DataFrame:
+            """Return feature importance from the fitted estimator.
+
+            Args:
+                importance_type (Optional[str]): Optional framework-specific importance measure.
+            """
             importance_type = importance_type or "impurity"
             if importance_type != "impurity":
-                raise ValueError(
-                    "RandomForest importance_type must be 'impurity'"
-                )
-            return pl.DataFrame({
-                "feature": feature_names,
-                "importance": rf.feature_importances_.astype(float).tolist(),
-            })
+                raise ValueError("RandomForest importance_type must be 'impurity'")
+            return pl.DataFrame(
+                {
+                    "feature": feature_names,
+                    "importance": rf.feature_importances_.astype(float).tolist(),
+                }
+            )
 
         return FittedModel(
             model=rf,

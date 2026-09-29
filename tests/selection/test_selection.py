@@ -1,23 +1,32 @@
 import polars as pl
 import pytest
+
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
-from ins_gbm.selection.boruta import BorutaSelector
-from ins_gbm.selection.importance import ImportancePruner
-from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 from ins_gbm.preprocessing.encoder import OneHotEncoder
 from ins_gbm.preprocessing.pca import PCAReducer
 from ins_gbm.preprocessing.steps import PreprocessingStep
-
+from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
+from ins_gbm.selection.boruta import BorutaSelector
+from ins_gbm.selection.importance import ImportancePruner
 
 # ── Boruta ─────────────────────────────────────────────────────────────────────
 
+
 def test_boruta_returns_classification_dataframe(poisson_parquet):
     # Use only numeric features — in the full pipeline OHE encodes before Boruta
+    """Verify boruta returns classification dataframe.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     selector = BorutaSelector(base_estimator="lightgbm", max_iter=5, seed=42)
     fitted = selector.fit(data)
@@ -25,13 +34,23 @@ def test_boruta_returns_classification_dataframe(poisson_parquet):
     assert "feature" in clf.columns
     assert "status" in clf.columns
     assert set(clf["feature"].to_list()) == {"x1", "x3"}
-    assert all(s in {"confirmed", "tentative", "rejected"} for s in clf["status"].to_list())
+    assert all(
+        s in {"confirmed", "tentative", "rejected"} for s in clf["status"].to_list()
+    )
 
 
 def test_boruta_selected_features_subset(poisson_parquet):
+    """Verify boruta selected features subset.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     selector = BorutaSelector(base_estimator="lightgbm", max_iter=5, seed=42)
     fitted = selector.fit(data)
@@ -40,9 +59,17 @@ def test_boruta_selected_features_subset(poisson_parquet):
 
 
 def test_boruta_rf_base_estimator(poisson_parquet):
+    """Verify boruta rf base estimator.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     selector = BorutaSelector(base_estimator="random_forest", max_iter=5, seed=42)
     fitted = selector.fit(data)
@@ -50,10 +77,17 @@ def test_boruta_rf_base_estimator(poisson_parquet):
 
 
 def test_boruta_only_trained_on_given_data(poisson_parquet):
-    """Boruta must not see data outside the ModelData passed to fit."""
+    """Boruta must not see data outside the ModelData passed to fit.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     train = data
     selector = BorutaSelector(max_iter=3, seed=42)
@@ -64,10 +98,19 @@ def test_boruta_only_trained_on_given_data(poisson_parquet):
 
 # ── ImportancePruner ───────────────────────────────────────────────────────────
 
+
 def test_importance_pruner_top_n(poisson_parquet):
+    """Verify importance pruner top n.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     fitted_model = LightGBMModel(objective="poisson").fit(
         data, params={"n_estimators": 20, "verbose": -1}
@@ -79,9 +122,17 @@ def test_importance_pruner_top_n(poisson_parquet):
 
 
 def test_importance_pruner_percentile(poisson_parquet):
+    """Verify importance pruner percentile.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     fitted_model = LightGBMModel(objective="poisson").fit(
         data, params={"n_estimators": 20, "verbose": -1}
@@ -93,9 +144,17 @@ def test_importance_pruner_percentile(poisson_parquet):
 
 
 def test_importance_pruner_threshold(poisson_parquet):
+    """Verify importance pruner threshold.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     fitted_model = LightGBMModel(objective="poisson").fit(
         data, params={"n_estimators": 20, "verbose": -1}
@@ -107,13 +166,22 @@ def test_importance_pruner_threshold(poisson_parquet):
 
 
 def test_importance_pruner_uses_fitted_one_hot_columns(poisson_parquet):
+    """Verify importance pruner uses fitted one hot columns.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x2", "x3"],
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x2", "x3"],
         objective="poisson",
     )
     model = LightGBMModel(objective="poisson").fit(
-        data, params={"n_estimators": 5, "verbose": -1}, encoder=OneHotEncoder(),
+        data,
+        params={"n_estimators": 5, "verbose": -1},
+        encoder=OneHotEncoder(),
     )
     pruner = ImportancePruner(threshold=0)
     selected = pruner.fit(model)
@@ -121,11 +189,17 @@ def test_importance_pruner_uses_fitted_one_hot_columns(poisson_parquet):
     assert selected.selected_features() == model.feature_names
     assert any(name.startswith("x2__") for name in selected.selected_features())
     assert pruner.fit(data, model).selected_features() == model.feature_names
-    assert pruner.fit(data, fitted_model=model).selected_features() == model.feature_names
-    assert pruner.fit(data=data, fitted_model=model).selected_features() == model.feature_names
+    assert (
+        pruner.fit(data, fitted_model=model).selected_features() == model.feature_names
+    )
+    assert (
+        pruner.fit(data=data, fitted_model=model).selected_features()
+        == model.feature_names
+    )
 
     recipe = ModelRecipe(
-        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(),
         params={"n_estimators": 5, "verbose": -1},
     )
     refit = recipe.fit(data, feature_names=selected)
@@ -133,26 +207,41 @@ def test_importance_pruner_uses_fitted_one_hot_columns(poisson_parquet):
     assert refit.train_data.feature_names == model.feature_names
     assert refit.predict(data).len() == data.n_rows
 
-    model.importance_fn = lambda: pl.DataFrame({
-        "feature": ["x1"], "importance": [1.0],
-    })
+    model.importance_fn = lambda: pl.DataFrame(
+        {
+            "feature": ["x1"],
+            "importance": [1.0],
+        }
+    )
     with pytest.raises(ValueError, match="do not match fitted model columns"):
         pruner.fit(model)
 
 
 def test_importance_pruner_result_selects_after_preprocessing(poisson_parquet):
+    """Verify importance pruner result selects after preprocessing.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x2", "x3"],
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x2", "x3"],
         objective="poisson",
     )
-    preprocessing = [PreprocessingStep(
-        name="x1_pca", preprocessor=PCAReducer(n_components=1),
-        feature_names=["x1"],
-    )]
+    preprocessing = [
+        PreprocessingStep(
+            name="x1_pca",
+            preprocessor=PCAReducer(n_components=1),
+            feature_names=["x1"],
+        )
+    ]
     recipe = ModelRecipe(
-        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
-        preprocessing=preprocessing, params={"n_estimators": 5, "verbose": -1},
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(),
+        preprocessing=preprocessing,
+        params={"n_estimators": 5, "verbose": -1},
     )
     original = recipe.fit(data)
     selected = ImportancePruner(threshold=0).fit(original)
@@ -169,27 +258,38 @@ def test_importance_pruner_result_selects_after_preprocessing(poisson_parquet):
 
 # ── StagedImportanceSelector ──────────────────────────────────────────────────
 
+
 def test_staged_importance_selector_prunes_and_records_rankings(poisson_parquet):
+    """Verify staged importance selector prunes and records rankings.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
-    selector = StagedImportanceSelector(stages=[
-        ImportanceSelectionStage(
-            name="screen",
-            model=LightGBMModel(objective="poisson"),
-            params={"n_estimators": 5, "verbose": -1, "num_leaves": 4},
-            max_features=2,
-            importance_type="split",
-        ),
-        ImportanceSelectionStage(
-            name="prune",
-            model=LightGBMModel(objective="poisson"),
-            params={"n_estimators": 10, "verbose": -1, "num_leaves": 8},
-            max_features=1,
-            importance_type="gain",
-        ),
-    ])
+    selector = StagedImportanceSelector(
+        stages=[
+            ImportanceSelectionStage(
+                name="screen",
+                model=LightGBMModel(objective="poisson"),
+                params={"n_estimators": 5, "verbose": -1, "num_leaves": 4},
+                max_features=2,
+                importance_type="split",
+            ),
+            ImportanceSelectionStage(
+                name="prune",
+                model=LightGBMModel(objective="poisson"),
+                params={"n_estimators": 10, "verbose": -1, "num_leaves": 8},
+                max_features=1,
+                importance_type="gain",
+            ),
+        ]
+    )
 
     fitted = selector.fit(data)
 
@@ -202,17 +302,27 @@ def test_staged_importance_selector_prunes_and_records_rankings(poisson_parquet)
 
 
 def test_staged_importance_selection_integrates_with_pipeline(poisson_parquet):
+    """Verify staged importance selection integrates with pipeline.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count",
-        exposure="exposure", feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
-    selector = StagedImportanceSelector(stages=[
-        ImportanceSelectionStage(
-            model=LightGBMModel(objective="poisson"),
-            params={"n_estimators": 5, "verbose": -1},
-            max_features=1,
-        ),
-    ])
+    selector = StagedImportanceSelector(
+        stages=[
+            ImportanceSelectionStage(
+                model=LightGBMModel(objective="poisson"),
+                params={"n_estimators": 5, "verbose": -1},
+                max_features=1,
+            ),
+        ]
+    )
     result = ModelPipeline(
         data=data,
         recipe=ModelRecipe(
@@ -225,11 +335,15 @@ def test_staged_importance_selection_integrates_with_pipeline(poisson_parquet):
     assert len(result.selected_features) == 1
     assert result.train_data.feature_names == result.selected_features
     assert result.selection_results is not None
-    assert result.metadata.selection_stages[0]["selected_features"] == result.selected_features
+    assert (
+        result.metadata.selection_stages[0]["selected_features"]
+        == result.selected_features
+    )
     assert result.predict(data).len() == data.n_rows
 
 
 def test_staged_importance_selector_rejects_invalid_stage_list():
+    """Verify staged importance selector rejects invalid stage list."""
     with pytest.raises(ValueError, match="at least one"):
         StagedImportanceSelector(stages=[])
 

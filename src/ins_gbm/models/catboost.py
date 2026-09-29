@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -16,7 +16,6 @@ from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objectiv
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 
-
 Objective = Literal["poisson", "gamma"]
 
 _CB_OBJECTIVE = {
@@ -30,11 +29,13 @@ _CB_OBJECTIVE = {
 def _catboost_supports_offset() -> bool:
     """Check if installed CatBoost version supports the baseline (offset) parameter."""
     try:
-        from catboost import CatBoostRegressor
         import inspect
+
+        from catboost import CatBoostRegressor
+
         sig = inspect.signature(CatBoostRegressor.fit)
         return "baseline" in sig.parameters
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional dependency introspection may fail in several ways
         return False
 
 
@@ -49,10 +50,15 @@ class CatBoostModel:
     Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Pool``, the wrapper converts that sentinel back to
     ``NaN`` so CatBoost can apply its native missing-value handling.
+
+    Args:
+        objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
     """
-    objective: Optional[Objective] = None
+
+    objective: Objective | None = None
 
     def capabilities(self) -> ModelCapabilities:
+        """Describe supported objectives and model features."""
         return ModelCapabilities(
             supports_poisson=True,
             supports_gamma=True,
@@ -62,10 +68,14 @@ class CatBoostModel:
         )
 
     def default_search_space(self) -> dict:
+        """Return Optuna distributions for tunable model parameters."""
         import optuna
+
         return {
             "iterations": optuna.distributions.IntDistribution(50, 500),
-            "learning_rate": optuna.distributions.FloatDistribution(0.01, 0.3, log=True),
+            "learning_rate": optuna.distributions.FloatDistribution(
+                0.01, 0.3, log=True
+            ),
             "depth": optuna.distributions.IntDistribution(3, 10),
             "l2_leaf_reg": optuna.distributions.FloatDistribution(1e-8, 10.0, log=True),
             "subsample": optuna.distributions.FloatDistribution(0.5, 1.0),
@@ -75,12 +85,22 @@ class CatBoostModel:
     def fit(
         self,
         data: ModelData,
-        params: Optional[dict] = None,
+        params: dict | None = None,
         *,
-        feature_names: Optional[list[str]] = None,
-        encoder: Optional[object] = None,
-        preprocessing: Optional[list[object]] = None,
+        feature_names: list[str] | None = None,
+        encoder: object | None = None,
+        preprocessing: list[object] | None = None,
     ) -> FittedModel:
+        """Fit the model on training data and return a fitted wrapper.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            params (Optional[dict]): Optional model or estimator parameter mapping.
+            feature_names (Optional[list[str]]): Ordered names of input features to use. Optional.
+            encoder (Optional[object]): Optional encoder applied before model fitting.
+            preprocessing (Optional[list[object]]): Ordered preprocessing steps applied before
+                fitting. Optional.
+        """
         from catboost import CatBoostRegressor, Pool
 
         transform_result = fit_transform_chain(
@@ -108,9 +128,11 @@ class CatBoostModel:
             baseline_parts.append(series_to_fit_array(data.offset))
         baseline = np.sum(baseline_parts, axis=0) if baseline_parts else None
         if baseline is not None and not _catboost_supports_offset():
-            raise ValueError("This CatBoost version does not support exposure or offsets")
+            raise ValueError(
+                "This CatBoost version does not support exposure or offsets"
+            )
 
-        sample_weight: Optional[np.ndarray] = None
+        sample_weight: np.ndarray | None = None
         if data.weight is not None:
             sample_weight = series_to_fit_array(data.weight)
 
@@ -138,9 +160,14 @@ class CatBoostModel:
         has_offset = _catboost_supports_offset()
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = frame_to_fit_array(
-                pred_data.features, pred_data.feature_names
-            )
+            """Predict from the fitted estimator on the requested scale.
+
+            Args:
+                pred_data (ModelData): Prepared model data to score.
+                prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
+                    unavailable for Gamma.
+            """
+            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
             X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
 
             baseline_parts: list[np.ndarray] = []
@@ -150,7 +177,9 @@ class CatBoostModel:
                 baseline_parts.append(series_to_fit_array(pred_data.offset))
             pred_baseline = np.sum(baseline_parts, axis=0) if baseline_parts else None
             if pred_baseline is not None and not has_offset:
-                raise ValueError("This CatBoost version does not support exposure or offsets")
+                raise ValueError(
+                    "This CatBoost version does not support exposure or offsets"
+                )
 
             pred_pool_kwargs = {
                 "data": X_pred,
@@ -173,10 +202,15 @@ class CatBoostModel:
                     return pl.Series(link)
             return pl.Series(link if prediction_type == "link" else response)
 
-        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+        def _importance(importance_type: str | None = None) -> pl.DataFrame:
             # These types produce one scalar per input feature.  Interaction
             # and SHAP outputs are intentionally excluded because they are not
             # rankable 1:1 here.
+            """Return feature importance from the fitted estimator.
+
+            Args:
+                importance_type (Optional[str]): Optional framework-specific importance measure.
+            """
             importance_type = importance_type or "PredictionValuesChange"
             allowed = {
                 "FeatureImportance",
@@ -194,7 +228,9 @@ class CatBoostModel:
                 if importance_type == "LossFunctionChange"
                 else model.get_feature_importance(type=importance_type)
             )
-            return pl.DataFrame({"feature": feature_names, "importance": scores.astype(float).tolist()})
+            return pl.DataFrame(
+                {"feature": feature_names, "importance": scores.astype(float).tolist()}
+            )
 
         return FittedModel(
             model=model,

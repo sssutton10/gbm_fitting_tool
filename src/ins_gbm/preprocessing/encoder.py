@@ -1,12 +1,11 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import polars as pl
 
 from ins_gbm.data.schema import FeatureSchema
 
-
 _NUMERIC_FILL: float = -999_999_999.0  # sentinel for missing numeric/ordinal values
-_MISSING_LEVEL: str = "-999999999"     # sentinel for missing categorical values
+_MISSING_LEVEL: str = "-999999999"  # sentinel for missing categorical values
 
 
 @dataclass
@@ -28,7 +27,16 @@ class OneHotEncoder:
       column, just like any observed category.
     """
 
-    def fit(self, features: pl.DataFrame, schema: FeatureSchema) -> "FittedOneHotEncoder":
+    def fit(
+        self, features: pl.DataFrame, schema: FeatureSchema
+    ) -> "FittedOneHotEncoder":
+        """Fit this transformation on training features.
+
+        Args:
+            features (pl.DataFrame): Input feature frame; rows align with the target and optional
+                series.
+            schema (FeatureSchema): Optional feature schema; inferred when omitted.
+        """
         levels: dict[str, list[str]] = {}
         for col in schema.categorical:
             unique = (
@@ -65,6 +73,16 @@ class OneHotEncoder:
 
 @dataclass
 class FittedOneHotEncoder:
+    """Hold learned category levels and output feature names.
+
+    Args:
+        levels (dict[str, list[str]]): Observed levels for each categorical feature.
+        numeric_cols (list[str]): Names of numeric columns passed through encoding.
+        ordinal_cols (list[str]): Names of ordinal columns passed through encoding.
+        passthrough_cols (list[str]): Names of columns left unchanged by encoding.
+        _output_names (list[str]): Names of output features in transformed order.
+    """
+
     levels: dict[str, list[str]]
     numeric_cols: list[str]
     ordinal_cols: list[str]
@@ -72,19 +90,22 @@ class FittedOneHotEncoder:
     _output_names: list[str]
 
     def output_feature_names(self) -> list[str]:
+        """Return names of columns produced by this transform."""
         return list(self._output_names)
 
     def transform(self, features: pl.DataFrame) -> pl.DataFrame:
+        """Apply the fitted transformation to input features.
+
+        Args:
+            features (pl.DataFrame): Input feature frame; rows align with the target and optional
+                series.
+        """
         parts: list[pl.Series] = []
 
         for col in self.numeric_cols:
-            parts.append(
-                features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32)
-            )
+            parts.append(features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32))
         for col in self.ordinal_cols:
-            parts.append(
-                features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32)
-            )
+            parts.append(features[col].fill_null(_NUMERIC_FILL).cast(pl.Float32))
         for col in self.passthrough_cols:
             parts.append(features[col].cast(pl.Float32))
 

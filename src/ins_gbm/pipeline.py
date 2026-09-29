@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.models.base import FittedModel, PredictionType
-from ins_gbm.tuning.tuner import HyperparameterTuner
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
-from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
+from ins_gbm.progress import PipelineCancelled, ProgressCallback, ProgressEvent
 from ins_gbm.selection.importance import FittedImportancePruner
-
+from ins_gbm.tuning.tuner import HyperparameterTuner
 
 FeatureStage = Literal["raw", "encoded", "model"]
+SelectionOutcome = tuple[
+    ModelData, list[str] | None, list[Any] | None, list[dict] | None
+]
 
 
 @dataclass
@@ -24,26 +27,55 @@ class ModelRecipe:
 
     Used by ``ModelPipeline.run()``, the hyperparameter tuner, and the stacking
     ensemble (which refits recipes inside CV folds).
+
+    Args:
+        model (Any): Model wrapper or fitted model to use.
+        encoder (Optional[Any]): Optional encoder applied before model fitting.
+        selection (Optional[Any]): Optional feature selection configuration.
+        preprocessing (list): Ordered preprocessing steps applied before fitting.
+        tuning (Optional[HyperparameterTuner]): Optional hyperparameter tuner.
+        params (Optional[dict]): Optional model or estimator parameter mapping.
+        selection_scope (Literal['fold', 'fixed']): Feature selection scope: "fixed" or "fold".
+            Defaults to 'fixed'.
     """
+
     model: Any
-    encoder: Optional[Any] = None
-    selection: Optional[Any] = None
+    encoder: Any | None = None
+    selection: Any | None = None
     preprocessing: list = field(default_factory=list)
-    tuning: Optional[HyperparameterTuner] = None
+    tuning: HyperparameterTuner | None = None
     # Fixed/base hyperparameters. Tuning suggestions override overlapping keys.
-    params: Optional[dict] = None
+    params: dict | None = None
     selection_scope: Literal["fold", "fixed"] = "fixed"
 
-    def fit(self, data: ModelData, **kwargs) -> "FittedPipeline":
-        """Fit this recipe; convenient equivalent of ``ModelPipeline(...).run()``."""
+    def fit(self, data: ModelData, **kwargs) -> FittedPipeline:
+        """Fit this recipe; convenient equivalent of ``ModelPipeline(...).run()``.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            kwargs (object): Additional keyword arguments forwarded to the pipeline run.
+        """
         return ModelPipeline(data=data, recipe=self).run(**kwargs)
 
     def cross_validate(
-        self, data: ModelData, *, cv=None, feature_names=None,
+        self,
+        data: ModelData,
+        *,
+        cv=None,
+        feature_names=None,
         feature_stage: FeatureStage = "raw",
     ):
-        """Evaluate folds with an optional raw, encoded, or model feature subset."""
+        """Evaluate folds with an optional raw, encoded, or model feature subset.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            cv (object): Cross-validation configuration or explicit fold assignments. Optional.
+            feature_names (object): Ordered names of input features to use. Optional.
+            feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
+                "model". Defaults to 'raw'.
+        """
         from ins_gbm.evaluation.cv_report import CrossValidationReport
+
         return CrossValidationReport(recipe=self, data=data, cv=cv).run(
             feature_names, feature_stage=feature_stage
         )
@@ -57,19 +89,37 @@ class FittedPipeline:
     is omitted from persisted artifacts. The expanded transformed training
     matrix is reconstructed only when ``train_data`` is explicitly accessed and
     is never cached on this object.
+
+    Args:
+        fitted_model (FittedModel): Fitted model to evaluate or persist.
+        recipe (ModelRecipe): Unfitted pipeline recipe.
+        input_feature_names (list[str]): Names of features expected before fitted transforms.
+        raw_train_data (Optional[ModelData]): Original training data retained for evaluation or
+            refitting.
+        selected_features (Optional[list[str]]): Feature names retained by selection.
+        selection_results (Optional[list[Any]]): Results from feature selection.
+        tuning_history (Optional[pl.DataFrame]): Trial history returned by tuning, if run.
+        encoder (Optional[Any]): Optional encoder applied before model fitting.
+        preprocessors (list): Ordered preprocessing steps or their fitted counterparts.
+        metadata (ReproducibilityMetadata): Reproducibility metadata for the fitted pipeline.
+        input_schema (Optional[FeatureSchema]): Input feature schema used by the fitted
+            pipeline.
+        model_selected_features (Optional[list[str]]): Optional feature subset applied after
+            preprocessing.
     """
+
     fitted_model: FittedModel
     recipe: ModelRecipe
     input_feature_names: list[str]
-    raw_train_data: Optional[ModelData]
-    selected_features: Optional[list[str]]
-    selection_results: Optional[list[Any]]
-    tuning_history: Optional[pl.DataFrame]
-    encoder: Optional[Any]
+    raw_train_data: ModelData | None
+    selected_features: list[str] | None
+    selection_results: list[Any] | None
+    tuning_history: pl.DataFrame | None
+    encoder: Any | None
     preprocessors: list
     metadata: ReproducibilityMetadata
-    input_schema: Optional[FeatureSchema] = None
-    model_selected_features: Optional[list[str]] = None
+    input_schema: FeatureSchema | None = None
+    model_selected_features: list[str] | None = None
 
     @property
     def train_data(self) -> ModelData:
@@ -81,12 +131,13 @@ class FittedPipeline:
         if self.raw_train_data is None:
             raise RuntimeError(
                 "Training data is not attached to this fitted pipeline. "
-                "Reload it with load_pipeline(..., training_data=original_training_data) "
+                "Reload it with load_pipeline(..., "
+                "training_data=original_training_data) "
                 "before accessing train_data or fitting an OOF ensemble."
             )
         return self.raw_train_data
 
-    def _input_schema(self) -> Optional[FeatureSchema]:
+    def _input_schema(self) -> FeatureSchema | None:
         """Return the compact input schema, including for legacy artifacts."""
         schema = getattr(self, "input_schema", None)
         if schema is None and self.raw_train_data is not None:
@@ -94,7 +145,11 @@ class FittedPipeline:
         return schema
 
     def _prepare_data(self, data: ModelData) -> ModelData:
-        """Select fitted raw inputs and apply the fitted transform chain."""
+        """Select fitted raw inputs and apply the fitted transform chain.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+        """
         return FittedTransformChain(
             input_feature_names=self.input_feature_names,
             encoder=self.encoder,
@@ -103,44 +158,73 @@ class FittedPipeline:
             model_selected_features=getattr(self, "model_selected_features", None),
         ).transform(data)
 
-    def predict(self, data, prediction_type: PredictionType = "response", *,
-                exposure=None, weight=None, offset=None) -> pl.Series:
+    def predict(
+        self,
+        data,
+        prediction_type: PredictionType = "response",
+        *,
+        exposure=None,
+        weight=None,
+        offset=None,
+    ) -> pl.Series:
         """Apply the fitted transform chain to *data* and return predictions.
 
         Applies transforms in the same order as ModelPipeline.run():
         encode → select → preprocess → model.predict().
         Pass raw (pre-transform) data; the fitted transformers handle encoding.
+
+        Args:
+            data (object): Model data to fit, transform, predict, or evaluate.
+            prediction_type (PredictionType): Prediction scale: "response", "rate", or "link";
+                "rate" is unavailable for Gamma. Defaults to 'response'.
+            exposure (object): Positive exposure series aligned with rows, when used. Optional.
+            weight (object): Nonnegative observation weight series aligned with rows. Optional.
+            offset (object): Optional model offset on the link scale.
         """
         if isinstance(data, pl.DataFrame):
-            return self.predict_raw(data, exposure=exposure, weight=weight,
-                                    offset=offset, prediction_type=prediction_type)
+            return self.predict_raw(
+                data,
+                exposure=exposure,
+                weight=weight,
+                offset=offset,
+                prediction_type=prediction_type,
+            )
         if any(value is not None for value in (exposure, weight, offset)):
-            raise ValueError("exposure, weight, and offset cannot override fields of ModelData")
+            raise ValueError(
+                "exposure, weight, and offset cannot override fields of ModelData"
+            )
         current = self._prepare_data(data)
         return self.fitted_model.predict(current, prediction_type=prediction_type)
 
     def predict_raw(
         self,
         features: pl.DataFrame,
-        exposure: Optional[pl.Series] = None,
-        weight: Optional[pl.Series] = None,
-        offset: Optional[pl.Series] = None,
+        exposure: pl.Series | None = None,
+        weight: pl.Series | None = None,
+        offset: pl.Series | None = None,
         prediction_type: PredictionType = "response",
     ) -> pl.Series:
         """Score a raw feature DataFrame without a target column.
 
         Constructs a ModelData with a placeholder target (never used for
         prediction) so the full transform chain can be applied.
+
+        Args:
+            features (pl.DataFrame): Input feature frame; rows align with the target and optional
+                series.
+            exposure (Optional[pl.Series]): Positive exposure series aligned with rows, when used.
+                Optional.
+            weight (Optional[pl.Series]): Nonnegative observation weight series aligned with rows.
+                Optional.
+            offset (Optional[pl.Series]): Optional model offset on the link scale.
+            prediction_type (PredictionType): Prediction scale: "response", "rate", or "link";
+                "rate" is unavailable for Gamma. Defaults to 'response'.
         """
         n = features.height
         if exposure is not None and len(exposure) != n:
-            raise ValueError(
-                f"exposure length {len(exposure)} != features height {n}"
-            )
+            raise ValueError(f"exposure length {len(exposure)} != features height {n}")
         if weight is not None and len(weight) != n:
-            raise ValueError(
-                f"weight length {len(weight)} != features height {n}"
-            )
+            raise ValueError(f"weight length {len(weight)} != features height {n}")
         if offset is not None and len(offset) != n:
             raise ValueError(f"offset length {len(offset)} != features height {n}")
         obj = self.fitted_model.objective
@@ -166,6 +250,9 @@ class FittedPipeline:
 
         The fitted transform chain is applied to the holdout, but neither the
         raw nor transformed holdout is stored on the fitted pipeline.
+
+        Args:
+            holdout_data (ModelData): Separate data used for evaluation.
         """
         from ins_gbm.evaluation.report import EvaluationReport
 
@@ -184,45 +271,53 @@ class FittedPipeline:
         )
 
     def save(self, output_dir: str) -> None:
-        """Persist this fitted pipeline."""
+        """Persist this fitted pipeline.
+
+        Args:
+            output_dir (str): Directory for saved artifacts.
+        """
         from ins_gbm.persistence.io import save_pipeline
+
         save_pipeline(self, output_dir)
 
     def retune(
         self,
         tuner: HyperparameterTuner,
         *,
-        progress: Optional[ProgressCallback] = None,
-        should_stop: Optional[Callable[[], bool]] = None,
-    ) -> "FittedPipeline":
+        progress: ProgressCallback | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> FittedPipeline:
         """Tune again while freezing the fitted encoder and feature selection.
 
         The original pipeline is not mutated. Preprocessors are fit independently
         inside each tuning fold, then refit on all attached training rows before
         fitting the returned pipeline's model.
+
+        Args:
+            tuner (HyperparameterTuner): Tuner used to refit hyperparameters.
+            progress (Optional[ProgressCallback]): Optional callback receiving progress events.
+            should_stop (Optional[Callable[[], bool]]): Optional callback that requests cancellation
+                when true.
         """
         from ins_gbm.persistence.metadata import build_metadata
         from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
         raw_train_data = self._require_raw_train_data()
         validate_preprocessing_steps(self.recipe.preprocessing)
-
-        def emit(stage: str, message: str, **kwargs) -> None:
-            if progress is not None:
-                progress(ProgressEvent(stage=stage, message=message, **kwargs))
-
-        def check_cancel() -> None:
-            if should_stop is not None and should_stop():
-                raise PipelineCancelled("pipeline cancelled by caller")
-
-        check_cancel()
+        runner = ModelPipeline(
+            data=raw_train_data,
+            recipe=self.recipe,
+            progress=progress,
+            should_stop=should_stop,
+        )
+        runner._check_cancel()
         tuning_data = FittedTransformChain(
             input_feature_names=self.input_feature_names,
             encoder=self.encoder,
             selected_features=self.selected_features,
         ).transform(raw_train_data)
 
-        emit(
+        runner._emit(
             "tuning",
             "starting hyperparameter retuning",
             total=tuner.n_trials,
@@ -240,30 +335,16 @@ class FittedPipeline:
                 else {}
             ),
         )
-        check_cancel()
-
-        current_train = tuning_data
-        fitted_preprocessors: list[Any] = []
-        for prep in self.recipe.preprocessing:
-            emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
-            check_cancel()
-            fitted_prep = prep.fit(current_train.features, current_train.target)
-            current_train = current_train.with_features(
-                fitted_prep.transform(current_train.features)
-            )
-            fitted_preprocessors.append(fitted_prep)
+        runner._check_cancel()
+        current_train, fitted_preprocessors = runner._fit_preprocessors(tuning_data)
 
         model_selected_features = getattr(self, "model_selected_features", None)
         if model_selected_features is not None:
-            current_train = select_model_features(current_train, model_selected_features)
+            current_train = select_model_features(
+                current_train, model_selected_features
+            )
 
-        emit("fit", "fitting model on full training data")
-        check_cancel()
-        fitted_model = self.recipe.model.fit(
-            current_train,
-            params=best_params if best_params else self.recipe.params,
-        )
-        check_cancel()
+        fitted_model = runner._fit_model(current_train, best_params)
 
         tuned_recipe = replace(self.recipe, tuning=tuner)
         metadata = build_metadata(
@@ -274,7 +355,9 @@ class FittedPipeline:
             tuning_seed=getattr(tuner, "seed", None),
             selection_stages=getattr(self.metadata, "selection_stages", None),
             selection_scope="fixed",
-            tuning_metric=(getattr(tuner, "metric", None) or f"{fitted_model.objective}_deviance"),
+            tuning_metric=(
+                getattr(tuner, "metric", None) or f"{fitted_model.objective}_deviance"
+            ),
         )
 
         return replace(
@@ -304,19 +387,182 @@ class ModelPipeline:
 
     Use :meth:`FittedPipeline.evaluate` to evaluate a separately supplied
     holdout after fitting.
+
+    Args:
+        data (ModelData): Model data to fit, transform, predict, or evaluate.
+        recipe (ModelRecipe): Unfitted pipeline recipe.
+        progress (Optional[ProgressCallback]): Optional callback receiving progress events.
+        should_stop (Optional[Any]): Optional callback that requests cancellation when true.
     """
+
     data: ModelData
     recipe: ModelRecipe
-    progress: Optional[ProgressCallback] = None
-    should_stop: Optional[Any] = None
+    progress: ProgressCallback | None = None
+    should_stop: Any | None = None
 
     def _emit(self, stage: str, message: str, **kwargs) -> None:
+        """Send a pipeline progress event to the configured callback.
+
+        Args:
+            stage (str): Pipeline stage associated with the event.
+            message (str): Human-readable progress message.
+            kwargs (object): Additional keyword arguments forwarded to the pipeline run.
+        """
         if self.progress is not None:
             self.progress(ProgressEvent(stage=stage, message=message, **kwargs))
 
     def _check_cancel(self) -> None:
+        """Raise when the pipeline cancellation callback requests a stop."""
         if self.should_stop is not None and self.should_stop():
             raise PipelineCancelled("pipeline cancelled by caller")
+
+    def _validate_feature_selection(
+        self,
+        feature_names: list[str] | None,
+        feature_stage: FeatureStage,
+    ) -> None:
+        """Check the requested feature subset and selection stage.
+
+        Args:
+            feature_names (list[str] | None): Ordered names of input features to use.
+            feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
+                "model".
+        """
+        if feature_stage not in ("raw", "encoded", "model"):
+            raise ValueError("feature_stage must be 'raw', 'encoded', or 'model'")
+        if feature_stage == "raw":
+            return
+        if feature_names is None:
+            raise ValueError(
+                f"feature_names is required when feature_stage={feature_stage!r}"
+            )
+        if not feature_names:
+            raise ValueError("feature_names must contain at least one feature")
+        if len(set(feature_names)) != len(feature_names):
+            raise ValueError("feature_names must be unique")
+        if self.recipe.selection is not None:
+            raise ValueError(
+                f"feature_stage={feature_stage!r} cannot be combined with "
+                "recipe.selection; supplied feature_names are the fixed "
+                "final selection"
+            )
+
+    def _tune(
+        self,
+        data: ModelData,
+        feature_names: list[str] | None,
+        feature_stage: FeatureStage,
+        *,
+        fold_local: bool,
+    ) -> tuple[dict, pl.DataFrame | None]:
+        """Tune model parameters with the requested feature selection.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            feature_names (list[str] | None): Ordered names of input features to use.
+            feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
+                "model".
+            fold_local (bool): Whether tuning refits selection inside each CV fold.
+        """
+        tuner = self.recipe.tuning
+        if tuner is None:
+            return {}, None
+        message = (
+            "starting fold-local hyperparameter tuning"
+            if fold_local
+            else "starting hyperparameter tuning"
+        )
+        self._emit("tuning", message, total=tuner.n_trials)
+        options = {
+            "preprocessors": self.recipe.preprocessing,
+            "base_params": self.recipe.params,
+            "progress": self.progress,
+            "should_stop": self.should_stop,
+        }
+        if feature_stage == "model":
+            options["model_selected_features"] = list(feature_names)
+        if fold_local:
+            options.update(encoder=self.recipe.encoder, selector=self.recipe.selection)
+        result = tuner.tune(data, self.recipe.model, **options)
+        self._check_cancel()
+        return result
+
+    def _encode(self, data: ModelData) -> tuple[ModelData, Any | None]:
+        """Fit the encoder and transform training features.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+        """
+        if self.recipe.encoder is None:
+            return data, None
+        self._emit("encode", "fitting encoder on full training data")
+        self._check_cancel()
+        encoder = self.recipe.encoder.fit(data.features, getattr(data, "schema", None))
+        return data.with_features(encoder.transform(data.features)), encoder
+
+    def _select(
+        self,
+        data: ModelData,
+        feature_names: list[str] | None,
+        feature_stage: FeatureStage,
+    ) -> SelectionOutcome:
+        """Apply a fixed feature subset or fit the configured selector.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            feature_names (list[str] | None): Ordered names of input features to use.
+            feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
+                "model".
+        """
+        if feature_stage == "encoded":
+            selected = list(feature_names or [])
+            missing = [name for name in selected if name not in data.features.columns]
+            if missing:
+                raise ValueError(f"Encoded features missing after encoding: {missing}")
+            selected_data = data.with_features(data.features.select(selected))
+            return selected_data, selected, None, None
+        if self.recipe.selection is None:
+            return data, None, None, None
+        self._emit("select", "running feature selection")
+        self._check_cancel()
+        fitted = self.recipe.selection.fit(data)
+        selected = fitted.selected_features()
+        stage_results = getattr(fitted, "stage_results", None)
+        selection_metadata = getattr(fitted, "selection_metadata", None)
+        results = stage_results() if callable(stage_results) else None
+        metadata = selection_metadata() if callable(selection_metadata) else None
+        selected_data = data.with_features(data.features.select(selected))
+        return selected_data, selected, results, metadata
+
+    def _fit_preprocessors(self, data: ModelData) -> tuple[ModelData, list[Any]]:
+        """Fit and apply preprocessing steps in order.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+        """
+        fitted_preprocessors = []
+        for prep in self.recipe.preprocessing:
+            self._emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
+            self._check_cancel()
+            fitted = prep.fit(data.features, data.target)
+            data = data.with_features(fitted.transform(data.features))
+            fitted_preprocessors.append(fitted)
+        return data, fitted_preprocessors
+
+    def _fit_model(self, data: ModelData, best_params: dict) -> FittedModel:
+        """Fit the model with tuned or configured parameters.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            best_params (dict): Best parameter values selected by tuning.
+        """
+        self._emit("fit", "fitting model on full training data")
+        self._check_cancel()
+        fitted = self.recipe.model.fit(
+            data, params=best_params if best_params else self.recipe.params
+        )
+        self._check_cancel()
+        return fitted
 
     def run(
         self,
@@ -324,7 +570,14 @@ class ModelPipeline:
         *,
         feature_stage: FeatureStage = "raw",
     ) -> FittedPipeline:
-        """Fit with an optional raw, encoded, or fitted-model feature subset."""
+        """Fit with an optional raw, encoded, or fitted-model feature subset.
+
+        Args:
+            feature_names (list[str] | FittedImportancePruner | None): Ordered names of input
+                features to use. Optional.
+            feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
+                "model". Defaults to 'raw'.
+        """
         from ins_gbm.persistence.metadata import build_metadata
         from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
@@ -332,26 +585,12 @@ class ModelPipeline:
         validate_preprocessing_steps(self.recipe.preprocessing)
         if isinstance(feature_names, FittedImportancePruner):
             if feature_stage != "raw":
-                raise ValueError("feature_stage is inferred from a fitted pruner result")
+                raise ValueError(
+                    "feature_stage is inferred from a fitted pruner result"
+                )
             feature_names = feature_names.selected_features()
             feature_stage = "model"
-        if feature_stage not in ("raw", "encoded", "model"):
-            raise ValueError("feature_stage must be 'raw', 'encoded', or 'model'")
-        if feature_stage in ("encoded", "model"):
-            if feature_names is None:
-                raise ValueError(
-                    f"feature_names is required when feature_stage={feature_stage!r}"
-                )
-            if not feature_names:
-                raise ValueError("feature_names must contain at least one feature")
-            if len(set(feature_names)) != len(feature_names):
-                raise ValueError("feature_names must be unique")
-            if self.recipe.selection is not None:
-                raise ValueError(
-                    f"feature_stage={feature_stage!r} cannot be combined with "
-                    "recipe.selection; supplied feature_names are the fixed "
-                    "final selection"
-                )
+        self._validate_feature_selection(feature_names, feature_stage)
 
         train_data = self.data
         if feature_stage == "raw" and feature_names is not None:
@@ -363,123 +602,39 @@ class ModelPipeline:
         if self.recipe.selection_scope not in {"fold", "fixed"}:
             raise ValueError("selection_scope must be 'fold' or 'fixed'")
 
-        tuning_history: Optional[pl.DataFrame] = None
-        best_params: dict = {}
         fold_local_tuning = (
             self.recipe.tuning is not None
             and self.recipe.selection_scope == "fold"
             and feature_stage in {"raw", "model"}
         )
         if fold_local_tuning:
-            self._emit("tuning", "starting fold-local hyperparameter tuning",
-                       total=self.recipe.tuning.n_trials)
-            best_params, tuning_history = self.recipe.tuning.tune(
-                train_data,
-                self.recipe.model,
-                encoder=self.recipe.encoder,
-                selector=self.recipe.selection,
-                preprocessors=self.recipe.preprocessing,
-                **(
-                    {"model_selected_features": list(feature_names)}
-                    if feature_stage == "model" else {}
-                ),
-                base_params=self.recipe.params,
-                progress=self.progress,
-                should_stop=self.should_stop,
+            best_params, tuning_history = self._tune(
+                train_data, feature_names, feature_stage, fold_local=True
             )
-            self._check_cancel()
+        else:
+            best_params, tuning_history = {}, None
 
-        # ── 1. Encode and complete feature selection ─────────────────────────
-        current_train = train_data
-        fitted_encoder: Optional[Any] = None
+        current_train, fitted_encoder = self._encode(train_data)
+        current_train, selected_features, selection_results, selection_metadata = (
+            self._select(current_train, feature_names, feature_stage)
+        )
 
-        if self.recipe.encoder is not None:
-            self._emit("encode", "fitting encoder on full training data")
-            self._check_cancel()
-            schema = getattr(current_train, "schema", None)
-            fitted_encoder = self.recipe.encoder.fit(current_train.features, schema)
-            current_train = current_train.with_features(
-                fitted_encoder.transform(current_train.features)
-            )
-
-        selected_features: Optional[list[str]] = None
-        selection_results: Optional[list[Any]] = None
-        selection_metadata: Optional[list[dict]] = None
-        if feature_stage == "encoded":
-            selected_features = list(feature_names or [])
-            missing = [
-                name
-                for name in selected_features
-                if name not in current_train.features.columns
-            ]
-            if missing:
-                raise ValueError(
-                    f"Encoded features missing after encoding: {missing}"
-                )
-            current_train = current_train.with_features(
-                current_train.features.select(selected_features)
-            )
-        elif self.recipe.selection is not None:
-            self._emit("select", "running feature selection")
-            self._check_cancel()
-            fitted_sel = self.recipe.selection.fit(current_train)
-            selected_features = fitted_sel.selected_features()
-            stage_results = getattr(fitted_sel, "stage_results", None)
-            if callable(stage_results):
-                selection_results = stage_results()
-            get_selection_metadata = getattr(fitted_sel, "selection_metadata", None)
-            if callable(get_selection_metadata):
-                selection_metadata = get_selection_metadata()
-            current_train = current_train.with_features(
-                current_train.features.select(selected_features)
-            )
-
-        # ── 2. Tune on the fixed final feature selection (optional) ───────────
         if self.recipe.tuning is not None and not fold_local_tuning:
-            self._emit(
-                "tuning", "starting hyperparameter tuning",
-                total=self.recipe.tuning.n_trials,
+            best_params, tuning_history = self._tune(
+                current_train, feature_names, feature_stage, fold_local=False
             )
-            best_params, tuning_history = self.recipe.tuning.tune(
-                current_train,
-                self.recipe.model,
-                preprocessors=self.recipe.preprocessing,
-                **(
-                    {"model_selected_features": list(feature_names)}
-                    if feature_stage == "model" else {}
-                ),
-                base_params=self.recipe.params,
-                progress=self.progress,
-                should_stop=self.should_stop,
-            )
-            self._check_cancel()
 
-        # ── 3. Fit preprocessors and model on full training data ──────────────
-        fitted_preprocessors: list = []
-        for prep in self.recipe.preprocessing:
-            self._emit("preprocess", f"fitting preprocessor {type(prep).__name__}")
-            self._check_cancel()
-            # Pass target so supervised reducers (e.g. PLS) can fit; unsupervised
-            # reducers accept and ignore it (fit(features, target=None)).
-            fitted_prep = prep.fit(current_train.features, current_train.target)
-            current_train = current_train.with_features(
-                fitted_prep.transform(current_train.features)
-            )
-            fitted_preprocessors.append(fitted_prep)
+        current_train, fitted_preprocessors = self._fit_preprocessors(current_train)
 
         model_selected_features = (
             list(feature_names) if feature_stage == "model" else None
         )
         if model_selected_features is not None:
-            current_train = select_model_features(current_train, model_selected_features)
+            current_train = select_model_features(
+                current_train, model_selected_features
+            )
 
-        self._emit("fit", "fitting model on full training data")
-        self._check_cancel()
-        fitted_model = self.recipe.model.fit(
-            current_train,
-            params=best_params if best_params else self.recipe.params,
-        )
-        self._check_cancel()
+        fitted_model = self._fit_model(current_train, best_params)
 
         # ── 4. Capture reproducibility metadata ───────────────────────────────
         metadata = build_metadata(
@@ -497,7 +652,8 @@ class ModelPipeline:
             tuning_metric=(
                 getattr(self.recipe.tuning, "metric", None)
                 or f"{fitted_model.objective}_deviance"
-                if self.recipe.tuning else None
+                if self.recipe.tuning
+                else None
             ),
         )
 

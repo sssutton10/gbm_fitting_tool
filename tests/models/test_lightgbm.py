@@ -3,11 +3,17 @@ from dataclasses import replace
 import numpy as np
 import polars as pl
 import pytest
+
 from ins_gbm.data.loader import load_model_data
 from ins_gbm.models.lightgbm import LightGBMModel
 
 
 def _poisson_data(poisson_parquet):
+    """Poisson data.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     return load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -18,6 +24,11 @@ def _poisson_data(poisson_parquet):
 
 
 def _gamma_data(gamma_parquet):
+    """Gamma data.
+
+    Args:
+        gamma_parquet (object): The gamma parquet.
+    """
     return load_model_data(
         path=str(gamma_parquet),
         target="severity",
@@ -28,6 +39,11 @@ def _gamma_data(gamma_parquet):
 
 
 def test_lgb_poisson_fit_predict(poisson_parquet):
+    """Verify lgb poisson fit predict.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = _poisson_data(poisson_parquet)
     train = test = data
     model = LightGBMModel(objective="poisson")
@@ -39,9 +55,16 @@ def test_lgb_poisson_fit_predict(poisson_parquet):
 
 
 def test_lgb_poisson_rate_prediction(poisson_parquet):
+    """Verify lgb poisson rate prediction.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = _poisson_data(poisson_parquet)
     train = test = data
-    fitted = LightGBMModel(objective="poisson").fit(train, params={"n_estimators": 10, "verbose": -1})
+    fitted = LightGBMModel(objective="poisson").fit(
+        train, params={"n_estimators": 10, "verbose": -1}
+    )
     rate = fitted.predict(test, prediction_type="rate")
     response = fitted.predict(test, prediction_type="response")
     # rate = response / exposure
@@ -52,6 +75,12 @@ def test_lgb_poisson_rate_prediction(poisson_parquet):
 def test_lgb_poisson_without_exposure_passes_no_init_score(
     poisson_parquet, monkeypatch
 ):
+    """Verify lgb poisson without exposure passes no init score.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        monkeypatch (object): The monkeypatch.
+    """
     import lightgbm as lgb
 
     data = replace(_poisson_data(poisson_parquet), exposure=None).validate()
@@ -59,14 +88,18 @@ def test_lgb_poisson_without_exposure_passes_no_init_score(
     original_init = lgb.Dataset.__init__
 
     def recording_init(self, *args, **kwargs):
+        """Recording init.
+
+        Args:
+            args (object): The args.
+            kwargs (object): Additional keyword arguments forwarded to the pipeline run.
+        """
         captured["kwargs"] = kwargs
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(lgb.Dataset, "__init__", recording_init)
 
-    fitted = LightGBMModel().fit(
-        data, params={"n_estimators": 5, "verbose": -1}
-    )
+    fitted = LightGBMModel().fit(data, params={"n_estimators": 5, "verbose": -1})
     response = fitted.predict(data, prediction_type="response")
     rate = fitted.predict(data, prediction_type="rate")
 
@@ -75,35 +108,59 @@ def test_lgb_poisson_without_exposure_passes_no_init_score(
 
 
 def test_lgb_gamma_fit_predict(gamma_parquet):
+    """Verify lgb gamma fit predict.
+
+    Args:
+        gamma_parquet (object): The gamma parquet.
+    """
     data = _gamma_data(gamma_parquet)
     train = test = data
-    fitted = LightGBMModel(objective="gamma").fit(train, params={"n_estimators": 10, "verbose": -1})
+    fitted = LightGBMModel(objective="gamma").fit(
+        train, params={"n_estimators": 10, "verbose": -1}
+    )
     preds = fitted.predict(test, prediction_type="response")
     assert (preds > 0).all()
     assert len(preds) == test.n_rows
 
 
 def test_lgb_uses_model_data_objective_when_omitted(gamma_parquet):
+    """Verify lgb uses model data objective when omitted.
+
+    Args:
+        gamma_parquet (object): The gamma parquet.
+    """
     data = _gamma_data(gamma_parquet)
 
-    fitted = LightGBMModel().fit(
-        data, params={"n_estimators": 5, "verbose": -1}
-    )
+    fitted = LightGBMModel().fit(data, params={"n_estimators": 5, "verbose": -1})
 
     assert fitted.objective == "gamma"
 
 
 def test_lgb_gamma_rejects_rate(gamma_parquet):
+    """Verify lgb gamma rejects rate.
+
+    Args:
+        gamma_parquet (object): The gamma parquet.
+    """
     data = _gamma_data(gamma_parquet)
     train = test = data
-    fitted = LightGBMModel(objective="gamma").fit(train, params={"n_estimators": 10, "verbose": -1})
+    fitted = LightGBMModel(objective="gamma").fit(
+        train, params={"n_estimators": 10, "verbose": -1}
+    )
     with pytest.raises(ValueError, match="(?i)rate.*gamma"):
         fitted.predict(test, prediction_type="rate")
 
 
 def test_lgb_feature_importance(poisson_parquet):
+    """Verify lgb feature importance.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = _poisson_data(poisson_parquet)
-    fitted = LightGBMModel(objective="poisson").fit(data, params={"n_estimators": 10, "verbose": -1})
+    fitted = LightGBMModel(objective="poisson").fit(
+        data, params={"n_estimators": 10, "verbose": -1}
+    )
     imp = fitted.feature_importance()
     assert "feature" in imp.columns
     assert "importance" in imp.columns
@@ -111,9 +168,17 @@ def test_lgb_feature_importance(poisson_parquet):
 
 
 def test_lgb_feature_importance_accepts_native_type(poisson_parquet):
+    """Verify lgb feature importance accepts native type.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     data = load_model_data(
-        path=str(poisson_parquet), target="claim_count", exposure="exposure",
-        feature_cols=["x1", "x3"], objective="poisson",
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
     fitted = LightGBMModel(objective="poisson").fit(
         data, params={"n_estimators": 5, "verbose": -1}
@@ -124,6 +189,7 @@ def test_lgb_feature_importance_accepts_native_type(poisson_parquet):
 
 
 def test_lgb_capabilities():
+    """Verify lgb capabilities."""
     caps = LightGBMModel(objective="poisson").capabilities()
     assert caps.supports_poisson
     assert caps.supports_gamma
@@ -131,6 +197,7 @@ def test_lgb_capabilities():
 
 
 def test_lgb_search_space_keys():
+    """Verify lgb search space keys."""
     space = LightGBMModel(objective="poisson").default_search_space()
     assert "n_estimators" in space
     assert "learning_rate" in space

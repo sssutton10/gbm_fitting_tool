@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -16,6 +17,11 @@ from ins_gbm.models.xgboost import XGBoostModel
 
 
 def _shallow_params(model: Any) -> dict[str, Any]:
+    """Build shallow model parameters for CV importance fitting.
+
+    Args:
+        model (Any): Model wrapper or fitted model to use.
+    """
     if isinstance(model, XGBoostModel):
         return {"n_estimators": 50, "max_depth": 2}
     if isinstance(model, LightGBMModel):
@@ -51,9 +57,21 @@ def cv_feature_importance(
     fold's training rows and rows report the union of encoded columns.
     For other model wrappers, supply importance types supported by that model.
     Explicit ``params`` override the shallow defaults for built-in wrappers.
+
+    Args:
+        data (ModelData): Model data to fit, transform, predict, or evaluate.
+        model (Any): Model wrapper or fitted model to use. Optional.
+        cv (CVConfig | None): Cross-validation configuration or explicit fold assignments.
+            Optional.
+        feature_names (Sequence[str] | None): Ordered names of input features to use. Optional.
+        encoder (Any): Optional encoder applied before model fitting.
+        importance_types (Sequence[str] | str): Importance measures to compute.
+        params (dict[str, Any] | None): Optional model or estimator parameter mapping.
     """
     data.validate()
-    selected = data.select_features(list(feature_names)) if feature_names is not None else data
+    selected = (
+        data.select_features(list(feature_names)) if feature_names is not None else data
+    )
     if not selected.feature_names:
         raise ValueError("feature_names must contain at least one feature")
 
@@ -61,7 +79,9 @@ def cv_feature_importance(
         types = [importance_types]
     else:
         types = list(importance_types)
-    if not types or any(not isinstance(t, str) or not t or not t.isidentifier() for t in types):
+    if not types or any(
+        not isinstance(t, str) or not t or not t.isidentifier() for t in types
+    ):
         raise ValueError("importance_types must contain valid, non-empty names")
     if len(types) != len(set(types)):
         raise ValueError("importance_types must be unique")
@@ -93,10 +113,16 @@ def cv_feature_importance(
         for kind in types:
             importance = fitted.feature_importance(kind)
             if not {"feature", "importance"}.issubset(importance.columns):
-                raise ValueError("feature importance must contain 'feature' and 'importance' columns")
+                raise ValueError(
+                    "feature importance must contain 'feature' and 'importance' columns"
+                )
             reported = importance["feature"].to_list()
-            if len(reported) != len(set(reported)) or not set(reported).issubset(set(fold_names)):
-                raise ValueError("feature importance contains duplicate or unknown features")
+            if len(reported) != len(set(reported)) or not set(reported).issubset(
+                set(fold_names)
+            ):
+                raise ValueError(
+                    "feature importance contains duplicate or unknown features"
+                )
             try:
                 by_name = {
                     name: float(score)

@@ -17,6 +17,11 @@ _FOLD_COLUMN = "_cv_fold"
 
 
 def _json_scalar(value):
+    """Convert a scalar to a JSON-compatible value.
+
+    Args:
+        value (object): Value to inspect or replace.
+    """
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, np.ndarray):
@@ -24,11 +29,18 @@ def _json_scalar(value):
     raise TypeError(f"CV metadata value {value!r} is not JSON serializable")
 
 
-def save_cv_result(result: "CVResult", output_dir: str) -> None:
-    """Save fold metrics, summary, predictions, and provenance to a directory."""
+def save_cv_result(result: CVResult, output_dir: str) -> None:
+    """Save fold metrics, summary, predictions, and provenance to a directory.
+
+    Args:
+        result ('CVResult'): Cross-validation result to save.
+        output_dir (str): Directory for saved artifacts.
+    """
     if (
-        result.predictions is None or result.row_folds is None
-        or result.objective is None or result.data_signature is None
+        result.predictions is None
+        or result.row_folds is None
+        or result.objective is None
+        or result.data_signature is None
         or result.cv_config is None
     ):
         raise ValueError("CVResult lacks predictions or provenance required for saving")
@@ -63,13 +75,15 @@ def save_cv_result(result: "CVResult", output_dir: str) -> None:
     result.predictions.with_columns(
         result.row_folds.rename(_FOLD_COLUMN)
     ).write_parquet(path / "predictions.parquet")
-    (path / "metadata.json").write_text(
-        metadata_json, encoding="utf-8"
-    )
+    (path / "metadata.json").write_text(metadata_json, encoding="utf-8")
 
 
-def load_cv_result(output_dir: str) -> "CVResult":
-    """Load a saved CV report without loading targets, weights, or features."""
+def load_cv_result(output_dir: str) -> CVResult:
+    """Load a saved CV report without loading targets, weights, or features.
+
+    Args:
+        output_dir (str): Directory for saved artifacts.
+    """
     from ins_gbm.evaluation.cv_report import CVResult
 
     path = Path(output_dir)

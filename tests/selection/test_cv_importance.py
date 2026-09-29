@@ -3,20 +3,34 @@ import polars as pl
 import pytest
 
 from ins_gbm import (
-    CVConfig, LightGBMModel, ModelData, ModelRecipe, OneHotEncoder,
+    CVConfig,
+    LightGBMModel,
+    ModelData,
+    ModelRecipe,
+    OneHotEncoder,
     cv_feature_importance,
 )
 from ins_gbm.models.base import FittedModel, ModelCapabilities
 
 
 class RecordingModel:
+    """Configure RecordingModel."""
+
     def __init__(self):
+        """Init."""
         self.fits = []
 
     def capabilities(self):
+        """Capabilities."""
         return ModelCapabilities(True, True, True, True, True)
 
     def fit(self, data, params=None):
+        """Fit.
+
+        Args:
+            data (object): Model data to fit, transform, predict, or evaluate.
+            params (object): Optional model or estimator parameter mapping.
+        """
         fold = int(data.target[0])
         self.fits.append((data.target.to_list(), dict(params)))
         values = {
@@ -25,26 +39,43 @@ class RecordingModel:
         }[fold]
 
         def importance(kind):
-            return pl.DataFrame({
-                "feature": list(values[kind]),
-                "importance": list(values[kind].values()),
-            })
+            """Importance.
+
+            Args:
+                kind (object): The kind.
+            """
+            return pl.DataFrame(
+                {
+                    "feature": list(values[kind]),
+                    "importance": list(values[kind].values()),
+                }
+            )
 
         return FittedModel(
-            model=None, params=params, framework="fake", objective="poisson",
-            feature_names=data.feature_names, predict_fn=None,
+            model=None,
+            params=params,
+            framework="fake",
+            objective="poisson",
+            feature_names=data.feature_names,
+            predict_fn=None,
             importance_fn=importance,
         )
 
 
 def test_predefined_folds_include_zero_importance_and_average_all_folds():
+    """Verify predefined folds include zero importance and average all folds."""
     data = ModelData(
-        features=pl.DataFrame({"a": [1, 2, 3, 4], "b": [1, 1, 1, 1], "c": [0, 0, 0, 0]}),
-        target=pl.Series([0, 0, 1, 1]), feature_names=["a", "b", "c"],
+        features=pl.DataFrame(
+            {"a": [1, 2, 3, 4], "b": [1, 1, 1, 1], "c": [0, 0, 0, 0]}
+        ),
+        target=pl.Series([0, 0, 1, 1]),
+        feature_names=["a", "b", "c"],
         cv_fold=pl.Series([10, 10, 20, 20]),
     )
     model = RecordingModel()
-    result = cv_feature_importance(data, model=model, importance_types=("weight", "gain"))
+    result = cv_feature_importance(
+        data, model=model, importance_types=("weight", "gain")
+    )
 
     assert result.columns == ["feature", "n_folds_selected", "mean_weight", "mean_gain"]
     assert result["feature"].to_list() == ["a", "b", "c"]
@@ -55,28 +86,59 @@ def test_predefined_folds_include_zero_importance_and_average_all_folds():
 
 
 def test_random_folds_and_subset_use_requested_columns():
+    """Verify random folds and subset use requested columns."""
     data = ModelData(
         features=pl.DataFrame({"a": range(12), "b": range(12), "c": range(12)}),
-        target=pl.Series(np.arange(12) % 2), feature_names=["a", "b", "c"],
+        target=pl.Series(np.arange(12) % 2),
+        feature_names=["a", "b", "c"],
         cv_fold=pl.Series([0] * 6 + [1] * 6),
     )
+
     class RandomRecordingModel(RecordingModel):
+        """Configure RandomRecordingModel."""
+
         def fit(self, data, params=None):
-            self.fits.append((data.features["c"].to_list(), list(data.feature_names), dict(params)))
+            """Fit.
+
+            Args:
+                data (object): Model data to fit, transform, predict, or evaluate.
+                params (object): Optional model or estimator parameter mapping.
+            """
+            self.fits.append(
+                (data.features["c"].to_list(), list(data.feature_names), dict(params))
+            )
 
             def importance(kind):
-                return pl.DataFrame({"feature": data.feature_names, "importance": [1.0] * len(data.feature_names)})
+                """Importance.
+
+                Args:
+                    kind (object): The kind.
+                """
+                return pl.DataFrame(
+                    {
+                        "feature": data.feature_names,
+                        "importance": [1.0] * len(data.feature_names),
+                    }
+                )
 
             return FittedModel(
-                model=None, params=params, framework="fake", objective="poisson",
-                feature_names=data.feature_names, predict_fn=None, importance_fn=importance,
+                model=None,
+                params=params,
+                framework="fake",
+                objective="poisson",
+                feature_names=data.feature_names,
+                predict_fn=None,
+                importance_fn=importance,
             )
 
     model = RandomRecordingModel()
     result = cv_feature_importance(
-        data, model=model,
+        data,
+        model=model,
         cv=CVConfig(folds="random", n_splits=3, seed=7),
-        feature_names=["c", "a"], importance_types="gain", params={"max_depth": 2},
+        feature_names=["c", "a"],
+        importance_types="gain",
+        params={"max_depth": 2},
     )
     assert result["feature"].to_list() == ["c", "a"]
     assert result.columns == ["feature", "n_folds_selected", "mean_gain"]
@@ -87,9 +149,11 @@ def test_random_folds_and_subset_use_requested_columns():
 
 
 def test_invalid_importance_type_is_reported():
+    """Verify invalid importance type is reported."""
     data = ModelData(
         features=pl.DataFrame({"a": [1, 2, 3, 4]}),
-        target=pl.Series([0, 1, 0, 1]), feature_names=["a"],
+        target=pl.Series([0, 1, 0, 1]),
+        feature_names=["a"],
     )
     with pytest.raises(ValueError, match="unique"):
         cv_feature_importance(data, importance_types=("gain", "gain"))
@@ -98,27 +162,50 @@ def test_invalid_importance_type_is_reported():
 
 
 def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
+    """Verify encoded levels are ranked and can be used for final fit."""
+
     class EncodedRecordingModel(RecordingModel):
+        """Configure EncodedRecordingModel."""
+
         def fit(self, data, params=None):
+            """Fit.
+
+            Args:
+                data (object): Model data to fit, transform, predict, or evaluate.
+                params (object): Optional model or estimator parameter mapping.
+            """
             self.fits.append(list(data.feature_names))
 
             def importance(kind):
-                return pl.DataFrame({
-                    "feature": data.feature_names,
-                    "importance": [1.0] * len(data.feature_names),
-                })
+                """Importance.
+
+                Args:
+                    kind (object): The kind.
+                """
+                return pl.DataFrame(
+                    {
+                        "feature": data.feature_names,
+                        "importance": [1.0] * len(data.feature_names),
+                    }
+                )
 
             return FittedModel(
-                model=None, params=params, framework="fake", objective="poisson",
-                feature_names=data.feature_names, predict_fn=None,
+                model=None,
+                params=params,
+                framework="fake",
+                objective="poisson",
+                feature_names=data.feature_names,
+                predict_fn=None,
                 importance_fn=importance,
             )
 
     data = ModelData(
-        features=pl.DataFrame({
-            "x": list(range(12)),
-            "group": ["A"] * 6 + ["B"] * 6,
-        }),
+        features=pl.DataFrame(
+            {
+                "x": list(range(12)),
+                "group": ["A"] * 6 + ["B"] * 6,
+            }
+        ),
         target=pl.Series([0, 1] * 6),
         feature_names=["x", "group"],
         objective="poisson",
@@ -126,18 +213,25 @@ def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
     )
     model = EncodedRecordingModel()
     ranking = cv_feature_importance(
-        data, model=model, encoder=OneHotEncoder(), importance_types="gain",
+        data,
+        model=model,
+        encoder=OneHotEncoder(),
+        importance_types="gain",
     )
     assert set(ranking["feature"].to_list()) == {"x", "group__A", "group__B"}
     by_name = {row["feature"]: row for row in ranking.to_dicts()}
     assert by_name["x"]["n_folds_selected"] == 2
     assert by_name["group__A"]["n_folds_selected"] == 1
     assert by_name["group__B"]["mean_gain"] == 0.5
-    assert all(len([name for name in fit if name.startswith("group__")]) == 1 for fit in model.fits)
+    assert all(
+        len([name for name in fit if name.startswith("group__")]) == 1
+        for fit in model.fits
+    )
 
     selected = ranking["feature"].to_list()
     recipe = ModelRecipe(
-        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(),
         params={"n_estimators": 3, "min_child_samples": 1},
     )
     fitted = recipe.fit(data, feature_names=selected, feature_stage="encoded")
@@ -146,12 +240,20 @@ def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
 
 
 def test_default_xgboost_importances_when_installed():
+    """Verify default xgboost importances when installed."""
     pytest.importorskip("xgboost")
     data = ModelData(
         features=pl.DataFrame({"a": range(12), "b": range(12)}),
-        target=pl.Series(np.arange(12) % 2), feature_names=["a", "b"],
+        target=pl.Series(np.arange(12) % 2),
+        feature_names=["a", "b"],
     )
-    result = cv_feature_importance(data, cv=CVConfig(n_splits=3), params={"n_estimators": 2})
+    result = cv_feature_importance(
+        data, cv=CVConfig(n_splits=3), params={"n_estimators": 2}
+    )
     assert result.columns == [
-        "feature", "n_folds_selected", "mean_weight", "mean_gain", "mean_cover",
+        "feature",
+        "n_folds_selected",
+        "mean_weight",
+        "mean_gain",
+        "mean_cover",
     ]

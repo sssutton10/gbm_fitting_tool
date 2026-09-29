@@ -11,6 +11,11 @@ from ins_gbm.preprocessing.steps import PreprocessingStep
 
 
 def _raw_data(frame: pl.DataFrame) -> ModelData:
+    """Raw data.
+
+    Args:
+        frame (pl.DataFrame): Input data frame.
+    """
     feature_names = ["x1", "x2", "x3"]
     return ModelData(
         features=frame.select(feature_names),
@@ -24,6 +29,11 @@ def _raw_data(frame: pl.DataFrame) -> ModelData:
 
 
 def test_direct_fit_builds_encoder_matrix_and_predicts_from_raw_data(poisson_raw):
+    """Verify direct fit builds encoder matrix and predicts from raw data.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _raw_data(poisson_raw)
     original_columns = list(data.features.columns)
 
@@ -42,6 +52,11 @@ def test_direct_fit_builds_encoder_matrix_and_predicts_from_raw_data(poisson_raw
 
 
 def test_direct_fit_supports_multiple_targeted_preprocessors(poisson_raw):
+    """Verify direct fit supports multiple targeted preprocessors.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _raw_data(poisson_raw)
     fitted = RandomForestModel(objective="poisson").fit(
         data,
@@ -68,6 +83,11 @@ def test_direct_fit_supports_multiple_targeted_preprocessors(poisson_raw):
 
 
 def test_direct_fit_encoder_requires_schema(poisson_raw):
+    """Verify direct fit encoder requires schema.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _raw_data(poisson_raw)
     data.schema = None
 
@@ -105,6 +125,15 @@ def test_direct_fit_encoder_requires_schema(poisson_raw):
 def test_gbm_wrappers_fit_and_predict_raw_encoded_data(
     poisson_raw, dependency, model_path, class_name, params
 ):
+    """Verify gbm wrappers fit and predict raw encoded data.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        dependency (object): The dependency.
+        model_path (object): The model path.
+        class_name (object): The class name.
+        params (object): Optional model or estimator parameter mapping.
+    """
     import importlib
 
     pytest.importorskip(dependency)

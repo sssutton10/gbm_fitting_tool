@@ -1,5 +1,3 @@
-from typing import Optional
-
 import polars as pl
 
 from .model_data import ModelData, Objective
@@ -9,17 +7,33 @@ from .schema import FeatureSchema, infer_schema
 def load_model_data(
     path: str,
     target: str,
-    exposure: Optional[str] = None,
-    weight: Optional[str] = None,
-    feature_cols: Optional[list[str]] = None,
-    schema: Optional[FeatureSchema] = None,
-    objective: Optional[Objective] = None,
-    cv_fold: Optional[str] = None,
-    comparison_cols: Optional[list[str]] = None,
+    exposure: str | None = None,
+    weight: str | None = None,
+    feature_cols: list[str] | None = None,
+    schema: FeatureSchema | None = None,
+    objective: Objective | None = None,
+    cv_fold: str | None = None,
+    comparison_cols: list[str] | None = None,
     # Note: `offset` is intentionally absent here. It is not a load-time parameter
     # because it is computed after loading (e.g. from a base model's predictions)
     # and set via ModelData.with_offset().
 ) -> ModelData:
+    """Read a data file and assemble a validated model data object.
+
+    Args:
+        path (str): Path to the input data file.
+        target (str): Observed outcome series aligned with feature rows.
+        exposure (Optional[str]): Positive exposure series aligned with rows, when used.
+            Optional.
+        weight (Optional[str]): Nonnegative observation weight series aligned with rows.
+            Optional.
+        feature_cols (Optional[list[str]]): Names of feature columns to load. Optional.
+        schema (Optional[FeatureSchema]): Optional feature schema; inferred when omitted.
+        objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
+        cv_fold (Optional[str]): Optional integer fold assignment for each row.
+        comparison_cols (Optional[list[str]]): Column names to load as benchmark predictions.
+            Optional.
+    """
     df = pl.read_parquet(path)
 
     if feature_cols is None:

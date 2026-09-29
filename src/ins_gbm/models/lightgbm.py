@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -15,7 +15,6 @@ from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
-
 
 Objective = Literal["poisson", "gamma"]
 
@@ -37,10 +36,15 @@ class LightGBMModel:
     Before constructing the ``Dataset``, the wrapper converts that sentinel back
     to ``NaN`` so LightGBM can apply its native missing-value branch logic
     (learns the optimal direction at each split).
+
+    Args:
+        objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
     """
-    objective: Optional[Objective] = None
+
+    objective: Objective | None = None
 
     def capabilities(self) -> ModelCapabilities:
+        """Describe supported objectives and model features."""
         return ModelCapabilities(
             supports_poisson=True,
             supports_gamma=True,
@@ -50,10 +54,14 @@ class LightGBMModel:
         )
 
     def default_search_space(self) -> dict:
+        """Return Optuna distributions for tunable model parameters."""
         import optuna
+
         return {
             "n_estimators": optuna.distributions.IntDistribution(50, 500),
-            "learning_rate": optuna.distributions.FloatDistribution(0.01, 0.3, log=True),
+            "learning_rate": optuna.distributions.FloatDistribution(
+                0.01, 0.3, log=True
+            ),
             "num_leaves": optuna.distributions.IntDistribution(16, 128),
             "min_child_samples": optuna.distributions.IntDistribution(10, 100),
             "subsample": optuna.distributions.FloatDistribution(0.5, 1.0),
@@ -65,12 +73,22 @@ class LightGBMModel:
     def fit(
         self,
         data: ModelData,
-        params: Optional[dict] = None,
+        params: dict | None = None,
         *,
-        feature_names: Optional[list[str]] = None,
-        encoder: Optional[object] = None,
-        preprocessing: Optional[list[object]] = None,
+        feature_names: list[str] | None = None,
+        encoder: object | None = None,
+        preprocessing: list[object] | None = None,
     ) -> FittedModel:
+        """Fit the model on training data and return a fitted wrapper.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            params (Optional[dict]): Optional model or estimator parameter mapping.
+            feature_names (Optional[list[str]]): Ordered names of input features to use. Optional.
+            encoder (Optional[object]): Optional encoder applied before model fitting.
+            preprocessing (Optional[list[object]]): Ordered preprocessing steps applied before
+                fitting. Optional.
+        """
         import lightgbm as lgb
 
         transform_result = fit_transform_chain(
@@ -95,9 +113,11 @@ class LightGBMModel:
             init_score_parts.append(np.log(series_to_fit_array(data.exposure)))
         if data.offset is not None:
             init_score_parts.append(series_to_fit_array(data.offset))
-        init_score: Optional[np.ndarray] = np.sum(init_score_parts, axis=0) if init_score_parts else None
+        init_score: np.ndarray | None = (
+            np.sum(init_score_parts, axis=0) if init_score_parts else None
+        )
 
-        sample_weight: Optional[np.ndarray] = None
+        sample_weight: np.ndarray | None = None
         if data.weight is not None:
             sample_weight = series_to_fit_array(data.weight)
 
@@ -120,10 +140,16 @@ class LightGBMModel:
         )
 
         feature_names = list(data.feature_names)
+
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = frame_to_fit_array(
-                pred_data.features, pred_data.feature_names
-            )
+            """Predict from the fitted estimator on the requested scale.
+
+            Args:
+                pred_data (ModelData): Prepared model data to score.
+                prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
+                    unavailable for Gamma.
+            """
+            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
             X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
             # LightGBM's default prediction is already on the response scale.
             # Request the tree contribution on the link scale so exposure and
@@ -155,14 +181,21 @@ class LightGBMModel:
                 link = tree_link if offset is None else tree_link + offset
                 return pl.Series(link if prediction_type == "link" else np.exp(link))
 
-        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+        def _importance(importance_type: str | None = None) -> pl.DataFrame:
+            """Return feature importance from the fitted estimator.
+
+            Args:
+                importance_type (Optional[str]): Optional framework-specific importance measure.
+            """
             importance_type = importance_type or "gain"
             if importance_type not in {"gain", "split"}:
                 raise ValueError(
                     "LightGBM importance_type must be one of: 'gain', 'split'"
                 )
             names = booster.feature_name()
-            scores = booster.feature_importance(importance_type=importance_type).astype(float)
+            scores = booster.feature_importance(importance_type=importance_type).astype(
+                float
+            )
             return pl.DataFrame({"feature": names, "importance": scores})
 
         return FittedModel(

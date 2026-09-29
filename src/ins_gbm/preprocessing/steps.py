@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import polars as pl
 
 
 def validate_preprocessing_steps(preprocessors: list[Any]) -> None:
-    """Reject duplicate names among targeted preprocessing steps."""
+    """Reject duplicate names among targeted preprocessing steps.
+
+    Args:
+        preprocessors (list[Any]): Ordered preprocessing steps or their fitted counterparts.
+    """
     names = [step.name for step in preprocessors if isinstance(step, PreprocessingStep)]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -23,6 +27,11 @@ class PreprocessingStep:
     The wrapped preprocessor is fit only on ``feature_names``.  Its outputs are
     prefixed with ``name`` before replacing those input columns in the current
     feature frame.
+
+    Args:
+        name (str): Name of the requested feature, model, metric, or stage.
+        preprocessor (Any): Optional preprocessing step.
+        feature_names (list[str]): Ordered names of input features to use.
     """
 
     name: str
@@ -32,8 +41,16 @@ class PreprocessingStep:
     def fit(
         self,
         features: pl.DataFrame,
-        target: Optional[pl.Series] = None,
-    ) -> "FittedPreprocessingStep":
+        target: pl.Series | None = None,
+    ) -> FittedPreprocessingStep:
+        """Fit this transformation on training features.
+
+        Args:
+            features (pl.DataFrame): Input feature frame; rows align with the target and optional
+                series.
+            target (Optional[pl.Series]): Observed outcome series aligned with feature rows.
+                Optional.
+        """
         if not self.name:
             raise ValueError("PreprocessingStep.name must be non-empty")
         input_names = list(self.feature_names)
@@ -73,7 +90,14 @@ class PreprocessingStep:
 
 @dataclass
 class FittedPreprocessingStep:
-    """Fitted counterpart of :class:`PreprocessingStep`."""
+    """Fitted counterpart of :class:`PreprocessingStep`.
+
+    Args:
+        name (str): Name of the requested feature, model, metric, or stage.
+        fitted_preprocessor (Any): Preprocessor fitted on the selected input columns.
+        input_names (list[str]): Input feature names used to fit this transform.
+        output_names (list[str]): Names of features produced by the transform.
+    """
 
     name: str
     fitted_preprocessor: Any
@@ -81,6 +105,12 @@ class FittedPreprocessingStep:
     output_names: list[str]
 
     def transform(self, features: pl.DataFrame) -> pl.DataFrame:
+        """Apply the fitted transformation to input features.
+
+        Args:
+            features (pl.DataFrame): Input feature frame; rows align with the target and optional
+                series.
+        """
         missing = [name for name in self.input_names if name not in features.columns]
         if missing:
             raise ValueError(
@@ -99,7 +129,9 @@ class FittedPreprocessingStep:
             raise ValueError(
                 f"PreprocessingStep {self.name!r} produced unexpected output columns"
             )
-        transformed = transformed.rename(dict(zip(transformed.columns, self.output_names)))
+        transformed = transformed.rename(
+            dict(zip(transformed.columns, self.output_names))
+        )
 
         selected = set(self.input_names)
         first_input = next(column for column in features.columns if column in selected)
@@ -112,7 +144,9 @@ class FittedPreprocessingStep:
         return pl.DataFrame(columns)
 
     def output_feature_names(self) -> list[str]:
+        """Return names of columns produced by this transform."""
         return list(self.output_names)
 
     def component_mapping(self) -> dict[str, list[str]]:
+        """Map output components to their contributing inputs."""
         return {name: list(self.input_names) for name in self.output_names}

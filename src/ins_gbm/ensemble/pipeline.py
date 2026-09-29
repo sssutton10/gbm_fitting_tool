@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import polars as pl
 
@@ -13,25 +13,55 @@ if TYPE_CHECKING:
 
 @dataclass
 class EnsembleResult:
-    """Result of running an :class:`EnsemblePipeline`."""
+    """Result of running an :class:`EnsemblePipeline`.
+
+    Args:
+        ensemble (Any): Fitted blending or stacking ensemble.
+        base_pipelines (list['FittedPipeline']): Fitted pipelines used by the ensemble.
+    """
+
     ensemble: Any  # FittedBlendingEnsemble or FittedStackingEnsemble
-    base_pipelines: list["FittedPipeline"]
+    base_pipelines: list[FittedPipeline]
 
     def predict(self, data: ModelData) -> pl.Series:
-        """Generate ensemble predictions on *data*."""
+        """Generate ensemble predictions on *data*.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+        """
         return self.ensemble.predict(data)
 
     def evaluate(self, holdout_data: ModelData):
-        """Evaluate the fitted ensemble on separately supplied holdout data."""
+        """Evaluate the fitted ensemble on separately supplied holdout data.
+
+        Args:
+            holdout_data (ModelData): Separate data used for evaluation.
+        """
         from ins_gbm.evaluation.report import EvaluationReport
         from ins_gbm.models.base import FittedModel
 
         def _predict_fn(data: ModelData, prediction_type: str) -> pl.Series:
+            """Predict through the ensemble using the fitted model interface.
+
+            Args:
+                data (ModelData): Model data to fit, transform, predict, or evaluate.
+                prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
+                    unavailable for Gamma.
+            """
             return self.ensemble.predict(data)
 
-        def _importance_fn(_importance_type: Optional[str] = None):
-            return pl.DataFrame({"feature": pl.Series([], dtype=pl.Utf8),
-                                 "importance": pl.Series([], dtype=pl.Float64)})
+        def _importance_fn(_importance_type: str | None = None):
+            """Return ensemble feature importance when available.
+
+            Args:
+                _importance_type (Optional[str]): Optional importance measure requested by the caller.
+            """
+            return pl.DataFrame(
+                {
+                    "feature": pl.Series([], dtype=pl.Utf8),
+                    "importance": pl.Series([], dtype=pl.Float64),
+                }
+            )
 
         first = self.base_pipelines[0]
         proxy_model = FittedModel(
@@ -79,15 +109,19 @@ class EnsemblePipeline:
         Random seed.
     meta_learner : sklearn estimator or None
         Meta-learner for stacking.  Defaults to Ridge.
+
+    refit : {"fixed", "retune"}
+        Use fitted model parameters in each OOF fold, or retune each fold.
     """
-    fitted_pipelines: list["FittedPipeline"]
+
+    fitted_pipelines: list[FittedPipeline]
     method: Literal["blending", "stacking"] = "blending"
     blend_mode: str = "fixed"
-    blend_weights: Optional[list[float]] = None
-    validation_data: Optional[ModelData] = None
+    blend_weights: list[float] | None = None
+    validation_data: ModelData | None = None
     cv_folds: int = 5
     seed: int = 42
-    meta_learner: Optional[Any] = None
+    meta_learner: Any | None = None
     refit: str = "fixed"
 
     def run(self) -> EnsembleResult:
@@ -108,7 +142,9 @@ class EnsemblePipeline:
         )
 
     def _run_blending(self):
+        """Fit a blending ensemble from the configured pipelines."""
         from ins_gbm.ensemble.blending import BlendingEnsemble
+
         blender = BlendingEnsemble(
             mode=self.blend_mode,
             weights=self.blend_weights,
@@ -119,7 +155,9 @@ class EnsemblePipeline:
         return blender.fit(self.fitted_pipelines, validation_data=self.validation_data)
 
     def _run_stacking(self):
+        """Fit a stacking ensemble from the configured pipelines."""
         from ins_gbm.ensemble.stacking import StackingEnsemble
+
         stacker = StackingEnsemble(
             cv_folds=self.cv_folds,
             seed=self.seed,

@@ -1,34 +1,34 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
 from tqdm.auto import tqdm
 
-from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.folds import CVConfig
+from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.evaluation.metrics import (
     _poisson_rate_metric_inputs,
-    poisson_deviance,
     gamma_deviance,
-    rmse,
     mae,
+    poisson_deviance,
+    rmse,
 )
-from ins_gbm.progress import ProgressCallback, ProgressEvent, PipelineCancelled
 from ins_gbm.preprocessing.chain import fit_transform_chain
-
+from ins_gbm.progress import PipelineCancelled, ProgressCallback, ProgressEvent
 
 _METRIC_FN = {
     "poisson_deviance": poisson_deviance,
@@ -39,46 +39,65 @@ _METRIC_FN = {
 
 
 def _create_journal_storage(file_path: str) -> Any:
-    """Create process-safe JournalStorage with Windows-compatible locking."""
+    """Create process-safe JournalStorage with Windows-compatible locking.
+
+    Args:
+        file_path (str): Path to the output journal or file.
+    """
     from optuna.storages import JournalStorage
     from optuna.storages.journal import (
         JournalFileBackend,
         JournalFileOpenLock,
     )
 
-    lock = (
-        JournalFileOpenLock(file_path)
-        if platform.system() == "Windows"
-        else None
-    )
-    return JournalStorage(
-        JournalFileBackend(file_path=file_path, lock_obj=lock)
-    )
+    lock = JournalFileOpenLock(file_path) if platform.system() == "Windows" else None
+    return JournalStorage(JournalFileBackend(file_path=file_path, lock_obj=lock))
 
 
 @dataclass
 class _ObjectiveConfig:
-    """Serializable inputs shared by local and subprocess trial objectives."""
+    """Serializable inputs shared by local and subprocess trial objectives.
+
+    Args:
+        tuning_data (ModelData): Model data used for tuning.
+        model (Any): Model wrapper or fitted model to use.
+        encoder (Optional[Any]): Optional encoder applied before model fitting.
+        selector (Optional[Any]): Optional feature selector fitted on training rows.
+        preprocessing_chain (list[Any]): Preprocessing steps applied within each trial.
+        encoder_schema (Optional[Any]): Feature schema passed to the encoder.
+        model_selected_features (Optional[list[str]]): Optional feature subset applied after
+            preprocessing.
+        fold_splits (list[tuple[np.ndarray, np.ndarray]]): Training and validation index pairs.
+        search_space (dict[str, Any]): Parameter distributions available to the tuner.
+        metric (str): Metric name used for scoring or selection.
+        base_params (dict[str, Any]): Base model parameters merged with tuned values.
+        cancellation_path (Optional[str]): File used to signal cancellation to workers.
+    """
 
     tuning_data: ModelData
     model: Any
-    encoder: Optional[Any]
-    selector: Optional[Any]
+    encoder: Any | None
+    selector: Any | None
     preprocessing_chain: list[Any]
-    encoder_schema: Optional[Any]
-    model_selected_features: Optional[list[str]]
+    encoder_schema: Any | None
+    model_selected_features: list[str] | None
     fold_splits: list[tuple[np.ndarray, np.ndarray]]
     search_space: dict[str, Any]
     metric: str
     base_params: dict[str, Any]
-    cancellation_path: Optional[str] = None
+    cancellation_path: str | None = None
 
 
 def _select_schema(
-    schema: Optional[FeatureSchema],
-    feature_names: Optional[list[str]],
-) -> Optional[FeatureSchema]:
-    """Restrict an explicit encoder schema to a runtime feature subset."""
+    schema: FeatureSchema | None,
+    feature_names: list[str] | None,
+) -> FeatureSchema | None:
+    """Restrict an explicit encoder schema to a runtime feature subset.
+
+    Args:
+        schema (Optional[FeatureSchema]): Optional feature schema; inferred when omitted.
+        feature_names (Optional[list[str]]): Ordered names of input features to use.
+    """
     if schema is None or feature_names is None:
         return schema
     selected = set(feature_names)
@@ -91,7 +110,15 @@ def _select_schema(
 
 
 def _suggest_from_distribution(trial: Any, name: str, dist: Any) -> Any:
+    """Ask an Optuna trial for a value from a search distribution.
+
+    Args:
+        trial (Any): Current Optuna trial.
+        name (str): Name of the requested feature, model, metric, or stage.
+        dist (Any): Optuna parameter distribution.
+    """
     import optuna
+
     if isinstance(dist, optuna.distributions.IntDistribution):
         return trial.suggest_int(name, dist.low, dist.high, log=dist.log)
     elif isinstance(dist, optuna.distributions.FloatDistribution):
@@ -99,29 +126,36 @@ def _suggest_from_distribution(trial: Any, name: str, dist: Any) -> Any:
     elif isinstance(dist, optuna.distributions.CategoricalDistribution):
         return trial.suggest_categorical(name, dist.choices)
     else:
-        raise ValueError(f"Unsupported distribution type: {type(dist)}")
+        raise ValueError(f"Unsupported distribution type: {type(dist)}")  # noqa: TRY004
 
 
 def _evaluate_trial(
     trial: Any,
     config: _ObjectiveConfig,
-    stop_requested: Optional[Callable[[], bool]] = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> float:
-    """Evaluate one Optuna trial from serializable configuration."""
+    """Evaluate one Optuna trial from serializable configuration.
+
+    Args:
+        trial (Any): Current Optuna trial.
+        config (_ObjectiveConfig): Configuration for model fitting or tuning.
+        stop_requested (Optional[Callable[[], bool]]): Callback that returns true when
+            cancellation is requested.
+    """
     import optuna
 
     params = dict(config.base_params)
-    params.update({
-        name: _suggest_from_distribution(trial, name, dist)
-        for name, dist in config.search_space.items()
-    })
+    params.update(
+        {
+            name: _suggest_from_distribution(trial, name, dist)
+            for name, dist in config.search_space.items()
+        }
+    )
     metric_fn = _METRIC_FN[config.metric]
 
     fold_scores: list[float] = []
     for fold_idx, (train_idx, val_idx) in enumerate(config.fold_splits):
-        cancelled = (
-            stop_requested is not None and stop_requested()
-        ) or (
+        cancelled = (stop_requested is not None and stop_requested()) or (
             config.cancellation_path is not None
             and os.path.exists(config.cancellation_path)
         )
@@ -147,17 +181,12 @@ def _evaluate_trial(
 
         metric_actual = val_data.target
         metric_predicted = preds
-        if (
-            val_data.objective == "poisson"
-            and config.metric == "poisson_deviance"
-        ):
-            metric_actual, metric_predicted, weights = (
-                _poisson_rate_metric_inputs(
-                    val_data.target,
-                    preds,
-                    val_data.exposure,
-                    val_data.weight,
-                )
+        if val_data.objective == "poisson" and config.metric == "poisson_deviance":
+            metric_actual, metric_predicted, weights = _poisson_rate_metric_inputs(
+                val_data.target,
+                preds,
+                val_data.exposure,
+                val_data.weight,
             )
         else:
             # Response predictions are expected counts for frequency models,
@@ -178,6 +207,11 @@ def _evaluate_trial(
 
 
 def _study_history(study: Any) -> pl.DataFrame:
+    """Convert completed Optuna trials into a tabular history.
+
+    Args:
+        study (Any): Optuna study containing the trial results.
+    """
     rows = []
     for trial in study.trials:
         if trial.value is not None:
@@ -187,10 +221,12 @@ def _study_history(study: Any) -> pl.DataFrame:
 
     if rows:
         return pl.DataFrame(rows)
-    return pl.DataFrame({
-        "trial": pl.Series([], dtype=pl.Int64),
-        "value": pl.Series([], dtype=pl.Float64),
-    })
+    return pl.DataFrame(
+        {
+            "trial": pl.Series([], dtype=pl.Int64),
+            "value": pl.Series([], dtype=pl.Float64),
+        }
+    )
 
 
 @dataclass
@@ -201,33 +237,51 @@ class HyperparameterTuner:
     each training fold to prevent target leakage. ``backend="thread"`` retains
     Optuna's in-process concurrency; ``backend="process"`` coordinates
     subprocess workers through JournalStorage.
+
+    Args:
+        n_trials (int): Number of Optuna trials to run. Defaults to 20.
+        cv_folds (int): Number of cross-validation folds. Defaults to 5.
+        metric (Optional[str]): One of "poisson_deviance", "gamma_deviance", "rmse", or
+            "mae"; defaults to deviance for the resolved objective.
+        seed (int): Random seed for reproducible fitting or splitting. Defaults to 42.
+        use_data_folds (Optional[bool]): Whether to use fold assignments stored on the input
+            data. Optional.
+        cv (Optional[CVConfig]): Cross-validation configuration or explicit fold assignments.
+            Optional.
+        n_jobs (int): Number of concurrent tuning workers. Defaults to 1.
+        backend (Literal['thread', 'process']): Tuning backend: "thread" or "process". Defaults
+            to 'thread'.
+        journal_path (Optional[str | os.PathLike[str]]): Optional path for the process backend
+            journal.
+        show_progress_bar (bool): Whether to display a tuning progress bar. Defaults to True.
     """
+
     n_trials: int = 20
     cv_folds: int = 5
-    metric: Optional[str] = None
+    metric: str | None = None
     seed: int = 42
-    use_data_folds: Optional[bool] = None
-    cv: Optional[CVConfig] = None
+    use_data_folds: bool | None = None
+    cv: CVConfig | None = None
     n_jobs: int = 1
     backend: Literal["thread", "process"] = "thread"
-    journal_path: Optional[str | os.PathLike[str]] = None
+    journal_path: str | os.PathLike[str] | None = None
     show_progress_bar: bool = True
 
     def tune(
         self,
         data: ModelData,
         model: Any,
-        encoder: Optional[Any] = None,
-        selector: Optional[Any] = None,
-        preprocessor: Optional[Any] = None,
-        preprocessors: Optional[list[Any]] = None,
-        schema: Optional[Any] = None,
+        encoder: Any | None = None,
+        selector: Any | None = None,
+        preprocessor: Any | None = None,
+        preprocessors: list[Any] | None = None,
+        schema: Any | None = None,
         *,
-        feature_names: Optional[list[str]] = None,
-        model_selected_features: Optional[list[str]] = None,
-        progress: Optional[ProgressCallback] = None,
-        should_stop: Optional[Any] = None,
-        base_params: Optional[dict] = None,
+        feature_names: list[str] | None = None,
+        model_selected_features: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+        should_stop: Any | None = None,
+        base_params: dict | None = None,
     ) -> tuple[dict, pl.DataFrame]:
         """Run hyperparameter search and return (best_params, trial_history).
 
@@ -250,6 +304,14 @@ class HyperparameterTuner:
             FeatureSchema passed to encoder.fit() when encoder is provided.
         feature_names : optional
             Ordered subset of raw features to use for every trial and fold.
+        model_selected_features : optional
+            Fixed feature subset applied after preprocessing in each fold.
+        progress : optional
+            Callback receiving trial progress events.
+        should_stop : optional
+            Callback that requests tuning cancellation when true.
+        base_params : optional
+            Base model parameters merged with each trial's suggestions.
 
         Returns
         -------
@@ -258,86 +320,27 @@ class HyperparameterTuner:
         trial_history : pl.DataFrame
             One row per completed trial with columns ``trial``, ``value``,
             plus one column per hyperparameter.
+
         """
         import optuna
-        from ins_gbm.data.folds import resolve_folds
 
-        if (
-            not isinstance(self.n_jobs, int)
-            or isinstance(self.n_jobs, bool)
-            or self.n_jobs == 0
-            or self.n_jobs < -1
-        ):
-            raise ValueError("n_jobs must be -1 or a positive integer")
-        if self.backend not in {"thread", "process"}:
-            raise ValueError("backend must be 'thread' or 'process'")
-        if self.backend == "thread" and self.journal_path is not None:
-            raise ValueError(
-                "journal_path is only supported with backend='process'"
-            )
-        metric = self.metric or (
-            "gamma_deviance" if (getattr(model, "objective", None) or data.objective) == "gamma"
-            else "poisson_deviance"
-        )
-        if metric not in _METRIC_FN:
-            raise ValueError(
-                f"Unknown metric: {metric!r}. Choose from {list(_METRIC_FN)}"
-            )
-        objective = getattr(model, "objective", None) or data.objective or "poisson"
-        if metric in {"poisson_deviance", "gamma_deviance"} and not metric.startswith(objective):
-            raise ValueError(f"metric {metric!r} is incompatible with objective {objective!r}")
-
-        tuning_data = (
-            data.select_features(feature_names)
-            if feature_names is not None
-            else data
-        )
-        encoder_schema = _select_schema(
-            schema if schema is not None else tuning_data.schema,
-            feature_names,
-        )
-
-        search_space = model.default_search_space()
-        if preprocessors is not None and preprocessor is not None:
-            raise ValueError("Pass either preprocessor or preprocessors, not both")
-        preprocessing_chain = (
-            list(preprocessors)
-            if preprocessors is not None
-            else ([preprocessor] if preprocessor is not None else [])
-        )
-        from ins_gbm.preprocessing.steps import validate_preprocessing_steps
-
-        validate_preprocessing_steps(preprocessing_chain)
-
-        if self.cv is not None and self.use_data_folds is not None:
-            raise ValueError("Pass either cv or use_data_folds, not both")
-        cv_config = self.cv or CVConfig(
-            n_splits=self.cv_folds,
-            seed=self.seed,
-            folds=(
-                "auto" if self.use_data_folds is None
-                else ("predefined" if self.use_data_folds else "random")
-            ),
-        )
-        _, fold_splits = resolve_folds(tuning_data, cv_config)
-
-        config = _ObjectiveConfig(
-            tuning_data=tuning_data,
+        self._validate_settings()
+        config = self._objective_config(
+            data=data,
             model=model,
             encoder=encoder,
             selector=selector,
-            preprocessing_chain=preprocessing_chain,
-            encoder_schema=encoder_schema,
+            preprocessor=preprocessor,
+            preprocessors=preprocessors,
+            schema=schema,
+            feature_names=feature_names,
             model_selected_features=model_selected_features,
-            fold_splits=fold_splits,
-            search_space=search_space,
-            metric=metric,
-            base_params=dict(base_params or {}),
+            base_params=base_params,
         )
-
         stop_lock = Lock()
 
         def stop_requested() -> bool:
+            """Check whether tuning cancellation was requested."""
             if should_stop is None:
                 return False
             with stop_lock:
@@ -375,17 +378,134 @@ class HyperparameterTuner:
 
         return {**dict(base_params or {}), **best_params}, history
 
+    def _validate_settings(self) -> None:
+        """Reject unsupported tuning worker and backend settings."""
+        if (
+            not isinstance(self.n_jobs, int)
+            or isinstance(self.n_jobs, bool)
+            or self.n_jobs == 0
+            or self.n_jobs < -1
+        ):
+            raise ValueError("n_jobs must be -1 or a positive integer")
+        if self.backend not in {"thread", "process"}:
+            raise ValueError("backend must be 'thread' or 'process'")
+        if self.backend == "thread" and self.journal_path is not None:
+            raise ValueError("journal_path is only supported with backend='process'")
+
+    def _objective_config(
+        self,
+        *,
+        data,
+        model,
+        encoder,
+        selector,
+        preprocessor,
+        preprocessors,
+        schema,
+        feature_names,
+        model_selected_features,
+        base_params,
+    ) -> _ObjectiveConfig:
+        """Build serializable inputs for each tuning trial.
+
+        Args:
+            data (object): Model data to fit, transform, predict, or evaluate.
+            model (object): Model wrapper or fitted model to use.
+            encoder (object): Optional encoder applied before model fitting.
+            selector (object): Optional feature selector fitted on training rows.
+            preprocessor (object): Optional preprocessing step.
+            preprocessors (object): Ordered preprocessing steps or their fitted counterparts.
+            schema (object): Optional feature schema; inferred when omitted.
+            feature_names (object): Ordered names of input features to use.
+            model_selected_features (object): Optional feature subset applied after preprocessing.
+            base_params (object): Base model parameters merged with tuned values.
+        """
+        from ins_gbm.data.folds import resolve_folds
+
+        objective = getattr(model, "objective", None) or data.objective or "poisson"
+        metric = self.metric or (
+            "gamma_deviance" if objective == "gamma" else "poisson_deviance"
+        )
+        if metric not in _METRIC_FN:
+            raise ValueError(
+                f"Unknown metric: {metric!r}. Choose from {list(_METRIC_FN)}"
+            )
+        if metric in {"poisson_deviance", "gamma_deviance"} and not metric.startswith(
+            objective
+        ):
+            raise ValueError(
+                f"metric {metric!r} is incompatible with objective {objective!r}"
+            )
+
+        tuning_data = (
+            data.select_features(feature_names) if feature_names is not None else data
+        )
+        encoder_schema = _select_schema(
+            schema if schema is not None else tuning_data.schema,
+            feature_names,
+        )
+
+        search_space = model.default_search_space()
+        if preprocessors is not None and preprocessor is not None:
+            raise ValueError("Pass either preprocessor or preprocessors, not both")
+        preprocessing_chain = (
+            list(preprocessors)
+            if preprocessors is not None
+            else ([preprocessor] if preprocessor is not None else [])
+        )
+        from ins_gbm.preprocessing.steps import validate_preprocessing_steps
+
+        validate_preprocessing_steps(preprocessing_chain)
+
+        if self.cv is not None and self.use_data_folds is not None:
+            raise ValueError("Pass either cv or use_data_folds, not both")
+        cv_config = self.cv or CVConfig(
+            n_splits=self.cv_folds,
+            seed=self.seed,
+            folds=(
+                "auto"
+                if self.use_data_folds is None
+                else ("predefined" if self.use_data_folds else "random")
+            ),
+        )
+        _, fold_splits = resolve_folds(tuning_data, cv_config)
+
+        config = _ObjectiveConfig(
+            tuning_data=tuning_data,
+            model=model,
+            encoder=encoder,
+            selector=selector,
+            preprocessing_chain=preprocessing_chain,
+            encoder_schema=encoder_schema,
+            model_selected_features=model_selected_features,
+            fold_splits=fold_splits,
+            search_space=search_space,
+            metric=metric,
+            base_params=dict(base_params or {}),
+        )
+        return config
+
     def _optimize_threads(
         self,
         *,
         optuna: Any,
         config: _ObjectiveConfig,
         trial_progress: Any,
-        progress: Optional[ProgressCallback],
+        progress: ProgressCallback | None,
         stop_requested: Callable[[], bool],
         has_should_stop: bool,
     ) -> Any:
-        """Run the existing in-process Optuna thread backend."""
+        """Run the existing in-process Optuna thread backend.
+
+        Args:
+            optuna (Any): Imported Optuna module used to create the study.
+            config (_ObjectiveConfig): Configuration for model fitting or tuning.
+            trial_progress (Any): Progress bar updated as trials finish.
+            progress (Optional[ProgressCallback]): Optional callback receiving progress events.
+            stop_requested (Callable[[], bool]): Callback that returns true when cancellation is
+                requested.
+            has_should_stop (bool): Whether a cancellation callback was supplied.
+        """
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
             direction="minimize",
@@ -398,23 +518,30 @@ class HyperparameterTuner:
 
             def _on_trial(study: Any, trial: Any) -> None:
                 # Optuna invokes callbacks from worker threads when n_jobs > 1.
+                """Update progress after an Optuna trial finishes.
+
+                Args:
+                    study (Any): Optuna study containing the trial results.
+                    trial (Any): Current Optuna trial.
+                """
                 with callback_lock:
                     trial_progress.update()
                     if progress is not None and trial.value is not None:
                         finished = sum(
-                            frozen.state.is_finished()
-                            for frozen in study.trials
+                            frozen.state.is_finished() for frozen in study.trials
                         )
-                        progress(ProgressEvent(
-                            stage="tuning",
-                            message=f"trial {trial.number} complete",
-                            current=finished,
-                            total=self.n_trials,
-                            payload={
-                                "trial_value": trial.value,
-                                "best_value": study.best_value,
-                            },
-                        ))
+                        progress(
+                            ProgressEvent(
+                                stage="tuning",
+                                message=f"trial {trial.number} complete",
+                                current=finished,
+                                total=self.n_trials,
+                                payload={
+                                    "trial_value": trial.value,
+                                    "best_value": study.best_value,
+                                },
+                            )
+                        )
                     if stop_requested():
                         study.stop()
 
@@ -434,17 +561,22 @@ class HyperparameterTuner:
         optuna: Any,
         config: _ObjectiveConfig,
         trial_progress: Any,
-        progress: Optional[ProgressCallback],
+        progress: ProgressCallback | None,
         stop_requested: Callable[[], bool],
     ) -> tuple[dict, pl.DataFrame]:
-        """Run trials in subprocesses coordinated by JournalStorage."""
+        """Run trials in subprocesses coordinated by JournalStorage.
+
+        Args:
+            optuna (Any): Imported Optuna module used to create the study.
+            config (_ObjectiveConfig): Configuration for model fitting or tuning.
+            trial_progress (Any): Progress bar updated as trials finish.
+            progress (Optional[ProgressCallback]): Optional callback receiving progress events.
+            stop_requested (Callable[[], bool]): Callback that returns true when cancellation is
+                requested.
+        """
         import cloudpickle
 
-        worker_count = (
-            os.cpu_count() or 1
-            if self.n_jobs == -1
-            else self.n_jobs
-        )
+        worker_count = os.cpu_count() or 1 if self.n_jobs == -1 else self.n_jobs
         worker_count = min(worker_count, self.n_trials)
         if worker_count < 1:
             raise ValueError("n_trials must be a positive integer")
@@ -479,101 +611,168 @@ class HyperparameterTuner:
                 pruner=optuna.pruners.MedianPruner(),
             )
 
-            base_trials, extra_trials = divmod(self.n_trials, worker_count)
-            quotas = [
-                base_trials + (worker_index < extra_trials)
-                for worker_index in range(worker_count)
-            ]
             processes: list[subprocess.Popen] = []
             log_handles: list[Any] = []
             log_paths: list[Path] = []
 
             try:
-                for worker_index, quota in enumerate(quotas):
-                    log_path = temp_path / f"worker-{worker_index}.log"
-                    log_handle = log_path.open("w", encoding="utf-8")
-                    command = [
-                        sys.executable,
-                        "-m",
-                        "ins_gbm.tuning._process_worker",
-                        str(payload_path),
-                        str(journal_path),
-                        study_name,
-                        str(quota),
-                        str(self.seed + worker_index),
-                    ]
-                    processes.append(subprocess.Popen(
-                        command,
-                        stdout=log_handle,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                    ))
-                    log_handles.append(log_handle)
-                    log_paths.append(log_path)
-
-                seen_trials: set[int] = set()
-                cancelled = False
-                while True:
-                    if stop_requested() and not cancelled:
-                        cancellation_path.touch()
-                        cancelled = True
-
-                    self._report_process_progress(
-                        study=study,
-                        seen_trials=seen_trials,
-                        trial_progress=trial_progress,
-                        progress=progress,
-                    )
-
-                    return_codes = [process.poll() for process in processes]
-                    failed_index = next(
-                        (
-                            index
-                            for index, code in enumerate(return_codes)
-                            if code not in (None, 0)
-                        ),
-                        None,
-                    )
-                    if failed_index is not None and not cancelled:
-                        cancellation_path.touch(exist_ok=True)
-                        for process in processes:
-                            if process.poll() is None:
-                                process.terminate()
-                        for process in processes:
-                            process.wait()
-                        for handle in log_handles:
-                            handle.flush()
-                        details = log_paths[failed_index].read_text(
-                            encoding="utf-8"
-                        )
-                        raise RuntimeError(
-                            f"Hyperparameter worker {failed_index} failed:\n"
-                            f"{details.strip()}"
-                        )
-                    if all(code is not None for code in return_codes):
-                        break
-                    time.sleep(0.05)
-
-                self._report_process_progress(
+                self._start_workers(
+                    worker_count,
+                    temp_path,
+                    payload_path,
+                    journal_path,
+                    study_name,
+                    processes,
+                    log_handles,
+                    log_paths,
+                )
+                cancelled = self._wait_for_workers(
                     study=study,
-                    seen_trials=seen_trials,
+                    processes=processes,
+                    log_handles=log_handles,
+                    log_paths=log_paths,
+                    cancellation_path=cancellation_path,
                     trial_progress=trial_progress,
                     progress=progress,
+                    stop_requested=stop_requested,
                 )
                 if cancelled:
                     raise PipelineCancelled("cancelled during hyperparameter tuning")
                 # Materialize results while a temporary journal still exists.
                 return study.best_params, _study_history(study)
             except BaseException:
-                for process in processes:
-                    if process.poll() is None:
-                        process.terminate()
-                for process in processes:
-                    process.wait()
+                self._stop_workers(processes)
                 raise
             finally:
                 for handle in log_handles:
                     handle.close()
+
+    def _start_workers(
+        self,
+        worker_count,
+        temp_path,
+        payload_path,
+        journal_path,
+        study_name,
+        processes,
+        log_handles,
+        log_paths,
+    ) -> None:
+        """Start subprocesses and retain their logs for error reporting.
+
+        Args:
+            worker_count (object): Number of worker subprocesses to start.
+            temp_path (object): Temporary directory for worker inputs and logs.
+            payload_path (object): Serialized trial configuration read by workers.
+            journal_path (object): Optional path for the process backend journal.
+            study_name (object): Name of the shared Optuna study.
+            processes (object): Worker subprocesses to manage.
+            log_handles (object): Open handles capturing worker output.
+            log_paths (object): Paths to worker log files.
+        """
+        base_trials, extra_trials = divmod(self.n_trials, worker_count)
+        for worker_index in range(worker_count):
+            quota = base_trials + (worker_index < extra_trials)
+            log_path = temp_path / f"worker-{worker_index}.log"
+            log_handle = log_path.open("w", encoding="utf-8")
+            log_handles.append(log_handle)
+            log_paths.append(log_path)
+            command = [
+                sys.executable,
+                "-m",
+                "ins_gbm.tuning._process_worker",
+                str(payload_path),
+                str(journal_path),
+                study_name,
+                str(quota),
+                str(self.seed + worker_index),
+            ]
+            processes.append(
+                subprocess.Popen(
+                    command,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            )
+
+    @staticmethod
+    def _stop_workers(processes: list[subprocess.Popen]) -> None:
+        """Terminate running tuning workers and wait for their exit.
+
+        Args:
+            processes (list[subprocess.Popen]): Worker subprocesses to manage.
+        """
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            process.wait()
+
+    def _wait_for_workers(
+        self,
+        *,
+        study,
+        processes,
+        log_handles,
+        log_paths,
+        cancellation_path,
+        trial_progress,
+        progress,
+        stop_requested,
+    ) -> bool:
+        """Monitor workers, replay progress, and return cancellation status.
+
+        Args:
+            study (object): Optuna study containing the trial results.
+            processes (object): Worker subprocesses to manage.
+            log_handles (object): Open handles capturing worker output.
+            log_paths (object): Paths to worker log files.
+            cancellation_path (object): File used to signal cancellation to workers.
+            trial_progress (object): Progress bar updated as trials finish.
+            progress (object): Optional callback receiving progress events.
+            stop_requested (object): Callback that returns true when cancellation is requested.
+        """
+        seen_trials: set[int] = set()
+        cancelled = False
+        while True:
+            if stop_requested() and not cancelled:
+                cancellation_path.touch()
+                cancelled = True
+            self._report_process_progress(
+                study=study,
+                seen_trials=seen_trials,
+                trial_progress=trial_progress,
+                progress=progress,
+            )
+            return_codes = [process.poll() for process in processes]
+            failed_index = next(
+                (
+                    index
+                    for index, code in enumerate(return_codes)
+                    if code not in (None, 0)
+                ),
+                None,
+            )
+            if failed_index is not None and not cancelled:
+                cancellation_path.touch(exist_ok=True)
+                self._stop_workers(processes)
+                for handle in log_handles:
+                    handle.flush()
+                details = log_paths[failed_index].read_text(encoding="utf-8")
+                raise RuntimeError(
+                    f"Hyperparameter worker {failed_index} failed:\n{details.strip()}"
+                )
+            if all(code is not None for code in return_codes):
+                break
+            time.sleep(0.05)
+        self._report_process_progress(
+            study=study,
+            seen_trials=seen_trials,
+            trial_progress=trial_progress,
+            progress=progress,
+        )
+        return cancelled
 
     def _report_process_progress(
         self,
@@ -581,9 +780,16 @@ class HyperparameterTuner:
         study: Any,
         seen_trials: set[int],
         trial_progress: Any,
-        progress: Optional[ProgressCallback],
+        progress: ProgressCallback | None,
     ) -> None:
-        """Replay newly finished JournalStorage trials in the parent process."""
+        """Replay newly finished JournalStorage trials in the parent process.
+
+        Args:
+            study (Any): Optuna study containing the trial results.
+            seen_trials (set[int]): Trial IDs already reported to the progress callback.
+            trial_progress (Any): Progress bar updated as trials finish.
+            progress (Optional[ProgressCallback]): Optional callback receiving progress events.
+        """
         finished_trials = [
             trial
             for trial in study.get_trials(deepcopy=False)
@@ -603,13 +809,15 @@ class HyperparameterTuner:
                     best_value = study.best_value
                 except ValueError:
                     best_value = trial.value
-                progress(ProgressEvent(
-                    stage="tuning",
-                    message=f"trial {trial.number} complete",
-                    current=len(seen_trials),
-                    total=self.n_trials,
-                    payload={
-                        "trial_value": trial.value,
-                        "best_value": best_value,
-                    },
-                ))
+                progress(
+                    ProgressEvent(
+                        stage="tuning",
+                        message=f"trial {trial.number} complete",
+                        current=len(seen_trials),
+                        total=self.n_trials,
+                        payload={
+                            "trial_value": trial.value,
+                            "best_value": best_value,
+                        },
+                    )
+                )

@@ -28,6 +28,7 @@ def narrow_search_space(space: dict, **overrides) -> dict:
     ...     space,
     ...     n_estimators=optuna.distributions.IntDistribution(50, 150),
     ... )
+
     """
     result = dict(space)
     result.update(overrides)

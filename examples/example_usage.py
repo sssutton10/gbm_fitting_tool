@@ -14,12 +14,23 @@ import numpy as np
 import polars as pl
 
 from ins_gbm import (
-    CVConfig, LightGBMModel, ModelData, ModelRecipe,
-    compare_cv_double_lift, compare_reports, load_cv_result, load_model,
+    CVConfig,
+    LightGBMModel,
+    ModelData,
+    ModelRecipe,
+    compare_cv_double_lift,
+    compare_reports,
+    load_cv_result,
+    load_model,
 )
 
 
 def frequency_data(seed: int = 42) -> tuple[ModelData, ModelData]:
+    """Frequency data.
+
+    Args:
+        seed (int): Random seed for reproducible fitting or splitting. Defaults to 42.
+    """
     rng = np.random.default_rng(seed)
     n = 300
     age = rng.normal(45, 12, n)
@@ -40,10 +51,16 @@ def frequency_data(seed: int = 42) -> tuple[ModelData, ModelData]:
     ).validate()
     train_idx, holdout_idx = np.arange(240), np.arange(240, n)
     from ins_gbm.data.model_data import slice_model_data
+
     return slice_model_data(data, train_idx), slice_model_data(data, holdout_idx)
 
 
 def severity_data(seed: int = 7) -> tuple[ModelData, ModelData]:
+    """Severity data.
+
+    Args:
+        seed (int): Random seed for reproducible fitting or splitting. Defaults to 7.
+    """
     rng = np.random.default_rng(seed)
     n = 240
     vehicle_age = rng.uniform(0, 15, n)
@@ -56,10 +73,14 @@ def severity_data(seed: int = 7) -> tuple[ModelData, ModelData]:
         objective="gamma",
     ).validate()
     from ins_gbm.data.model_data import slice_model_data
-    return slice_model_data(data, np.arange(190)), slice_model_data(data, np.arange(190, n))
+
+    return slice_model_data(data, np.arange(190)), slice_model_data(
+        data, np.arange(190, n)
+    )
 
 
 def main() -> None:
+    """Run a subprocess tuning worker from command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("output/example"))
     parser.add_argument("--cross-validate", action="store_true")
@@ -105,7 +126,8 @@ def main() -> None:
             params={"n_estimators": 10, "num_leaves": 16, "verbose": -1},
         )
         candidate_cv = candidate_recipe.cross_validate(
-            frequency_train, cv=CVConfig(folds="auto"),
+            frequency_train,
+            cv=CVConfig(folds="auto"),
         )
         print("Saved versus candidate CV metrics")
         print(compare_reports({"saved": saved_cv, "candidate": candidate_cv}))

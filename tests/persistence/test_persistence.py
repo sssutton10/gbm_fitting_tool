@@ -13,13 +13,31 @@ from ins_gbm.preprocessing.encoder import OneHotEncoder
 from ins_gbm.tuning.tuner import HyperparameterTuner
 
 
-def test_save_load_preserves_predictions_without_metrics_artifact(poisson_parquet, tmp_path):
-    data = load_model_data(path=str(poisson_parquet), target="claim_count", exposure="exposure", feature_cols=["x1", "x3"], objective="poisson")
-    fitted = ModelPipeline(data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))).run()
+def test_save_load_preserves_predictions_without_metrics_artifact(
+    poisson_parquet, tmp_path
+):
+    """Verify save load preserves predictions without metrics artifact.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
+    data = load_model_data(
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
+    )
+    fitted = ModelPipeline(
+        data=data, recipe=ModelRecipe(model=LightGBMModel(objective="poisson"))
+    ).run()
     save_pipeline(fitted, str(tmp_path))
     loaded = load_pipeline(str(tmp_path))
 
-    assert fitted.predict(data).to_list() == pytest.approx(loaded.predict(data).to_list(), rel=1e-6)
+    assert fitted.predict(data).to_list() == pytest.approx(
+        loaded.predict(data).to_list(), rel=1e-6
+    )
     assert fitted.raw_train_data is data
     assert loaded.raw_train_data is None
     with pytest.raises(RuntimeError, match="training_data=original_training_data"):
@@ -38,6 +56,12 @@ def test_save_load_preserves_predictions_without_metrics_artifact(poisson_parque
 
 
 def test_compact_load_predict_raw_retains_input_schema(poisson_parquet, tmp_path):
+    """Verify compact load predict raw retains input schema.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -65,6 +89,12 @@ def test_compact_load_predict_raw_retains_input_schema(poisson_parquet, tmp_path
 
 
 def test_retuned_pipeline_preserves_predictions_and_history(poisson_parquet, tmp_path):
+    """Verify retuned pipeline preserves predictions and history.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -101,6 +131,12 @@ def test_retuned_pipeline_preserves_predictions_and_history(poisson_parquet, tmp
 
 
 def test_load_can_reattach_full_training_feature_pool(poisson_parquet, tmp_path):
+    """Verify load can reattach full training feature pool.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -128,6 +164,12 @@ def test_load_can_reattach_full_training_feature_pool(poisson_parquet, tmp_path)
 
 
 def test_compact_load_rejects_data_dependent_oof(poisson_parquet, tmp_path):
+    """Verify compact load rejects data dependent oof.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -152,6 +194,12 @@ def test_compact_load_rejects_data_dependent_oof(poisson_parquet, tmp_path):
 
 
 def test_load_rejects_incompatible_training_data(poisson_parquet, tmp_path):
+    """Verify load rejects incompatible training data.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",
@@ -183,6 +231,12 @@ def test_load_rejects_incompatible_training_data(poisson_parquet, tmp_path):
 
 
 def test_load_legacy_full_data_artifact(poisson_parquet, tmp_path):
+    """Verify load legacy full data artifact.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = load_model_data(
         path=str(poisson_parquet),
         target="claim_count",

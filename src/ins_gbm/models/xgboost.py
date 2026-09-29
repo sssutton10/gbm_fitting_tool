@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -11,7 +11,6 @@ from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
-
 
 Objective = Literal["poisson", "gamma"]
 
@@ -33,10 +32,15 @@ class XGBoostModel:
     Both ``DMatrix`` calls (train and predict) declare ``missing=_NUMERIC_FILL``
     so XGBoost treats that sentinel as missing and applies its sparse-aware
     split-finding rather than treating it as a real value.
+
+    Args:
+        objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
     """
-    objective: Optional[Objective] = None
+
+    objective: Objective | None = None
 
     def capabilities(self) -> ModelCapabilities:
+        """Describe supported objectives and model features."""
         return ModelCapabilities(
             supports_poisson=True,
             supports_gamma=True,
@@ -46,10 +50,14 @@ class XGBoostModel:
         )
 
     def default_search_space(self) -> dict:
+        """Return Optuna distributions for tunable model parameters."""
         import optuna
+
         return {
             "n_estimators": optuna.distributions.IntDistribution(50, 500),
-            "learning_rate": optuna.distributions.FloatDistribution(0.01, 0.3, log=True),
+            "learning_rate": optuna.distributions.FloatDistribution(
+                0.01, 0.3, log=True
+            ),
             "max_depth": optuna.distributions.IntDistribution(3, 10),
             "min_child_weight": optuna.distributions.IntDistribution(1, 20),
             "subsample": optuna.distributions.FloatDistribution(0.5, 1.0),
@@ -61,12 +69,22 @@ class XGBoostModel:
     def fit(
         self,
         data: ModelData,
-        params: Optional[dict] = None,
+        params: dict | None = None,
         *,
-        feature_names: Optional[list[str]] = None,
-        encoder: Optional[object] = None,
-        preprocessing: Optional[list[object]] = None,
+        feature_names: list[str] | None = None,
+        encoder: object | None = None,
+        preprocessing: list[object] | None = None,
     ) -> FittedModel:
+        """Fit the model on training data and return a fitted wrapper.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+            params (Optional[dict]): Optional model or estimator parameter mapping.
+            feature_names (Optional[list[str]]): Ordered names of input features to use. Optional.
+            encoder (Optional[object]): Optional encoder applied before model fitting.
+            preprocessing (Optional[list[object]]): Ordered preprocessing steps applied before
+                fitting. Optional.
+        """
         import xgboost as xgb
 
         transform_result = fit_transform_chain(
@@ -92,7 +110,7 @@ class XGBoostModel:
             margin_parts.append(series_to_fit_array(data.offset))
         base_margin = np.sum(margin_parts, axis=0) if margin_parts else None
 
-        sample_weight: Optional[np.ndarray] = None
+        sample_weight: np.ndarray | None = None
         if data.weight is not None:
             sample_weight = series_to_fit_array(data.weight)
 
@@ -116,17 +134,27 @@ class XGBoostModel:
         )
 
         feature_names = list(data.feature_names)
+
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
-            X_pred = frame_to_fit_array(
-                pred_data.features, pred_data.feature_names
-            )
+            """Predict from the fitted estimator on the requested scale.
+
+            Args:
+                pred_data (ModelData): Prepared model data to score.
+                prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
+                    unavailable for Gamma.
+            """
+            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
 
             pred_margin_parts: list[np.ndarray] = []
             if objective == "poisson" and pred_data.exposure is not None:
-                pred_margin_parts.append(np.log(series_to_fit_array(pred_data.exposure)))
+                pred_margin_parts.append(
+                    np.log(series_to_fit_array(pred_data.exposure))
+                )
             if pred_data.offset is not None:
                 pred_margin_parts.append(series_to_fit_array(pred_data.offset))
-            pred_margin = np.sum(pred_margin_parts, axis=0) if pred_margin_parts else None
+            pred_margin = (
+                np.sum(pred_margin_parts, axis=0) if pred_margin_parts else None
+            )
 
             dtest_kwargs = {
                 "feature_names": feature_names,
@@ -149,7 +177,12 @@ class XGBoostModel:
                     return pl.Series(link)
             return pl.Series(link if prediction_type == "link" else response)
 
-        def _importance(importance_type: Optional[str] = None) -> pl.DataFrame:
+        def _importance(importance_type: str | None = None) -> pl.DataFrame:
+            """Return feature importance from the fitted estimator.
+
+            Args:
+                importance_type (Optional[str]): Optional framework-specific importance measure.
+            """
             importance_type = importance_type or "gain"
             allowed = {"weight", "gain", "cover", "total_gain", "total_cover"}
             if importance_type not in allowed:

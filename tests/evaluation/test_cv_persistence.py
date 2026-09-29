@@ -1,27 +1,48 @@
-from dataclasses import replace
 import json
+from dataclasses import replace
 
 import numpy as np
 import polars as pl
 import pytest
 
 from ins_gbm import (
-    CVConfig, LightGBMModel, ModelRecipe, compare_cv_double_lift,
-    compare_reports, load_cv_result, load_model_data,
+    CVConfig,
+    LightGBMModel,
+    ModelRecipe,
+    compare_cv_double_lift,
+    compare_reports,
+    load_cv_result,
+    load_model_data,
 )
 from ins_gbm.evaluation.metrics import (
-    _double_lift_metric_inputs, double_lift_score, double_lift_table,
+    _double_lift_metric_inputs,
+    double_lift_score,
+    double_lift_table,
 )
 
 
 def _data(poisson_parquet):
+    """Data.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+    """
     return load_model_data(
-        str(poisson_parquet), target="claim_count", exposure="exposure",
-        feature_cols=["x1", "x3"], objective="poisson",
+        str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x3"],
+        objective="poisson",
     )
 
 
 def _cv(data, estimators):
+    """Cv.
+
+    Args:
+        data (object): Model data to fit, transform, predict, or evaluate.
+        estimators (object): The estimators.
+    """
     return ModelRecipe(
         model=LightGBMModel(objective="poisson"),
         params={"n_estimators": estimators, "verbose": -1},
@@ -29,6 +50,12 @@ def _cv(data, estimators):
 
 
 def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
+    """Verify saved cv metrics and double lift round trip.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     base_data = _data(poisson_parquet)
     data = replace(
         base_data,
@@ -57,19 +84,34 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
     assert pairwise["saved"][0] is None
     assert pairwise["candidate"][0] == f"{expected['score'][0]:+.4f}"
     assert pairwise["preferred"][0] == (
-        "tie" if abs(expected["score"][0]) < 1e-6 else
-        "candidate" if expected["score"][0] > 0 else "saved"
+        "tie"
+        if abs(expected["score"][0]) < 1e-6
+        else "candidate"
+        if expected["score"][0] > 0
+        else "saved"
     )
-    assert compare_reports({
-        "reference": reference, "candidate": candidate,
-    }).filter(pl.col("metric") == "double_lift_score").height == 1
+    assert (
+        compare_reports(
+            {
+                "reference": reference,
+                "candidate": candidate,
+            }
+        )
+        .filter(pl.col("metric") == "double_lift_score")
+        .height
+        == 1
+    )
 
     actual = compare_cv_double_lift(restored, candidate)
     assert actual["score"].to_list() == pytest.approx(expected["score"].to_list())
     assert actual["scope"].to_list() == ["overall", "fold", "fold", "fold"]
     a, p_a, p_b, w = _double_lift_metric_inputs(
-        data.objective, data.target, reference.predictions["gbm"],
-        candidate.predictions["gbm"], data.exposure, data.weight,
+        data.objective,
+        data.target,
+        reference.predictions["gbm"],
+        candidate.predictions["gbm"],
+        data.exposure,
+        data.weight,
     )
     direct_score = double_lift_score(
         double_lift_table(a, p_a, p_b, weights=w, n_bins=10)
@@ -78,28 +120,46 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
     for row in actual.filter(pl.col("scope") == "fold").iter_rows(named=True):
         indices = np.flatnonzero(reference.row_folds.to_numpy() == int(row["fold"]))
         taken = indices.tolist()
-        fold_score = double_lift_score(double_lift_table(
-            a.gather(taken), p_a.gather(taken), p_b.gather(taken),
-            weights=w.gather(taken) if w is not None else None, n_bins=10,
-        ))
+        fold_score = double_lift_score(
+            double_lift_table(
+                a.gather(taken),
+                p_a.gather(taken),
+                p_b.gather(taken),
+                weights=w.gather(taken) if w is not None else None,
+                n_bins=10,
+            )
+        )
         assert row["score"] == pytest.approx(fold_score)
 
     candidate.save(str(tmp_path / "candidate_cv"))
     loaded_candidate = load_cv_result(str(tmp_path / "candidate_cv"))
-    assert compare_reports({
-        "reference": reference, "candidate": loaded_candidate,
-    }).filter(pl.col("metric") == "double_lift_score")["candidate"][0] == (
+    assert compare_reports(
+        {
+            "reference": reference,
+            "candidate": loaded_candidate,
+        }
+    ).filter(pl.col("metric") == "double_lift_score")["candidate"][0] == (
         f"{expected['score'][0]:+.4f}"
     )
-    assert "double_lift_score" not in compare_reports({
-        "saved": restored, "candidate": loaded_candidate,
-    })["metric"].to_list()
-    loaded_comparison = compare_reports(
-        {"saved": restored, "candidate": loaded_candidate}, data=data,
+    assert (
+        "double_lift_score"
+        not in compare_reports(
+            {
+                "saved": restored,
+                "candidate": loaded_candidate,
+            }
+        )["metric"].to_list()
     )
-    assert loaded_comparison.filter(pl.col("metric") == "double_lift_score")[
-        "candidate"
-    ][0] == f"{expected['score'][0]:+.4f}"
+    loaded_comparison = compare_reports(
+        {"saved": restored, "candidate": loaded_candidate},
+        data=data,
+    )
+    assert (
+        loaded_comparison.filter(pl.col("metric") == "double_lift_score")["candidate"][
+            0
+        ]
+        == f"{expected['score'][0]:+.4f}"
+    )
     assert compare_cv_double_lift(restored, loaded_candidate, data=data)[
         "score"
     ].to_list() == pytest.approx(expected["score"].to_list())
@@ -121,6 +181,12 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
 
 
 def test_cv_double_lift_rejects_misalignment(poisson_parquet, tmp_path):
+    """Verify cv double lift rejects misalignment.
+
+    Args:
+        poisson_parquet (object): The poisson parquet.
+        tmp_path (object): The tmp path.
+    """
     data = _data(poisson_parquet)
     reference = _cv(data, 6)
     candidate = _cv(data, 8)
@@ -142,9 +208,22 @@ def test_cv_double_lift_rejects_misalignment(poisson_parquet, tmp_path):
     with pytest.raises(ValueError, match="does not match"):
         compare_cv_double_lift(saved, replace(candidate, objective="gamma"))
     different_folds = replace(candidate, row_folds=candidate.row_folds.reverse())
-    assert "double_lift_score" not in compare_reports({
-        "saved": saved, "candidate": different_folds,
-    })["metric"].to_list()
-    assert "double_lift_score" not in compare_reports({
-        "saved": saved, "candidate": candidate, "another": candidate,
-    })["metric"].to_list()
+    assert (
+        "double_lift_score"
+        not in compare_reports(
+            {
+                "saved": saved,
+                "candidate": different_folds,
+            }
+        )["metric"].to_list()
+    )
+    assert (
+        "double_lift_score"
+        not in compare_reports(
+            {
+                "saved": saved,
+                "candidate": candidate,
+                "another": candidate,
+            }
+        )["metric"].to_list()
+    )

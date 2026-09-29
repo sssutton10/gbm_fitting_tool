@@ -4,7 +4,7 @@ import dataclasses
 import json
 import os
 import warnings
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ins_gbm.data.model_data import ModelData
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 _PIPELINE_FILE = "pipeline.pkl"
 
 
-def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
+def save_pipeline(fitted_pipeline: FittedPipeline, output_dir: str) -> None:
     """Persist a compact FittedPipeline to *output_dir*.
 
     Artifacts written
@@ -21,6 +21,10 @@ def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
     - ``pipeline.pkl``     — fitted pipeline without raw training rows
     - ``metadata.json``    — human-readable ReproducibilityMetadata
     - ``tuning_history.parquet`` — trial history (if tuning was run)
+
+    Args:
+        fitted_pipeline ('FittedPipeline'): Pipeline fitted on training data.
+        output_dir (str): Directory for saved artifacts.
     """
     import cloudpickle
 
@@ -53,13 +57,17 @@ def save_pipeline(fitted_pipeline: "FittedPipeline", output_dir: str) -> None:
 
 def load_pipeline(
     output_dir: str,
-    training_data: Optional["ModelData"] = None,
-) -> "FittedPipeline":
+    training_data: ModelData | None = None,
+) -> FittedPipeline:
     """Load a pipeline, optionally reattaching its original training rows.
 
     A compact pipeline loaded without ``training_data`` supports prediction,
     evaluation, and feature importance. Supply the exact original training rows
     in their original order to enable ``train_data`` and OOF ensemble fitting.
+
+    Args:
+        output_dir (str): Directory for saved artifacts.
+        training_data (Optional['ModelData']): Optional original training data to reattach to the loaded artifact. Optional.
     """
     import cloudpickle
 
@@ -103,6 +111,13 @@ def load_pipeline(
     )
 
 
-def load_model(output_dir: str, training_data: Optional["ModelData"] = None) -> "FittedPipeline":
-    """Load a fitted model artifact (public convenience alias)."""
+def load_model(
+    output_dir: str, training_data: ModelData | None = None
+) -> FittedPipeline:
+    """Load a fitted model artifact (public convenience alias).
+
+    Args:
+        output_dir (str): Directory for saved artifacts.
+        training_data (Optional['ModelData']): Optional original training data to reattach to the loaded artifact. Optional.
+    """
     return load_pipeline(output_dir, training_data=training_data)

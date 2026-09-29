@@ -1,8 +1,10 @@
 import pytest
-from ins_gbm.models.base import ModelCapabilities, FittedModel
+
+from ins_gbm.models.base import FittedModel, ModelCapabilities
 
 
 def test_model_capabilities_fields():
+    """Verify model capabilities fields."""
     caps = ModelCapabilities(
         supports_poisson=True,
         supports_gamma=True,
@@ -15,6 +17,7 @@ def test_model_capabilities_fields():
 
 
 def test_model_capabilities_frozen():
+    """Verify model capabilities frozen."""
     caps = ModelCapabilities(
         supports_poisson=True,
         supports_gamma=False,
@@ -27,15 +30,18 @@ def test_model_capabilities_frozen():
 
 
 def test_fitted_model_predict_rate_invalid_for_gamma(gamma_raw):
-    """predict with prediction_type='rate' must raise for Gamma."""
-    from ins_gbm.data.model_data import ModelData
-    from ins_gbm.data.schema import FeatureSchema
+    """predict with prediction_type='rate' must raise for Gamma.
 
+    Args:
+        gamma_raw (object): The gamma raw.
+    """
     # Build a minimal FittedModel stub to test the validation path
     import polars as pl
 
+    from ins_gbm.data.model_data import ModelData
+
     class _StubModel:
-        pass
+        """Stubmodel."""
 
     data = ModelData(
         features=gamma_raw.select(["x1"]),

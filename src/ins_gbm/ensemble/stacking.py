@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
 
 from ins_gbm.data.dtypes import FIT_DTYPE, series_to_fit_array
 from ins_gbm.data.model_data import ModelData, slice_model_data
-from ins_gbm.ensemble._utils import (_apply_pipeline_recipe_fold_transforms,
-                                     _predict_from_pipeline,
-                                     _validate_ensemble_pipelines)
+from ins_gbm.ensemble._utils import (
+    _apply_pipeline_recipe_fold_transforms,
+    _predict_from_pipeline,
+    _validate_ensemble_pipelines,
+)
 
 if TYPE_CHECKING:
     from ins_gbm.pipeline import FittedPipeline
@@ -18,13 +20,24 @@ if TYPE_CHECKING:
 
 @dataclass
 class FittedStackingEnsemble:
-    """A stacking ensemble with a fitted meta-learner."""
+    """A stacking ensemble with a fitted meta-learner.
+
+    Args:
+        meta_learner (Any): Optional regression estimator for stacking.
+        fitted_pipelines (list['FittedPipeline']): Base pipelines with fitted models.
+        oof_predictions (np.ndarray): Out-of-fold predictions for each base pipeline.
+    """
+
     meta_learner: Any
-    fitted_pipelines: list["FittedPipeline"]
+    fitted_pipelines: list[FittedPipeline]
     oof_predictions: np.ndarray  # shape (n_train, n_base_models)
 
     def predict(self, data: ModelData) -> pl.Series:
-        """Stack base model predictions and apply the meta-learner."""
+        """Stack base model predictions and apply the meta-learner.
+
+        Args:
+            data (ModelData): Model data to fit, transform, predict, or evaluate.
+        """
         base_preds = np.stack(
             [_predict_from_pipeline(p, data) for p in self.fitted_pipelines],
             axis=1,
@@ -56,13 +69,22 @@ class StackingEnsemble:
     meta_learner : sklearn estimator or None
         The meta-model trained on OOF predictions.  Defaults to Ridge regression.
         Must implement ``.fit(X, y)`` and ``.predict(X)``.
+
+    refit : {"fixed", "retune"}
+        Use fitted model parameters in each OOF fold, or retune each fold.
     """
+
     cv_folds: int = 5
     seed: int = 42
-    meta_learner: Optional[Any] = None
+    meta_learner: Any | None = None
     refit: str = "fixed"
 
-    def fit(self, fitted_pipelines: list["FittedPipeline"]) -> FittedStackingEnsemble:
+    def fit(self, fitted_pipelines: list[FittedPipeline]) -> FittedStackingEnsemble:
+        """Fit the ensemble from pre-fitted base pipelines.
+
+        Args:
+            fitted_pipelines (list['FittedPipeline']): Base pipelines with fitted models.
+        """
         from sklearn.linear_model import Ridge
         from sklearn.model_selection import KFold
 
@@ -75,10 +97,12 @@ class StackingEnsemble:
         ]
         ref_train = training_data[0]
         n = ref_train.n_rows
-        fold_splits = list(KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed).split(range(n)))
-        oof_matrix = np.zeros(
-            (n, len(fitted_pipelines)), dtype=FIT_DTYPE
+        fold_splits = list(
+            KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed).split(
+                range(n)
+            )
         )
+        oof_matrix = np.zeros((n, len(fitted_pipelines)), dtype=FIT_DTYPE)
 
         for p_idx, (pipeline, pipeline_data) in enumerate(
             zip(fitted_pipelines, training_data)
@@ -88,15 +112,22 @@ class StackingEnsemble:
                 fold_val = slice_model_data(pipeline_data, val_idx)
                 if self.refit == "retune" and pipeline.recipe.tuning is not None:
                     from ins_gbm.pipeline import ModelPipeline
+
                     model_selected = getattr(pipeline, "model_selected_features", None)
                     run_kwargs = (
                         {"feature_names": model_selected, "feature_stage": "model"}
-                        if model_selected is not None else
-                        {"feature_names": pipeline.selected_features, "feature_stage": "encoded"}
-                        if pipeline.recipe.selection is None and pipeline.selected_features is not None
+                        if model_selected is not None
+                        else {
+                            "feature_names": pipeline.selected_features,
+                            "feature_stage": "encoded",
+                        }
+                        if pipeline.recipe.selection is None
+                        and pipeline.selected_features is not None
                         else {}
                     )
-                    fold_pipeline = ModelPipeline(fold_train, pipeline.recipe).run(**run_kwargs)
+                    fold_pipeline = ModelPipeline(fold_train, pipeline.recipe).run(
+                        **run_kwargs
+                    )
                     predictions = fold_pipeline.predict(fold_val, "response")
                 else:
                     current_train, current_val = _apply_pipeline_recipe_fold_transforms(

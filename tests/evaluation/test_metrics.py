@@ -1,22 +1,24 @@
 import numpy as np
 import polars as pl
 import pytest
+
 from ins_gbm.evaluation.metrics import (
-    poisson_deviance,
-    gamma_deviance,
-    normalized_gini,
-    rmse,
-    mae,
-    double_lift_score,
-    double_lift_table,
     METRIC_DIRECTIONS,
     compute_metrics,
+    double_lift_score,
+    double_lift_table,
+    gamma_deviance,
+    mae,
+    normalized_gini,
+    poisson_deviance,
+    rmse,
 )
-
 
 # ── Poisson deviance ───────────────────────────────────────────────────────────
 
+
 def test_poisson_deviance_perfect_predictions():
+    """Verify poisson deviance perfect predictions."""
     actual = pl.Series([1.0, 2.0, 3.0])
     pred = pl.Series([1.0, 2.0, 3.0])
     assert poisson_deviance(actual, pred) == pytest.approx(0.0, abs=1e-10)
@@ -25,6 +27,7 @@ def test_poisson_deviance_perfect_predictions():
 def test_poisson_deviance_manual():
     # d_i = 2*(y*log(y/mu) - (y - mu))
     # y=2, mu=1: 2*(2*log(2) - 1) = 2*(1.3863 - 1) = 0.7726
+    """Verify poisson deviance manual."""
     actual = pl.Series([2.0])
     pred = pl.Series([1.0])
     expected = 2.0 * (2.0 * np.log(2.0) - (2.0 - 1.0))
@@ -33,6 +36,7 @@ def test_poisson_deviance_manual():
 
 def test_poisson_deviance_zero_actual_is_valid():
     # 0 * log(0/mu) = 0 by convention
+    """Verify poisson deviance zero actual is valid."""
     actual = pl.Series([0.0, 1.0])
     pred = pl.Series([1.0, 1.0])
     result = poisson_deviance(actual, pred)
@@ -40,21 +44,27 @@ def test_poisson_deviance_zero_actual_is_valid():
 
 
 def test_poisson_deviance_weighted():
+    """Verify poisson deviance weighted."""
     actual = pl.Series([1.0, 2.0])
     pred = pl.Series([1.0, 2.0])
     weights = pl.Series([2.0, 3.0])
     # perfect predictions → deviance = 0 regardless of weights
-    assert poisson_deviance(actual, pred, weights=weights) == pytest.approx(0.0, abs=1e-10)
+    assert poisson_deviance(actual, pred, weights=weights) == pytest.approx(
+        0.0, abs=1e-10
+    )
 
 
 def test_poisson_deviance_rejects_nonpositive_predictions():
+    """Verify poisson deviance rejects nonpositive predictions."""
     with pytest.raises(ValueError, match="positive"):
         poisson_deviance(pl.Series([1.0]), pl.Series([0.0]))
 
 
 # ── Gamma deviance ─────────────────────────────────────────────────────────────
 
+
 def test_gamma_deviance_perfect_predictions():
+    """Verify gamma deviance perfect predictions."""
     actual = pl.Series([100.0, 200.0, 300.0])
     pred = pl.Series([100.0, 200.0, 300.0])
     assert gamma_deviance(actual, pred) == pytest.approx(0.0, abs=1e-10)
@@ -63,6 +73,7 @@ def test_gamma_deviance_perfect_predictions():
 def test_gamma_deviance_manual():
     # d_i = 2*(-log(y/mu) + (y-mu)/mu)
     # y=2, mu=1: 2*(-log(2) + (2-1)/1) = 2*(-0.6931 + 1) = 0.6137
+    """Verify gamma deviance manual."""
     actual = pl.Series([2.0])
     pred = pl.Series([1.0])
     expected = 2.0 * (-np.log(2.0 / 1.0) + (2.0 - 1.0) / 1.0)
@@ -70,31 +81,39 @@ def test_gamma_deviance_manual():
 
 
 def test_gamma_deviance_rejects_nonpositive_actual():
+    """Verify gamma deviance rejects nonpositive actual."""
     with pytest.raises(ValueError, match="positive"):
         gamma_deviance(pl.Series([0.0, 1.0]), pl.Series([1.0, 1.0]))
 
 
 def test_gamma_deviance_rejects_nonpositive_predictions():
+    """Verify gamma deviance rejects nonpositive predictions."""
     with pytest.raises(ValueError, match="positive"):
         gamma_deviance(pl.Series([1.0]), pl.Series([0.0]))
 
 
 def test_gamma_deviance_weighted():
+    """Verify gamma deviance weighted."""
     actual = pl.Series([100.0, 200.0])
     pred = pl.Series([100.0, 200.0])
     weights = pl.Series([1.0, 5.0])
-    assert gamma_deviance(actual, pred, weights=weights) == pytest.approx(0.0, abs=1e-10)
+    assert gamma_deviance(actual, pred, weights=weights) == pytest.approx(
+        0.0, abs=1e-10
+    )
 
 
 # ── Normalized Gini ────────────────────────────────────────────────────────────
 
+
 def test_gini_perfect_model():
+    """Verify gini perfect model."""
     actual = pl.Series([1.0, 2.0, 3.0, 4.0])
     pred = pl.Series([1.0, 2.0, 3.0, 4.0])
     assert normalized_gini(actual, pred) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_gini_random_model_near_zero():
+    """Verify gini random model near zero."""
     rng = np.random.default_rng(0)
     actual = pl.Series(rng.poisson(1.0, 500).astype(float))
     pred = pl.Series(rng.uniform(0, 1, 500))  # random — should be near 0
@@ -103,20 +122,26 @@ def test_gini_random_model_near_zero():
 
 
 def test_gini_weighted():
+    """Verify gini weighted."""
     actual = pl.Series([1.0, 2.0, 3.0, 4.0])
     pred = pl.Series([1.0, 2.0, 3.0, 4.0])
     weights = pl.Series([1.0, 1.0, 1.0, 1.0])
-    assert normalized_gini(actual, pred, weights=weights) == pytest.approx(1.0, abs=1e-6)
+    assert normalized_gini(actual, pred, weights=weights) == pytest.approx(
+        1.0, abs=1e-6
+    )
 
 
 # ── RMSE and MAE ───────────────────────────────────────────────────────────────
 
+
 def test_rmse_zero():
+    """Verify rmse zero."""
     s = pl.Series([1.0, 2.0, 3.0])
     assert rmse(s, s) == pytest.approx(0.0)
 
 
 def test_rmse_manual():
+    """Verify rmse manual."""
     actual = pl.Series([1.0, 3.0])
     pred = pl.Series([2.0, 2.0])
     # errors: [-1, 1], MSE = 1, RMSE = 1
@@ -124,11 +149,13 @@ def test_rmse_manual():
 
 
 def test_mae_zero():
+    """Verify mae zero."""
     s = pl.Series([1.0, 2.0])
     assert mae(s, s) == pytest.approx(0.0)
 
 
 def test_mae_manual():
+    """Verify mae manual."""
     actual = pl.Series([1.0, 3.0])
     pred = pl.Series([2.0, 2.0])
     assert mae(actual, pred) == pytest.approx(1.0)
@@ -136,17 +163,22 @@ def test_mae_manual():
 
 # ── Double lift ────────────────────────────────────────────────────────────────
 
+
 def test_double_lift_score_matches_reference_absolute_definition():
-    table = pl.DataFrame({
-        "actual": [1.0, 3.0],
-        "model1": [2.0, 1.0],
-        "model2": [1.0, 2.0],
-    })
+    """Verify double lift score matches reference absolute definition."""
+    table = pl.DataFrame(
+        {
+            "actual": [1.0, 3.0],
+            "model1": [2.0, 1.0],
+            "model2": [1.0, 2.0],
+        }
+    )
     # (|2-1| - |1-1|) + (|1-3| - |2-3|) = 2
     assert double_lift_score(table) == pytest.approx(2.0)
 
 
 def test_double_lift_score_positive_favors_second_model():
+    """Verify double lift score positive favors second model."""
     actual = pl.Series([1.0, 2.0, 3.0, 4.0])
     model1 = pl.Series([2.0, 3.0, 4.0, 5.0])
     model2 = actual
@@ -161,17 +193,22 @@ def test_double_lift_score_positive_favors_second_model():
 
 
 def test_double_lift_score_relative_definition():
-    table = pl.DataFrame({
-        "actual": [2.0, 4.0],
-        "model1": [1.0, 2.0],
-        "model2": [2.0, 4.0],
-    })
+    """Verify double lift score relative definition."""
+    table = pl.DataFrame(
+        {
+            "actual": [2.0, 4.0],
+            "model1": [1.0, 2.0],
+            "model2": [2.0, 4.0],
+        }
+    )
     assert double_lift_score(table, deviation="relative") == pytest.approx(2.0)
 
 
 # ── compute_metrics and METRIC_DIRECTIONS ──────────────────────────────────
 
+
 def test_compute_metrics_poisson_returns_four_metrics():
+    """Verify compute metrics poisson returns four metrics."""
     actual = pl.Series([1.0, 2.0, 3.0])
     predicted = pl.Series([1.1, 1.9, 3.2])
     exposure = pl.Series([1.0, 1.0, 1.0])
@@ -181,11 +218,17 @@ def test_compute_metrics_poisson_returns_four_metrics():
         predicted=predicted,
         exposure=exposure,
     )
-    assert set(result["metric"].to_list()) == {"poisson_deviance", "gini", "rmse", "mae"}
+    assert set(result["metric"].to_list()) == {
+        "poisson_deviance",
+        "gini",
+        "rmse",
+        "mae",
+    }
     assert result["value"].dtype == pl.Float64
 
 
 def test_compute_metrics_gamma_returns_four_metrics():
+    """Verify compute metrics gamma returns four metrics."""
     actual = pl.Series([100.0, 200.0, 300.0])
     predicted = pl.Series([110.0, 190.0, 320.0])
     weight = pl.Series([1.0, 1.0, 1.0])
@@ -199,6 +242,7 @@ def test_compute_metrics_gamma_returns_four_metrics():
 
 
 def test_compute_metrics_matches_individual_functions():
+    """Verify compute metrics matches individual functions."""
     actual = pl.Series([1.0, 0.0, 2.0])
     predicted = pl.Series([0.9, 0.1, 2.1])
     exposure = pl.Series([1.5, 0.5, 1.0])
@@ -218,6 +262,7 @@ def test_compute_metrics_matches_individual_functions():
 
 
 def test_compute_metrics_poisson_combines_exposure_and_model_weight():
+    """Verify compute metrics poisson combines exposure and model weight."""
     actual = pl.Series([1.0, 4.0, 3.0])
     predicted = pl.Series([2.0, 2.0, 4.5])
     exposure = pl.Series([1.0, 2.0, 3.0])
@@ -252,6 +297,7 @@ def test_compute_metrics_poisson_combines_exposure_and_model_weight():
 
 
 def test_compute_metrics_no_weights():
+    """Verify compute metrics no weights."""
     actual = pl.Series([1.0, 2.0, 3.0])
     predicted = pl.Series([1.1, 1.9, 3.2])
     result = compute_metrics(
@@ -259,10 +305,16 @@ def test_compute_metrics_no_weights():
         actual=actual,
         predicted=predicted,
     )
-    assert set(result["metric"].to_list()) == {"poisson_deviance", "gini", "rmse", "mae"}
+    assert set(result["metric"].to_list()) == {
+        "poisson_deviance",
+        "gini",
+        "rmse",
+        "mae",
+    }
 
 
 def test_metric_directions_has_all_keys():
+    """Verify metric directions has all keys."""
     assert METRIC_DIRECTIONS["gini"] == "higher"
     assert METRIC_DIRECTIONS["poisson_deviance"] == "lower"
     assert METRIC_DIRECTIONS["gamma_deviance"] == "lower"

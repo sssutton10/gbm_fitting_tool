@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import polars as pl
 
 from ins_gbm.data.dtypes import FIT_DTYPE
 from ins_gbm.data.model_data import ModelData
@@ -14,8 +13,15 @@ if TYPE_CHECKING:
 
 
 def _validate_ensemble_pipelines(
-    pipelines: list["FittedPipeline"], *, require_training: bool = True
+    pipelines: list[FittedPipeline], *, require_training: bool = True
 ) -> None:
+    """Check base pipelines have compatible objectives and training data.
+
+    Args:
+        pipelines (list['FittedPipeline']): Base fitted pipelines to combine.
+        require_training (bool): Whether original training rows must be attached. Defaults to
+            True.
+    """
     if not pipelines:
         raise ValueError("at least one fitted pipeline is required")
     objective = pipelines[0].fitted_model.objective
@@ -39,20 +45,33 @@ def _validate_ensemble_pipelines(
                 raise ValueError(f"ensemble training rows are not aligned for {field}")
 
 
-def _apply_pipeline_transforms(pipeline: "FittedPipeline", data: ModelData) -> ModelData:
-    """Apply a fitted pipeline's encoder, selector, and preprocessors to *data*."""
+def _apply_pipeline_transforms(pipeline: FittedPipeline, data: ModelData) -> ModelData:
+    """Apply a fitted pipeline's encoder, selector, and preprocessors to *data*.
+
+    Args:
+        pipeline ('FittedPipeline'): Fitted pipeline used for prediction or transformation.
+        data (ModelData): Model data to fit, transform, predict, or evaluate.
+    """
     return pipeline._prepare_data(data)
 
 
-def _predict_from_pipeline(pipeline: "FittedPipeline", data: ModelData) -> np.ndarray:
+def _predict_from_pipeline(pipeline: FittedPipeline, data: ModelData) -> np.ndarray:
+    """Generate predictions through a fitted base pipeline.
+
+    Args:
+        pipeline ('FittedPipeline'): Fitted pipeline used for prediction or transformation.
+        data (ModelData): Model data to fit, transform, predict, or evaluate.
+    """
     transformed = _apply_pipeline_transforms(pipeline, data)
-    return pipeline.fitted_model.predict(
-        transformed, prediction_type="response"
-    ).to_numpy().astype(FIT_DTYPE, copy=False)
+    return (
+        pipeline.fitted_model.predict(transformed, prediction_type="response")
+        .to_numpy()
+        .astype(FIT_DTYPE, copy=False)
+    )
 
 
 def _apply_recipe_fold_transforms(
-    recipe: "ModelRecipe",
+    recipe: ModelRecipe,
     fold_train: ModelData,
     fold_val: ModelData,
 ) -> tuple[ModelData, ModelData]:
@@ -60,6 +79,11 @@ def _apply_recipe_fold_transforms(
 
     Used in stacking OOF generation and blending OOF mode to prevent leakage
     across fold boundaries.  Returns (transformed_train, transformed_val).
+
+    Args:
+        recipe ('ModelRecipe'): Unfitted pipeline recipe.
+        fold_train (ModelData): Training rows for the current fold.
+        fold_val (ModelData): Validation rows for the current fold.
     """
     result = fit_transform_chain(
         fold_train,
@@ -71,16 +95,26 @@ def _apply_recipe_fold_transforms(
 
 
 def _apply_pipeline_recipe_fold_transforms(
-    pipeline: "FittedPipeline",
+    pipeline: FittedPipeline,
     fold_train: ModelData,
     fold_val: ModelData,
 ) -> tuple[ModelData, ModelData]:
-    """Refit recipe transforms while preserving fixed feature selections."""
+    """Refit recipe transforms while preserving fixed feature selections.
+
+    Args:
+        pipeline ('FittedPipeline'): Fitted pipeline used for prediction or transformation.
+        fold_train (ModelData): Training rows for the current fold.
+        fold_val (ModelData): Validation rows for the current fold.
+    """
     model_selected = getattr(pipeline, "model_selected_features", None)
     if pipeline.recipe.selection is None and pipeline.selected_features is not None:
         encoded = fit_transform_chain(fold_train, encoder=pipeline.recipe.encoder)
         train, val = encoded.data, encoded.chain.transform(fold_val)
-        missing = [name for name in pipeline.selected_features if name not in train.features.columns]
+        missing = [
+            name
+            for name in pipeline.selected_features
+            if name not in train.features.columns
+        ]
         if missing:
             raise ValueError(
                 "Manual encoded features are absent in this fold: "
@@ -89,13 +123,15 @@ def _apply_pipeline_recipe_fold_transforms(
         train = train.with_features(train.features.select(pipeline.selected_features))
         val = val.with_features(val.features.select(pipeline.selected_features))
         processed = fit_transform_chain(
-            train, preprocessing=pipeline.recipe.preprocessing,
+            train,
+            preprocessing=pipeline.recipe.preprocessing,
             model_selected_features=model_selected,
         )
         return processed.data, processed.chain.transform(val)
     if model_selected is not None:
         result = fit_transform_chain(
-            fold_train, encoder=pipeline.recipe.encoder,
+            fold_train,
+            encoder=pipeline.recipe.encoder,
             preprocessing=pipeline.recipe.preprocessing,
             model_selected_features=model_selected,
         )

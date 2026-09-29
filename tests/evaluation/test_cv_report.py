@@ -11,6 +11,11 @@ from ins_gbm.preprocessing.encoder import OneHotEncoder
 
 
 def _poisson_data(raw: pl.DataFrame) -> ModelData:
+    """Poisson data.
+
+    Args:
+        raw (pl.DataFrame): The raw.
+    """
     schema = infer_schema(raw, ["x1", "x3"])
     return ModelData(
         features=raw.select(["x1", "x3"]),
@@ -24,6 +29,11 @@ def _poisson_data(raw: pl.DataFrame) -> ModelData:
 
 
 def test_run_returns_cv_result(poisson_raw):
+    """Verify run returns cv result.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     report = CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
@@ -36,6 +46,12 @@ def test_run_returns_cv_result(poisson_raw):
 
 
 def test_run_progress_bar_shows_fold_count(poisson_raw, capsys):
+    """Verify run progress bar shows fold count.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        capsys (object): The capsys.
+    """
     data = _poisson_data(poisson_raw)
     CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
@@ -50,6 +66,11 @@ def test_run_progress_bar_shows_fold_count(poisson_raw, capsys):
 
 
 def test_random_folds_fold_metrics_row_count(poisson_raw):
+    """Verify random folds fold metrics row count.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     result = CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
@@ -63,6 +84,11 @@ def test_random_folds_fold_metrics_row_count(poisson_raw):
 
 
 def test_summary_has_mean_and_std(poisson_raw):
+    """Verify summary has mean and std.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     result = CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
@@ -77,21 +103,31 @@ def test_summary_has_mean_and_std(poisson_raw):
 
 
 def test_run_passes_recipe_params_to_each_fold(poisson_raw, monkeypatch):
+    """Verify run passes recipe params to each fold.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        monkeypatch (object): The monkeypatch.
+    """
     data = _poisson_data(poisson_raw)
     params = {"n_estimators": 7, "learning_rate": 0.05}
     received_params = []
     original_fit = LightGBMModel.fit
 
     def recording_fit(self, fold_data, params=None):
+        """Recording fit.
+
+        Args:
+            fold_data (object): The fold data.
+            params (object): Optional model or estimator parameter mapping.
+        """
         received_params.append(params)
         return original_fit(self, fold_data, params=params)
 
     monkeypatch.setattr(LightGBMModel, "fit", recording_fit)
 
     CrossValidationReport(
-        recipe=ModelRecipe(
-            model=LightGBMModel(objective="poisson"), params=params
-        ),
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson"), params=params),
         data=data,
         n_folds=3,
         seed=0,
@@ -104,6 +140,12 @@ def test_run_selects_features_without_losing_special_columns(
     poisson_raw,
     monkeypatch,
 ):
+    """Verify run selects features without losing special columns.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        monkeypatch (object): The monkeypatch.
+    """
     bench = (poisson_raw["x1"].abs() + 0.1).alias("bench_pred")
     folds = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(bench, folds)
@@ -121,6 +163,12 @@ def test_run_selects_features_without_losing_special_columns(
     original_fit = LightGBMModel.fit
 
     def recording_fit(self, fold_data, params=None):
+        """Recording fit.
+
+        Args:
+            fold_data (object): The fold data.
+            params (object): Optional model or estimator parameter mapping.
+        """
         fitted_features.append(fold_data.feature_names)
         return original_fit(self, fold_data, params=params)
 
@@ -137,7 +185,15 @@ def test_run_selects_features_without_losing_special_columns(
     assert result.predictions.columns == ["gbm", "benchmark"]
 
 
-def test_recipe_cross_validate_selects_encoded_features_per_fold(poisson_raw, monkeypatch):
+def test_recipe_cross_validate_selects_encoded_features_per_fold(
+    poisson_raw, monkeypatch
+):
+    """Verify recipe cross validate selects encoded features per fold.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        monkeypatch (object): The monkeypatch.
+    """
     schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
     data = ModelData(
         features=poisson_raw.select(["x1", "x2", "x3"]),
@@ -151,6 +207,12 @@ def test_recipe_cross_validate_selects_encoded_features_per_fold(poisson_raw, mo
     original_fit = LightGBMModel.fit
 
     def recording_fit(self, fold_data, params=None):
+        """Recording fit.
+
+        Args:
+            fold_data (object): The fold data.
+            params (object): Optional model or estimator parameter mapping.
+        """
         fitted_features.append(list(fold_data.feature_names))
         return original_fit(self, fold_data, params=params)
 
@@ -168,6 +230,11 @@ def test_recipe_cross_validate_selects_encoded_features_per_fold(poisson_raw, mo
 
 
 def test_report_encoded_features_validate_missing_and_duplicates(poisson_raw):
+    """Verify report encoded features validate missing and duplicates.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     report = CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
@@ -182,6 +249,11 @@ def test_report_encoded_features_validate_missing_and_duplicates(poisson_raw):
 
 
 def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):
+    """Verify predefined fold col uses exact fold ids.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     fold_series = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(fold_series)
     schema = infer_schema(raw, ["x1", "x3"])
@@ -197,7 +269,7 @@ def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):
     result = CrossValidationReport(
         recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
         data=data,
-        n_folds=99,        # ignored when fold_col is set
+        n_folds=99,  # ignored when fold_col is set
         fold_col="fold_id",
         seed=0,
     ).run()
@@ -207,7 +279,11 @@ def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):
 
 
 def test_fold_col_dropped_before_fitting(poisson_raw):
-    """fold_id must not appear as a model feature."""
+    """fold_id must not appear as a model feature.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     fold_series = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(fold_series)
     schema = infer_schema(raw, ["x1", "x3"])
@@ -233,6 +309,11 @@ def test_fold_col_dropped_before_fitting(poisson_raw):
 
 def test_benchmark_col_adds_benchmark_rows(poisson_raw):
     # Use x1 as a dummy benchmark prediction (positive values after clipping)
+    """Verify benchmark col adds benchmark rows.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     bench = poisson_raw["x1"].abs() + 0.1
     raw = poisson_raw.with_columns(bench.alias("bench_pred"))
     schema = infer_schema(raw, ["x1", "x3"])
@@ -261,6 +342,11 @@ def test_benchmark_col_adds_benchmark_rows(poisson_raw):
 
 
 def test_n_folds_less_than_2_raises(poisson_raw):
+    """Verify n folds less than 2 raises.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     with pytest.raises(ValueError, match="n_folds must be >= 2"):
         CrossValidationReport(
@@ -271,6 +357,11 @@ def test_n_folds_less_than_2_raises(poisson_raw):
 
 
 def test_missing_fold_col_raises(poisson_raw):
+    """Verify missing fold col raises.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = _poisson_data(poisson_raw)
     with pytest.raises(ValueError, match="fold_col"):
         CrossValidationReport(
@@ -281,6 +372,11 @@ def test_missing_fold_col_raises(poisson_raw):
 
 
 def test_fold_col_equals_benchmark_col_raises(poisson_raw):
+    """Verify fold col equals benchmark col raises.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     fold_series = pl.Series("fold_id", [i % 3 for i in range(poisson_raw.height)])
     raw = poisson_raw.with_columns(fold_series)
     schema = infer_schema(raw, ["x1", "x3"])

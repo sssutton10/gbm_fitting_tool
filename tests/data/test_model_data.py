@@ -1,10 +1,16 @@
 import polars as pl
 import pytest
+
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.schema import FeatureSchema
 
 
 def test_model_data_poisson_valid(poisson_raw):
+    """Verify model data poisson valid.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = ModelData(
         features=poisson_raw.select(["x1", "x2", "x3"]),
         target=poisson_raw["claim_count"],
@@ -19,6 +25,11 @@ def test_model_data_poisson_valid(poisson_raw):
 
 
 def test_model_data_gamma_valid(gamma_raw):
+    """Verify model data gamma valid.
+
+    Args:
+        gamma_raw (object): The gamma raw.
+    """
     data = ModelData(
         features=gamma_raw.select(["x1", "x2"]),
         target=gamma_raw["severity"],
@@ -31,6 +42,11 @@ def test_model_data_gamma_valid(gamma_raw):
 
 
 def test_model_data_infers_schema_when_omitted(poisson_raw):
+    """Verify model data infers schema when omitted.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = ModelData(
         features=poisson_raw.select(["x1", "x2", "x3"]),
         target=poisson_raw["claim_count"],
@@ -47,20 +63,25 @@ def test_model_data_infers_schema_when_omitted(poisson_raw):
 
 
 def test_model_data_downcasts_float64_fields_to_float32():
+    """Verify model data downcasts float64 fields to float32."""
     data = ModelData(
-        features=pl.DataFrame({
-            "continuous": pl.Series([1.0, 2.0], dtype=pl.Float64),
-            "integer": pl.Series([1, 2], dtype=pl.Int64),
-            "category": ["a", "b"],
-        }),
+        features=pl.DataFrame(
+            {
+                "continuous": pl.Series([1.0, 2.0], dtype=pl.Float64),
+                "integer": pl.Series([1, 2], dtype=pl.Int64),
+                "category": ["a", "b"],
+            }
+        ),
         target=pl.Series("target", [1.0, 2.0], dtype=pl.Float64),
         exposure=pl.Series("exposure", [0.5, 1.5], dtype=pl.Float64),
         weight=pl.Series("weight", [1.0, 2.0], dtype=pl.Float64),
         feature_names=["continuous", "integer", "category"],
         offset=pl.Series("offset", [0.1, 0.2], dtype=pl.Float64),
-        comparisons=pl.DataFrame({
-            "benchmark": pl.Series([1.0, 2.0], dtype=pl.Float64),
-        }),
+        comparisons=pl.DataFrame(
+            {
+                "benchmark": pl.Series([1.0, 2.0], dtype=pl.Float64),
+            }
+        ),
     )
 
     assert data.features.schema == {
@@ -76,6 +97,11 @@ def test_model_data_downcasts_float64_fields_to_float32():
 
 
 def test_poisson_defaults_exposure_and_weight_to_none(poisson_raw):
+    """Verify poisson defaults exposure and weight to none.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = ModelData(
         features=poisson_raw.select(["x1"]),
         target=poisson_raw["claim_count"],
@@ -88,6 +114,11 @@ def test_poisson_defaults_exposure_and_weight_to_none(poisson_raw):
 
 
 def test_poisson_nonnegative_target(poisson_raw):
+    """Verify poisson nonnegative target.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     bad = poisson_raw["claim_count"].clone()
     bad = pl.Series("claim_count", [-1.0] + bad[1:].to_list())
     with pytest.raises(ValueError, match="non-negative"):
@@ -102,6 +133,11 @@ def test_poisson_nonnegative_target(poisson_raw):
 
 
 def test_gamma_positive_target(gamma_raw):
+    """Verify gamma positive target.
+
+    Args:
+        gamma_raw (object): The gamma raw.
+    """
     bad = pl.Series("severity", [0.0] + gamma_raw["severity"][1:].to_list())
     with pytest.raises(ValueError, match="strictly positive"):
         ModelData(
@@ -115,6 +151,11 @@ def test_gamma_positive_target(gamma_raw):
 
 
 def test_row_count_mismatch(poisson_raw):
+    """Verify row count mismatch.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     with pytest.raises(ValueError, match="row count"):
         ModelData(
             features=poisson_raw.select(["x1"]),
@@ -127,6 +168,11 @@ def test_row_count_mismatch(poisson_raw):
 
 
 def test_duplicate_feature_names(poisson_raw):
+    """Verify duplicate feature names.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     with pytest.raises(ValueError, match="unique"):
         ModelData(
             features=poisson_raw.select(["x1", "x3"]),
@@ -139,6 +185,11 @@ def test_duplicate_feature_names(poisson_raw):
 
 
 def test_positive_exposure_required(poisson_raw):
+    """Verify positive exposure required.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     bad_exposure = pl.Series("exposure", [0.0] + poisson_raw["exposure"][1:].to_list())
     with pytest.raises(ValueError, match="positive"):
         ModelData(
@@ -152,6 +203,11 @@ def test_positive_exposure_required(poisson_raw):
 
 
 def test_with_features(poisson_raw):
+    """Verify with features.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+    """
     data = ModelData(
         features=poisson_raw.select(["x1", "x3"]),
         target=poisson_raw["claim_count"],
@@ -167,6 +223,7 @@ def test_with_features(poisson_raw):
 
 
 def test_select_features_preserves_row_fields_and_filters_schema():
+    """Verify select features preserves row fields and filters schema."""
     data = ModelData(
         features=pl.DataFrame({"a": [1.0, 2.0], "b": ["x", "y"], "c": [3.0, 4.0]}),
         target=pl.Series("target", [1.0, 2.0]),
@@ -189,6 +246,12 @@ def test_select_features_preserves_row_fields_and_filters_schema():
 
 @pytest.mark.parametrize("names", [[], ["x1", "x1"], ["missing"]])
 def test_select_features_rejects_invalid_names(poisson_raw, names):
+    """Verify select features rejects invalid names.
+
+    Args:
+        poisson_raw (object): The poisson raw.
+        names (object): The names.
+    """
     data = ModelData(
         features=poisson_raw.select(["x1", "x3"]),
         target=poisson_raw["claim_count"],
