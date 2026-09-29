@@ -15,7 +15,7 @@ from ins_gbm.data.schema import FeatureSchema
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from ins_gbm.data.model_data import Objective
-    from ins_gbm.pipeline import ModelRecipe
+    from ins_gbm.pipeline import FeatureStage, ModelRecipe
 
 GBM_MODEL_LABEL: str = "gbm"
 
@@ -166,8 +166,11 @@ class CrossValidationReport:
     show_progress_bar: bool = True
     cv: Optional[CVConfig] = None
 
-    def run(self, feature_names: Optional[list[str]] = None) -> CVResult:
-        """Run CV, optionally using an ordered subset of raw predictor features."""
+    def run(
+        self, feature_names: Optional[list[str]] = None, *,
+        feature_stage: FeatureStage = "raw",
+    ) -> CVResult:
+        """Run CV with an optional raw, encoded, or model feature subset."""
         from ins_gbm.evaluation.metrics import (
             _double_lift_metric_inputs,
             compute_metrics,
@@ -217,8 +220,16 @@ class CrossValidationReport:
             feature_names if isinstance(feature_names, FittedImportancePruner)
             else None
         )
-        if feature_names is not None and model_selection is None:
+        if feature_stage not in ("raw", "encoded", "model"):
+            raise ValueError("feature_stage must be 'raw', 'encoded', or 'model'")
+        if model_selection is not None and feature_stage != "raw":
+            raise ValueError("feature_stage is inferred from a fitted pruner result")
+        if feature_stage == "raw" and feature_names is not None and model_selection is None:
             clean_data = clean_data.select_features(feature_names)
+        fold_feature_names = (
+            model_selection if model_selection is not None
+            else feature_names if feature_stage != "raw" else None
+        )
 
         config = self.cv or CVConfig(
             n_splits=self.n_folds,
@@ -250,7 +261,8 @@ class CrossValidationReport:
 
             from ins_gbm.pipeline import ModelPipeline
             fitted_pipeline = ModelPipeline(train_data, self.recipe).run(
-                feature_names=model_selection
+                feature_names=fold_feature_names,
+                feature_stage=feature_stage,
             )
             fold_params[fold_id] = dict(fitted_pipeline.fitted_model.params)
             gbm_preds = fitted_pipeline.predict(held_data, prediction_type="response")
@@ -333,7 +345,8 @@ class CrossValidationReport:
             exposure=self.data.exposure,
             weight=self.data.weight,
             objective=self.data.objective,
-            feature_names=list(clean_data.feature_names),
+            feature_names=(list(feature_names) if feature_stage == "encoded"
+                           else list(clean_data.feature_names)),
             fold_params=fold_params,
             row_folds=row_folds_series,
             cv_config={

@@ -38,9 +38,15 @@ class ModelRecipe:
         """Fit this recipe; convenient equivalent of ``ModelPipeline(...).run()``."""
         return ModelPipeline(data=data, recipe=self).run(**kwargs)
 
-    def cross_validate(self, data: ModelData, *, cv=None, feature_names=None):
+    def cross_validate(
+        self, data: ModelData, *, cv=None, feature_names=None,
+        feature_stage: FeatureStage = "raw",
+    ):
+        """Evaluate folds with an optional raw, encoded, or model feature subset."""
         from ins_gbm.evaluation.cv_report import CrossValidationReport
-        return CrossValidationReport(recipe=self, data=data, cv=cv).run(feature_names)
+        return CrossValidationReport(recipe=self, data=data, cv=cv).run(
+            feature_names, feature_stage=feature_stage
+        )
 
 
 @dataclass

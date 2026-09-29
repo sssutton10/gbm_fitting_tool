@@ -7,6 +7,7 @@ from ins_gbm.data.schema import infer_schema
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.pipeline import ModelRecipe
+from ins_gbm.preprocessing.encoder import OneHotEncoder
 
 
 def _poisson_data(raw: pl.DataFrame) -> ModelData:
@@ -134,6 +135,50 @@ def test_run_selects_features_without_losing_special_columns(
     assert fitted_features == [["x1"], ["x1"], ["x1"]]
     assert result.feature_names == ["x1"]
     assert result.predictions.columns == ["gbm", "benchmark"]
+
+
+def test_recipe_cross_validate_selects_encoded_features_per_fold(poisson_raw, monkeypatch):
+    schema = infer_schema(poisson_raw, ["x1", "x2", "x3"])
+    data = ModelData(
+        features=poisson_raw.select(["x1", "x2", "x3"]),
+        target=poisson_raw["claim_count"],
+        exposure=poisson_raw["exposure"],
+        feature_names=["x1", "x2", "x3"],
+        schema=schema,
+        objective="poisson",
+    ).validate()
+    fitted_features = []
+    original_fit = LightGBMModel.fit
+
+    def recording_fit(self, fold_data, params=None):
+        fitted_features.append(list(fold_data.feature_names))
+        return original_fit(self, fold_data, params=params)
+
+    monkeypatch.setattr(LightGBMModel, "fit", recording_fit)
+    names = ["x1", "x2__A"]
+    result = ModelRecipe(
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(),
+        params={"n_estimators": 5},
+    ).cross_validate(data, feature_names=names, feature_stage="encoded")
+
+    assert fitted_features == [names] * 5
+    assert result.feature_names == names
+    assert result.predictions.height == data.n_rows
+
+
+def test_report_encoded_features_validate_missing_and_duplicates(poisson_raw):
+    data = _poisson_data(poisson_raw)
+    report = CrossValidationReport(
+        recipe=ModelRecipe(model=LightGBMModel(objective="poisson")),
+        data=data,
+        n_folds=2,
+        show_progress_bar=False,
+    )
+    with pytest.raises(ValueError, match="must be unique"):
+        report.run(["x1", "x1"], feature_stage="encoded")
+    with pytest.raises(ValueError, match="missing after encoding"):
+        report.run(["absent"], feature_stage="encoded")
 
 
 def test_predefined_fold_col_uses_exact_fold_ids(poisson_raw):

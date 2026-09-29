@@ -1300,7 +1300,9 @@ Returns `CVResult`:
   an ordered evaluation-input fingerprint, and fitted parameters by fold.
 
 `cross_validate(..., feature_names=...)` selects raw predictors without removing a
-`benchmark_col` or `fold_col` from its special role. In benchmark mode,
+`benchmark_col` or `fold_col` from its special role. Pass
+`feature_stage="encoded"` to select named columns after each fold fits its
+encoder. In benchmark mode,
 `CVResult.plot_double_lift()` plots the OOF GBM and benchmark predictions,
 `CVResult.double_lift_score()` returns their signed score, and fold/summary
 metrics include `double_lift_score`.

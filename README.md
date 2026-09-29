@@ -172,8 +172,9 @@ are base parameters; trial suggestions override overlapping keys.
 - Random Forest is an approximation benchmark and rejects explicit offsets.
 
 Pass `feature_names=[...]` to `recipe.fit()` or `recipe.cross_validate()` to reuse
-one loaded candidate pool across fits. Fixed post-encoding names remain available
-through `feature_stage="encoded"`.
+one loaded candidate pool across fits. To select encoded columns such as
+`"territory__urban"`, pass `feature_stage="encoded"` with `feature_names`.
+Each cross-validation fold fits its own encoder before selecting those columns.
 
 See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for architecture and migration
 details. The runnable workflow is `examples/example_usage.py`, with a companion
