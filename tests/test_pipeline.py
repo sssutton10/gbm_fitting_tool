@@ -87,7 +87,7 @@ def test_tuning_still_uses_cv_and_stores_history(poisson_parquet):
     assert len(result.tuning_history) == 2
 
 
-def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
+def test_pipeline_defaults_to_feature_selection_before_tuning(poisson_parquet):
     events = []
 
     class RecordingEncoder:
@@ -127,7 +127,6 @@ def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
             encoder=RecordingEncoder(),
             selection=SelectX3(),
             tuning=RecordingTuner(),
-            selection_scope="fixed",
         ),
     ).run()
 
@@ -135,9 +134,10 @@ def test_pipeline_finishes_feature_selection_before_tuning(poisson_parquet):
     assert result.selected_features == ["x3"]
     assert result.train_data.feature_names == ["x3"]
     assert len(result.tuning_history) == 1
+    assert result.metadata.selection_scope == "fixed"
 
 
-def test_pipeline_default_tuning_receives_fold_local_transforms(poisson_parquet):
+def test_pipeline_fold_scope_tuning_receives_fold_local_transforms(poisson_parquet):
     class RecordingTuner:
         n_trials = 1
         seed = 17
@@ -162,6 +162,7 @@ def test_pipeline_default_tuning_receives_fold_local_transforms(poisson_parquet)
         encoder=OneHotEncoder(),
         selection=IdentitySelector(),
         tuning=RecordingTuner(),
+        selection_scope="fold",
     ).fit(_data(poisson_parquet))
 
 

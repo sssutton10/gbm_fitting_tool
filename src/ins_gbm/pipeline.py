@@ -32,7 +32,7 @@ class ModelRecipe:
     tuning: Optional[HyperparameterTuner] = None
     # Fixed/base hyperparameters. Tuning suggestions override overlapping keys.
     params: Optional[dict] = None
-    selection_scope: Literal["fold", "fixed"] = "fold"
+    selection_scope: Literal["fold", "fixed"] = "fixed"
 
     def fit(self, data: ModelData, **kwargs) -> "FittedPipeline":
         """Fit this recipe; convenient equivalent of ``ModelPipeline(...).run()``."""
@@ -367,10 +367,8 @@ class ModelPipeline:
         best_params: dict = {}
         fold_local_tuning = (
             self.recipe.tuning is not None
-            and (
-                feature_stage == "model"
-                or (self.recipe.selection_scope == "fold" and feature_stage == "raw")
-            )
+            and self.recipe.selection_scope == "fold"
+            and feature_stage in {"raw", "model"}
         )
         if fold_local_tuning:
             self._emit("tuning", "starting fold-local hyperparameter tuning",
@@ -446,6 +444,10 @@ class ModelPipeline:
                 current_train,
                 self.recipe.model,
                 preprocessors=self.recipe.preprocessing,
+                **(
+                    {"model_selected_features": list(feature_names)}
+                    if feature_stage == "model" else {}
+                ),
                 base_params=self.recipe.params,
                 progress=self.progress,
                 should_stop=self.should_stop,

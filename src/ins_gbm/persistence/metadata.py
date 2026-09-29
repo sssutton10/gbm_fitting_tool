@@ -18,7 +18,7 @@ class ReproducibilityMetadata:
     objective: Literal["poisson", "gamma"]
     prediction_scale: str
     artifact_version: int = 2
-    selection_scope: str = "fold"
+    selection_scope: str = "fixed"
     tuning_metric: Optional[str] = None
     model_selected_features: Optional[list[str]] = None
 
@@ -37,7 +37,7 @@ def build_metadata(
     tuning_seed: Optional[int] = None,
     input_feature_names: Optional[list[str]] = None,
     selection_stages: Optional[list[dict]] = None,
-    selection_scope: str = "fold",
+    selection_scope: str = "fixed",
     tuning_metric: Optional[str] = None,
     model_selected_features: Optional[list[str]] = None,
 ) -> ReproducibilityMetadata:

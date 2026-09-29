@@ -45,9 +45,9 @@ Behavioral changes made during the 2026 correctness review:
   finite/non-null validation before fitting or evaluation.
 - `CVConfig(folds="auto")` uses `ModelData.cv_fold` when present and otherwise
   creates shuffled folds. Fold IDs remain row metadata rather than predictors.
-- Encoding, learned feature selection, and preprocessing are fold-local during
-  tuning by default. `ModelRecipe(selection_scope="fixed")` retains the previous
-  conditional tuning workflow explicitly.
+- Encoding and learned feature selection run before tuning by default.
+  Preprocessing is fold-local during tuning. `ModelRecipe(selection_scope="fold")`
+  refits encoding and selection in each tuning fold.
 - Ensemble OOF refits preserve the fitted base model's effective parameters.
 - `HyperparameterTuner(metric=None)` infers objective-specific deviance and merges
   trial suggestions over `ModelRecipe.params`.
@@ -64,8 +64,8 @@ At a high level, the tool does this:
 2. Validate basic target, exposure, weight, offset, fold, and comparison fields.
 3. Optionally choose a raw-feature subset and configure encoding, selection, and
    preprocessing.
-4. Optionally tune with every learned transform refit within each fold, then fit
-   the transforms and model on all training rows.
+4. Fit encoding and selection, optionally tune on folds with the selected
+   features, then fit preprocessing and the model on all training rows.
 5. Evaluate an explicitly supplied holdout with the fitted artifacts.
 6. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
@@ -931,10 +931,10 @@ Pitfall: if `tuning` is present, tuned best params take precedence over
 
 1. Optionally restrict the raw input to `feature_names`, or defer a fixed
    `feature_names` subset until after encoding with `feature_stage="encoded"`.
-2. If tuning, fit the encoder, selector, and preprocessors independently inside
-   each tuning fold by default.
-3. Choose effective parameters by merging trial suggestions over recipe params.
-4. Fit the encoder, selection, preprocessing, and model on all supplied data.
+2. Fit the encoder and selector on all supplied training rows.
+3. If tuning, fit preprocessors independently inside each tuning fold using the
+   selected features. Merge trial suggestions over recipe params.
+4. Fit preprocessing and the model on all supplied data.
 5. Build reproducibility metadata and return `FittedPipeline`.
 
 Call `FittedPipeline.evaluate(holdout_data)` to transform and evaluate a
@@ -943,7 +943,7 @@ fitting, preprocessor fitting, or model fitting.
 
 ### Tuning Inside Pipeline
 
-If `recipe.tuning` is supplied, pipeline tuning calls:
+With `selection_scope="fold"`, pipeline tuning calls:
 
 ```python
 self.recipe.tuning.tune(
@@ -958,9 +958,10 @@ self.recipe.tuning.tune(
 )
 ```
 
-Every learned transform is fold-local in the default `selection_scope="fold"`
-mode. `selection_scope="fixed"` retains the older workflow where selection is
-completed on all supplied training rows before tuning.
+With the default `selection_scope="fixed"`, encoding and selection are
+completed on all supplied training rows before tuning. The tuner receives the
+selected features and refits preprocessing within each fold. Set
+`selection_scope="fold"` to refit encoding and selection within each tuning fold.
 
 When fitting with `recipe.fit(data, feature_names=...)`, that
 ordered raw-feature subset is applied before encoding and selection. Tuning

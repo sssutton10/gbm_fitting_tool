@@ -78,10 +78,10 @@ Random Forest (sklearn) has no native missing-value support, so it receives the 
 
 ## Leakage Guardrails
 
-- Tuning fits the encoder, learned selector, and preprocessors only on each training fold by default. `selection_scope="fixed"` explicitly requests the older conditional-selection workflow. Keep the final holdout entirely separate.
+- By default, fitting completes encoding and learned selection on the supplied training rows before tuning. Tuning refits preprocessors within each training fold. Set `selection_scope="fold"` to refit encoding and selection within each tuning fold. Keep the final holdout entirely separate.
 - `PLSReducer` is supervised (requires target at fit time); never let it see validation target during CV.
 - Blend weights and stacking meta-learner are fit only on training/OOF data; test set is evaluation-only.
-- The standard order is optional raw-feature subset → fold-local tuning of all learned transforms → fit transforms and model on all supplied rows → explicit holdout evaluation.
+- The standard order is optional raw-feature subset → encode and select on all supplied training rows → tune on folds with the selected features → fit preprocessors and model on all supplied rows → explicit holdout evaluation.
 
 ## Persistence
 

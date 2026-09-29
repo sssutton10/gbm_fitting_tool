@@ -142,10 +142,11 @@ double_lift = compare_cv_double_lift(saved_cv, candidate_cv)
 ```
 
 `auto` uses `ModelData.cv_fold` when present and otherwise uses shuffled K-fold
-splits. Encoding, supervised selection, and preprocessing are refit within tuning
-folds by default. Set `selection_scope="fixed"` only when tuning scores should be
-conditional on selection learned from all supplied training rows. Outer CV of a
-tuned recipe is nested CV.
+splits. By default, encoding and feature selection run once on the supplied
+training rows before tuning. Tuning evaluates the selected features across CV
+folds, refitting preprocessing within each fold. Set `selection_scope="fold"`
+to refit encoding and selection within each tuning fold. Outer CV of a tuned
+recipe is nested CV.
 
 The CV artifact stores fold metrics, out-of-fold predictions, fold assignments,
 and provenance. It does not store targets, exposure, weights, or features. If both
