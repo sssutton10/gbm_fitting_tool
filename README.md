@@ -70,9 +70,9 @@ candidate_cv = candidate_recipe.cross_validate(
     training, cv=CVConfig(n_splits=5, seed=42, folds="auto"),
 )
 metric_comparison = compare_reports({"saved": saved_cv, "candidate": candidate_cv})
+# metric_comparison includes a pooled double_lift_score row.
 double_lift = compare_cv_double_lift(saved_cv, candidate_cv)
-# double_lift has an overall score and one score per fold;
-# positive scores favor the candidate.
+# double_lift also shows each fold; positive scores favor the candidate.
 ```
 
 `auto` uses `ModelData.cv_fold` when present and otherwise uses shuffled K-fold
@@ -84,11 +84,14 @@ tuned recipe is nested CV.
 The CV artifact stores fold metrics, out-of-fold predictions, fold assignments,
 and provenance. It does not store targets, exposure, weights, or features. If both
 CV results are loaded from disk, pass the original training data to
-`compare_cv_double_lift(saved_cv, candidate_cv, data=training)`. Results must use
-the same ordered rows and fold assignments. `compare_reports()` compares standard
-metrics; double lift is calculated separately because it depends on the model pair.
-The overall double-lift score is calculated from all out-of-fold rows, rather
-than averaging the fold scores.
+`compare_reports({"saved": saved_cv, "candidate": candidate_cv}, data=training)`
+or pass `data=training` to `compare_cv_double_lift()`. Results must use the same
+ordered rows and fold assignments. With two aligned CV reports, `compare_reports()`
+adds a pooled `double_lift_score` row under the second report's column; positive
+values favor that report. It omits the row for unaligned reports or when both
+reports are loaded without evaluation data. `compare_cv_double_lift()` also
+returns scores for each fold. The pooled score uses all out-of-fold rows rather
+than averaging fold scores.
 
 `HyperparameterTuner(metric=None)` infers Poisson or Gamma deviance. Recipe params
 are base parameters; trial suggestions override overlapping keys.

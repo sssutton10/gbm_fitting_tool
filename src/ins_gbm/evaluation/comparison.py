@@ -20,7 +20,7 @@ def compare_cv_double_lift(
 ) -> pl.DataFrame:
     """Score aligned OOF predictions; positive scores favor the candidate.
 
-    If *candidate* was loaded from disk, supply the original training data in
+    If both results were loaded from disk, supply the original training data in
     its original row order. No training data is stored in the CV artifact.
     """
     import numpy as np
@@ -53,9 +53,9 @@ def compare_cv_double_lift(
             data.target, data.exposure, data.weight, data.objective,
         )
     else:
+        source = candidate if candidate.actual is not None else reference
         actual, exposure, weight, objective = (
-            candidate.actual, candidate.exposure, candidate.weight,
-            candidate.objective,
+            source.actual, source.exposure, source.weight, source.objective,
         )
     if actual is None:
         raise ValueError(
@@ -99,13 +99,18 @@ def compare_cv_double_lift(
 
 def compare_reports(
     reports: dict[str, "Union[EvaluationReport, CVResult]"],
+    *,
+    data: Optional["ModelData"] = None,
 ) -> pl.DataFrame:
     """Compare two or more EvaluationReport or CVResult objects side by side.
 
     Returns a DataFrame with one row per metric, one column per report key,
     and a 'preferred' column indicating which report wins on each metric.
     CV values are formatted as 'mean +/- std'; single test-set values as 'mean'.
-    Pairwise CV double-lift scores are excluded; use compare_cv_double_lift().
+    For two aligned CV results, the pooled double-lift score appears under the
+    second report name; positive scores favor that report. Supply *data* when
+    both CV results were loaded from disk. Use compare_cv_double_lift() for
+    per-fold scores.
     """
     from ins_gbm.evaluation.report import EvaluationReport
     from ins_gbm.evaluation.cv_report import CVResult, GBM_MODEL_LABEL
@@ -172,5 +177,37 @@ def compare_reports(
             row["preferred"] = "tie" if len(best_names) > 1 else best_names[0]
 
         rows.append(row)
+
+    if len(names) == 2 and all(isinstance(reports[name], CVResult) for name in names):
+        reference, candidate = (reports[name] for name in names)
+        aligned = (
+            reference.data_signature is not None
+            and reference.data_signature == candidate.data_signature
+            and reference.predictions is not None
+            and candidate.predictions is not None
+            and reference.objective is not None
+            and candidate.objective is not None
+            and reference.row_folds is not None
+            and candidate.row_folds is not None
+            and reference.row_folds.equals(candidate.row_folds)
+        )
+        has_evaluation_data = (
+            data is not None or candidate.actual is not None
+            or reference.actual is not None
+        )
+        if aligned and has_evaluation_data:
+            score = compare_cv_double_lift(
+                reference, candidate, data=data,
+            )["score"][0]
+            rows.append({
+                "metric": "double_lift_score",
+                names[0]: None,
+                names[1]: f"{score:+.4f}",
+                "preferred": (
+                    "tie" if abs(score) < 1e-6 else
+                    names[1] if score > 0 else names[0]
+                ),
+            })
+            rows.sort(key=lambda row: row["metric"])
 
     return pl.DataFrame(rows)

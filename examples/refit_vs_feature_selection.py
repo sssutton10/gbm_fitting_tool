@@ -131,8 +131,9 @@ def main() -> None:
             "staged_selection": challenger_cv,
         })
         double_lift = compare_cv_double_lift(saved_baseline_cv, challenger_cv)
-        print(comparison)
-        print(double_lift)  # Positive scores favor staged_selection.
+        print(comparison)  # Includes pooled double lift.
+        print("CV double lift by fold (positive favors staged_selection)")
+        print(double_lift)
         comparison.write_csv(args.output / "cv_metric_comparison.csv")
         double_lift.write_csv(args.output / "cv_double_lift.csv")
 

@@ -120,9 +120,11 @@ the template tunes tree count. No GPU configuration is assumed.
 Each finalist also has a `cv_report/` directory containing fold metrics, summary
 metrics, aligned OOF predictions, fold assignments, and CV provenance. It does
 not contain targets, exposure, weights, or raw features. Load two finalist CV
-reports with `load_cv_result`, use `compare_reports` for standard metrics, and
-call `compare_cv_double_lift(reference, candidate, data=training_data)` for an
-overall and per-fold double-lift score. The same ordered training rows and fold
+reports with `load_cv_result`, use
+`compare_reports({"reference": reference, "candidate": candidate}, data=training_data)`
+for standard metrics and pooled double lift, and call
+`compare_cv_double_lift(reference, candidate, data=training_data)` for per-fold
+detail. The same ordered training rows and fold
 assignments are required; positive double-lift scores favor the candidate.
 The existing CSV metric exports and `oof.parquet` remain available for simple
 inspection and blend workflows.

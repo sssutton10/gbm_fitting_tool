@@ -1259,8 +1259,9 @@ table = compare_reports({
 })
 ```
 
-The output has one row per standard metric, one column per report name, and a
-`preferred` column. Direction comes from `METRIC_DIRECTIONS`:
+The output has one row per metric, one column per report name, and a
+`preferred` column. Direction for standalone metrics comes from
+`METRIC_DIRECTIONS`:
 
 - higher is better for `gini`.
 - lower is better for deviance, RMSE, and MAE.
@@ -1272,9 +1273,11 @@ When a single-model `EvaluationReport` also contains external comparison
 predictions, `compare_reports()` compares the fitted model's metrics rather
 than the benchmark rows.
 
-Pairwise CV double lift is calculated separately because its score depends on
-both models. For two CV results created from the same rows in the same order and
-using the same folds:
+For exactly two aligned CV results, `compare_reports()` adds a pooled
+`double_lift_score` row. The signed value appears under the second report,
+with the first report blank; positive favors the second report, negative favors
+the first, and zero is a tie. Results must come from the same rows in the same
+order and use the same folds:
 
 ```python
 from ins_gbm import compare_cv_double_lift, compare_reports, load_cv_result
@@ -1282,14 +1285,17 @@ from ins_gbm import compare_cv_double_lift, compare_reports, load_cv_result
 saved = load_cv_result("output/baseline/cv_report")
 candidate = candidate_recipe.cross_validate(data, cv=cv)
 metrics = compare_reports({"baseline": saved, "candidate": candidate})
-double_lift = compare_cv_double_lift(saved, candidate)
+fold_details = compare_cv_double_lift(saved, candidate)
 ```
 
-`double_lift` has a pooled score and one score per fold; positive values favor
-the candidate. If both results are loaded from disk, supply the original rows
-with `compare_cv_double_lift(saved, candidate, data=data)`. The comparison
-checks a fingerprint of ordered targets, exposure, weights, and fold assignments.
-The pooled score is calculated from all OOF rows, not averaged from fold scores.
+`fold_details` includes the pooled score and one score per fold. If both reports
+were loaded from disk, supply the original rows with
+`compare_reports({"baseline": saved, "candidate": candidate}, data=data)` or
+`compare_cv_double_lift(saved, candidate, data=data)`. Without evaluation data,
+the standard metrics still appear but the double-lift row is omitted. The row
+is also omitted for unaligned CV reports or more than two reports. The pairwise
+calculation checks a fingerprint of ordered targets, exposure, weights, and
+fold assignments. The pooled score uses all OOF rows, not an average of folds.
 
 Pitfall: comparison-mode `EvaluationReport` objects from
 `EvaluationReport.compare()` cannot be passed into `compare_reports()`. Pass

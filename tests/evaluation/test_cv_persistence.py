@@ -47,13 +47,23 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
     assert restored.actual is None
     assert restored.exposure is None
     assert restored.weight is None
+    expected = compare_cv_double_lift(reference, candidate)
     metric_comparison = compare_reports({"saved": restored, "candidate": candidate})
     assert {"metric", "saved", "candidate", "preferred"}.issubset(
         metric_comparison.columns
     )
-    assert "double_lift_score" not in metric_comparison["metric"].to_list()
+    pairwise = metric_comparison.filter(pl.col("metric") == "double_lift_score")
+    assert pairwise.height == 1
+    assert pairwise["saved"][0] is None
+    assert pairwise["candidate"][0] == f"{expected['score'][0]:+.4f}"
+    assert pairwise["preferred"][0] == (
+        "tie" if abs(expected["score"][0]) < 1e-6 else
+        "candidate" if expected["score"][0] > 0 else "saved"
+    )
+    assert compare_reports({
+        "reference": reference, "candidate": candidate,
+    }).filter(pl.col("metric") == "double_lift_score").height == 1
 
-    expected = compare_cv_double_lift(reference, candidate)
     actual = compare_cv_double_lift(restored, candidate)
     assert actual["score"].to_list() == pytest.approx(expected["score"].to_list())
     assert actual["scope"].to_list() == ["overall", "fold", "fold", "fold"]
@@ -76,6 +86,20 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
 
     candidate.save(str(tmp_path / "candidate_cv"))
     loaded_candidate = load_cv_result(str(tmp_path / "candidate_cv"))
+    assert compare_reports({
+        "reference": reference, "candidate": loaded_candidate,
+    }).filter(pl.col("metric") == "double_lift_score")["candidate"][0] == (
+        f"{expected['score'][0]:+.4f}"
+    )
+    assert "double_lift_score" not in compare_reports({
+        "saved": restored, "candidate": loaded_candidate,
+    })["metric"].to_list()
+    loaded_comparison = compare_reports(
+        {"saved": restored, "candidate": loaded_candidate}, data=data,
+    )
+    assert loaded_comparison.filter(pl.col("metric") == "double_lift_score")[
+        "candidate"
+    ][0] == f"{expected['score'][0]:+.4f}"
     assert compare_cv_double_lift(restored, loaded_candidate, data=data)[
         "score"
     ].to_list() == pytest.approx(expected["score"].to_list())
@@ -90,6 +114,11 @@ def test_saved_cv_metrics_and_double_lift_round_trip(poisson_parquet, tmp_path):
     assert "weight" not in metadata
     assert metadata["row_count"] == data.n_rows
 
+    tied = compare_reports({"reference": restored, "clone": reference})
+    tied_row = tied.filter(pl.col("metric") == "double_lift_score")
+    assert tied_row["clone"][0] == "+0.0000"
+    assert tied_row["preferred"][0] == "tie"
+
 
 def test_cv_double_lift_rejects_misalignment(poisson_parquet, tmp_path):
     data = _data(poisson_parquet)
@@ -101,6 +130,8 @@ def test_cv_double_lift_rejects_misalignment(poisson_parquet, tmp_path):
     reordered_data = replace(data, target=data.target.reverse())
     with pytest.raises(ValueError, match="does not match"):
         compare_cv_double_lift(saved, candidate, data=reordered_data)
+    with pytest.raises(ValueError, match="does not match"):
+        compare_reports({"saved": saved, "candidate": candidate}, data=reordered_data)
     changed_weights = replace(data, weight=pl.Series([2.0] * data.n_rows))
     with pytest.raises(ValueError, match="does not match"):
         compare_cv_double_lift(saved, candidate, data=changed_weights)
@@ -110,3 +141,10 @@ def test_cv_double_lift_rejects_misalignment(poisson_parquet, tmp_path):
         )
     with pytest.raises(ValueError, match="does not match"):
         compare_cv_double_lift(saved, replace(candidate, objective="gamma"))
+    different_folds = replace(candidate, row_folds=candidate.row_folds.reverse())
+    assert "double_lift_score" not in compare_reports({
+        "saved": saved, "candidate": different_folds,
+    })["metric"].to_list()
+    assert "double_lift_score" not in compare_reports({
+        "saved": saved, "candidate": candidate, "another": candidate,
+    })["metric"].to_list()

@@ -109,7 +109,7 @@ def main() -> None:
         )
         print("Saved versus candidate CV metrics")
         print(compare_reports({"saved": saved_cv, "candidate": candidate_cv}))
-        print("CV double lift (positive favors candidate)")
+        print("CV double lift by fold (positive favors candidate)")
         print(compare_cv_double_lift(saved_cv, candidate_cv))
 
     severity_train, severity_holdout = severity_data()
