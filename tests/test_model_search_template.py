@@ -3,6 +3,8 @@ from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import sys
+import json
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -51,7 +53,7 @@ def test_blend_search_includes_baseline_and_improving_mixture(objective):
     assert template.deviance(data, predictions @ best[1]) == pytest.approx(0, abs=1e-8)
 
 
-def test_protected_selection_retains_all_category_levels(monkeypatch):
+def test_encoded_selection_can_drop_category_levels_and_existing_features(monkeypatch):
     data = ModelData(
         features=pl.DataFrame({"existing": ["a", "b", "a"], "new": ["x", "y", "z"], "noise": [1., 2., 3.]}),
         target=pl.Series([1., 2., 1.]), feature_names=["existing", "new", "noise"], objective="poisson",
@@ -60,23 +62,47 @@ def test_protected_selection_retains_all_category_levels(monkeypatch):
     encoded = data.with_features(encoder.transform(data.features))
 
     class RankingModel:
+        def capabilities(self):
+            return SimpleNamespace(supports_feature_importance=True)
+
         def fit(self, data, params):
             self.names = data.feature_names
+            self.params = params
+            self.framework = "lightgbm"
             return self
 
         def feature_importance(self, kind):
-            # Each new categorical indicator has modest gain; their group wins.
+            # Keep only one level of 'new'; even 'existing' can disappear.
             return pl.DataFrame({"feature": self.names, "importance": [
-                10. if name == "noise" else (5. if name.startswith("new__") else 0.)
+                {"noise": 10., "new__y": 9., "existing__a": 3.}.get(name, 0.)
                 for name in self.names
             ]})
 
     monkeypatch.setattr(template, "LightGBMModel", RankingModel)
-    selector = template.ProtectedRawSelector(
-        raw_names=data.feature_names, categorical=["existing", "new"],
-        protected=["existing"], caps=[2, 1], threads=1, seed=42,
-    )
-    selected = selector.fit(encoded).selected_features()
-    assert set(selected) == {"existing__a", "existing__b", "new__x", "new__y", "new__z"}
-    with pytest.raises(ValueError, match="Ambiguous"):
-        template.ProtectedRawSelector(["a", "a__b"], ["a", "a__b"], [], [1], 1, 42).owner("a__b__c")
+    config = json.loads((Path(__file__).parents[1] / "examples/model_search_config.json").read_text())
+    config["selection_encoded_caps"] = [4, 2]
+    candidate = {"family": "lightgbm", "strategy": "encoded_selection"}
+    selector = template.make_recipe(config, candidate, data, 1, 42).selection
+    result = selector.fit(encoded)
+    assert set(result.selected_features()) == {"noise", "new__y"}
+    assert [len(stage.selected_feature_names) for stage in result.stage_results()] == [4, 2]
+    config["selection_encoded_caps"] = [100]
+    selector = template.make_recipe(config, candidate, data, 1, 42).selection
+    assert selector.fit(encoded).selected_features() == encoded.feature_names
+
+
+@pytest.mark.parametrize("caps", [[], [0], [-1], [50, 100], [1.5], [True]])
+def test_invalid_encoded_caps_are_rejected(caps):
+    config = json.loads((Path(__file__).parents[1] / "examples/model_search_config.json").read_text())
+    config["selection_encoded_caps"] = caps
+    with pytest.raises(ValueError, match="selection_encoded_caps"):
+        template.validate_config(config)
+
+
+def test_all_challengers_start_from_full_pool():
+    config = json.loads((Path(__file__).parents[1] / "examples/model_search_config.json").read_text())
+    candidates = template.candidate_list(config)
+    challengers = [c for c in candidates if c["strategy"] == "encoded_selection"]
+    assert {c["family"] for c in challengers} == set(template.FAMILIES)
+    assert all(c["features"] == config["candidate_features"] for c in challengers)
+    assert len([c for c in candidates if c["strategy"] == "existing"]) == 1

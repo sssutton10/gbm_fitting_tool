@@ -23,6 +23,7 @@ from scipy.special import xlogy
 from ins_gbm import (
     CVConfig, CatBoostModel, HyperparameterTuner, LightGBMModel, ModelRecipe,
     OneHotEncoder, RandomForestModel, XGBoostModel, load_model, load_model_data,
+    ImportanceSelectionStage, StagedImportanceSelector,
 )
 from ins_gbm.data.model_data import slice_model_data
 from ins_gbm.evaluation.metrics import compute_metrics
@@ -71,59 +72,6 @@ class SearchModel:
         return space
 
 
-@dataclass
-class SelectedColumns:
-    columns: list[str]
-
-    def selected_features(self):
-        return self.columns
-
-
-@dataclass
-class ProtectedRawSelector:
-    """Rank raw groups by summed gain, retaining ALL existing raw features.
-
-    Called after encoding, within each training fold. All one-hot levels of a
-    selected categorical feature are retained. Caps apply to NEW raw features.
-    This is a screening heuristic; high-cardinality groups can attract more gain.
-    The unpruned full-pool candidate is always evaluated too.
-    """
-    raw_names: list[str]
-    categorical: list[str]
-    protected: list[str]
-    caps: list[int]
-    threads: int
-    seed: int
-    trees: int = 100
-
-    def owner(self, encoded):
-        matches = [raw for raw in self.raw_names if
-                   (raw not in self.categorical and encoded == raw)
-                   or (raw in self.categorical and encoded.startswith(raw + "__"))]
-        if len(matches) != 1:
-            raise ValueError(f"Ambiguous encoded name {encoded!r}; rename raw columns to avoid '__' collisions")
-        return matches[0]
-
-    def fit(self, data):
-        owners = {name: self.owner(name) for name in data.feature_names}
-        current = data
-        for cap in self.caps:
-            fitted = LightGBMModel().fit(current, params={
-                "n_estimators": self.trees, "num_leaves": 31, "min_child_samples": 50,
-                "num_threads": self.threads, "seed": self.seed, "verbose": -1,
-            })
-            scores = dict.fromkeys(self.raw_names, 0.0)
-            for name, gain in fitted.feature_importance("gain").iter_rows():
-                scores[owners[name]] += gain
-            available = {owners[name] for name in current.feature_names}
-            extras = [name for name in self.raw_names if name in available and name not in self.protected]
-            extras.sort(key=lambda name: -scores[name])
-            keep = set(self.protected) | set(extras[:cap])
-            columns = [name for name in current.feature_names if owners[name] in keep]
-            current = current.with_features(current.features.select(columns))
-        return SelectedColumns(list(current.feature_names))
-
-
 def base_params(family, seed, threads):
     if family == "lightgbm":
         # subsample needs a positive bagging frequency to have an effect.
@@ -138,13 +86,19 @@ def base_params(family, seed, threads):
 
 def make_recipe(config, candidate, training, trials, seed, *, screening=False):
     selector = None
-    if candidate["strategy"] == "protected_selection":
-        selector = ProtectedRawSelector(
-            raw_names=config["candidate_features"], categorical=training.schema.categorical,
-            protected=config["existing_features"], caps=config["selection_new_feature_caps"],
-            threads=config["threads_per_model"], seed=seed,
-            trees=config.get("selection_trees", 100),
-        )
+    if candidate["strategy"] == "encoded_selection":
+        # Rank individual model columns, including individual categorical levels.
+        # Each stage refits on the previous stage's survivors. Nothing is protected.
+        selector = StagedImportanceSelector(stages=[
+            ImportanceSelectionStage(
+                name=f"encoded_top_{cap}_stage_{index}", model=LightGBMModel(),
+                max_features=cap, importance_type="gain",
+                params={"n_estimators": config.get("selection_trees", 100),
+                        "num_leaves": 31, "min_child_samples": 50,
+                        "num_threads": config["threads_per_model"], "seed": seed, "verbose": -1},
+            )
+            for index, cap in enumerate(config["selection_encoded_caps"], start=1)
+        ])
     params = base_params(candidate["family"], seed, config["threads_per_model"])
     if candidate["strategy"] == "known_baseline":
         params.update(config["known_baseline_params"])
@@ -192,13 +146,12 @@ def deviance(data, predictions):
 
 
 def candidate_list(config):
-    strategies = {"existing": config["existing_features"], "full": config["candidate_features"]}
-    if config["selection_new_feature_caps"]:
-        strategies["protected_selection"] = config["candidate_features"]
-    for label, features in config.get("additional_feature_groups", {}).items():
-        strategies[f"add_{label}"] = list(dict.fromkeys(config["existing_features"] + features))
-    candidates = [dict(name=f"{family}_{strategy}", family=family, strategy=strategy, features=features)
-                  for family in FAMILIES for strategy, features in strategies.items()]
+    candidates = [dict(name=f"{family}_encoded_selection", family=family,
+                       strategy="encoded_selection", features=config["candidate_features"])
+                  for family in FAMILIES]
+    candidates.append(dict(name=f"{config['baseline_family']}_existing",
+                           family=config["baseline_family"], strategy="existing",
+                           features=config["existing_features"]))
     if config.get("known_baseline_params"):
         candidates.append(dict(name="known_baseline", family=config["baseline_family"],
                                strategy="known_baseline", features=config["existing_features"]))
@@ -273,7 +226,7 @@ def search(config):
     # Give EVERY family a full-data finalist, even if its screening result loses.
     finalists = []
     for family in FAMILIES:
-        family_candidates = [c for c in candidates if c["family"] == family and c["strategy"] != "known_baseline"]
+        family_candidates = [c for c in candidates if c["family"] == family and c["strategy"] == "encoded_selection"]
         finalists.extend(sorted(family_candidates, key=lambda c: scores[c["name"]])[:config["finalists_per_family"]])
     # Always refine the baseline's existing feature set and retain known params.
     finalists.extend(c for c in candidates if c["name"] == f"{config['baseline_family']}_existing" or c["strategy"] == "known_baseline")
@@ -290,6 +243,8 @@ def search(config):
             folder = out / "models" / name
             fitted.save(str(folder))
             write_json(folder / "selected_encoded_features.json", fitted.selected_features or fitted.fitted_model.feature_names)
+            for stage in fitted.selection_results or []:
+                stage.ranking.write_csv(folder / f"{stage.name}_ranking.csv")
             refined.append({"candidate": name, "validation_deviance": deviance(validation, prediction)})
             del fitted
             gc.collect()
@@ -376,12 +331,13 @@ def validate_config(config):
         raise ValueError("Invalid baseline family or objective")
     if not set(config.get("categorical_features", [])).issubset(pool):
         raise ValueError("Categorical features must be in the candidate pool")
-    for features in config.get("additional_feature_groups", {}).values():
-        if not set(features).issubset(pool):
-            raise ValueError("Additional groups must use candidate features")
-    caps = config["selection_new_feature_caps"]
-    if any(cap < 0 for cap in caps) or caps != sorted(caps, reverse=True):
-        raise ValueError("Selection caps must be nonnegative and non-increasing")
+    if "selection_new_feature_caps" in config or "additional_feature_groups" in config:
+        raise ValueError("Replace legacy selection_new_feature_caps/additional_feature_groups with selection_encoded_caps, e.g. [200, 100]")
+    caps = config.get("selection_encoded_caps")
+    if (not isinstance(caps, list) or not caps
+            or any(type(cap) is not int or cap < 1 for cap in caps)
+            or caps != sorted(caps, reverse=True)):
+        raise ValueError("selection_encoded_caps must be a nonempty list of positive, non-increasing integers")
     for key in ["screen_rows", "screen_trials", "final_trials", "finalists_per_family", "threads_per_model"]:
         if config[key] < 1:
             raise ValueError(f"{key} must be positive")

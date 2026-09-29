@@ -23,7 +23,8 @@ No procedure guarantees beating the refit on new data.
 - Replace the example `candidate_features` with your explicit 677-column raw
   candidate pool, including every `existing_features` column. Exclude IDs,
   benchmark predictions, target-derived fields, and information unavailable at
-  prediction time. Counts refer to raw features, not one-hot columns.
+  prediction time. Input lists contain raw names; selection caps count encoded
+  model columns, including individual one-hot indicators.
 - String/Boolean categories are inferred. Put integer-coded categorical columns
   in `categorical_features`; those columns are converted to strings. Encoding is
   learned independently in every fitting fold. An unseen category scores as all
@@ -38,10 +39,13 @@ No procedure guarantees beating the refit on new data.
   hyperparameters in `known_baseline_params`. They receive a separate untuned
   candidate, ensuring the search does not need to rediscover them. Refit from
   scratch using today's code; do not substitute a pre-fix serialized model.
-- Optional `additional_feature_groups` is a mapping such as
-  `{"geography": ["territory"], "usage": ["annual_miles"]}`. Each candidate adds
-  that group to ALL existing features. Specify combined groups explicitly to
-  investigate interactions. The script does not enumerate 2^677 subsets.
+- Set `selection_encoded_caps` to `[200, 100]` to start with ALL encoded columns,
+  prune to 200, refit the selection model, and prune to 100. Use `[200, 50]` for
+  a final 50, or `[50]` for a single pruning stage. These are TOTAL column caps,
+  not counts of new features. If fewer columns are available, all available
+  columns survive that stage. Counts must be positive and non-increasing.
+  Replace the old `selection_new_feature_caps` setting and remove
+  `additional_feature_groups`; legacy settings now raise a migration error.
 - `fold_column` optionally names predefined training fold IDs (at least three
   IDs for nested CV). Keep related observations in the same fold. The built-in
   splitter trains on all other folds: it is NOT forward-only temporal CV.
@@ -50,22 +54,27 @@ No procedure guarantees beating the refit on new data.
 
 ## Search process
 
-1. Fit each of LightGBM, XGBoost, CatBoost, and Random Forest using existing
-   features, the full pool, and protected staged selection. Optional feature-group
-   additions run for every family too. Screening uses the same 30k training-row
+1. Fit each of LightGBM, XGBoost, CatBoost, and Random Forest starting with the
+   full raw pool, encoding it, and pruning to the configured encoded count.
+   Separately fit the existing-feature benchmark in its original model family.
+   Screening uses the same 30k training-row
    sample, six tuning trials and three folds per candidate by default. Validation
    is a separate dataset. Sampling reduces cost, but can miss rare signals.
-2. Protected selection ranks encoded-column gains summed by their raw source.
-   It retains every existing raw feature and every encoded level of that feature.
-   Default stages retain at most 200, then 75 NEW raw features. They can still
-   create many more encoded columns. Selection is refit inside tuning folds.
-   Grouped gain is a heuristic, not proof of utility; compare with the unpruned
-   candidate. Edit caps and screening complexity using development data only.
+2. Selection ranks each encoded column independently using a LightGBM screening
+   model's gain. It can retain `territory__A` while dropping `territory__B`, and
+   it can drop existing-model features. No columns or categorical groups are
+   protected. Each stage refits on the preceding stage's survivors. Selection is
+   relearned inside tuning and outer CV folds, so selected names may differ by
+   fold. All four families use this same selection method. Top-N is a ranking
+   heuristic, not a significance test; ties can retain zero-gain columns to reach
+   the requested count. Edit caps and screening settings on development data.
+   The separate baseline is exempt from the cap. A blend's union of features can
+   exceed the per-model cap when members select different columns.
 3. Promote at least one candidate PER FAMILY to full training-data tuning with
    25 trials. Always include the baseline-family existing-feature candidate and
-   any known-parameter baseline. Increase `finalists_per_family` to retain more
-   feature strategies; increase budgets after a small initial run. Narrowing by
-   sample performance can discard a model that would do better with more data.
+   any known-parameter baseline. There is one pruned strategy per family, so all
+   four advance; `finalists_per_family` currently has no effect above one.
+   Increase tuning budgets after a small initial run.
 4. Generate nested out-of-fold predictions for each finalist. Each outer fold
    repeats encoding, selection, and full hyperparameter tuning on its training
    rows. Final full-data models and OOF predictions are saved. Optional additional
@@ -102,10 +111,10 @@ rare-level grouping must also be fitted inside folds.
 Trials and models run sequentially, with bounded per-model threads. Full models
 are saved and released before the next fit; only small prediction matrices stay
 in memory for blending. Selection inside every trial can be expensive in the
-current implementation. The default 12 screening candidates need about 216
+current implementation. The default five screening candidates need about 90
 tuning-fold fits, plus full fits and selector fits. With five finalists, the
 full-data + nested-CV stage needs roughly 1,500 additional tuning-fold fits
-at 25 trials, three inner folds, and three outer folds. Extra seeds/groups
+at 25 trials, three inner folds, and three outer folds. Extra seeds
 multiply the work. These are substantial searches, not quick scripts.
 
 For a plumbing check, set trials to 1, tree ranges to [5, 5], selection_trees to 5,
@@ -116,7 +125,8 @@ the template tunes tree count. No GPU configuration is assumed.
 ## Outputs and scoring
 
 `screening.csv` and `finalists.csv` summarize development performance.
-`models/` holds fitted pipelines, selected encoded features, and tuning histories.
+`models/` holds fitted pipelines, selected encoded features, per-stage rankings,
+and tuning histories.
 Each finalist also has a `cv_report/` directory containing fold metrics, summary
 metrics, aligned OOF predictions, fold assignments, and CV provenance. It does
 not contain targets, exposure, weights, or raw features. Load two finalist CV
