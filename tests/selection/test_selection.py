@@ -1,3 +1,4 @@
+import numpy as np
 import polars as pl
 import pytest
 
@@ -97,6 +98,58 @@ def test_boruta_only_trained_on_given_data(poisson_parquet):
     # Should fit without error on training data only
     fitted = selector.fit(train)
     assert fitted is not None
+
+
+def test_boruta_shadow_percentile_relaxes_hit_threshold(poisson_parquet, monkeypatch):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
+
+    def fit_base(self, selection_data, rng):
+        class Fitted:
+            def feature_importance(self):
+                return pl.DataFrame({
+                    "feature": ["x1", "x3", "shadow__x1", "shadow__x3"],
+                    "importance": [60.0, 0.0, 100.0, 0.0],
+                })
+
+        return Fitted()
+
+    monkeypatch.setattr(BorutaSelector, "_fit_base", fit_base)
+    strict = BorutaSelector(max_iter=10).fit(data)
+    relaxed = BorutaSelector(max_iter=10, shadow_percentile=50).fit(data)
+
+    assert strict.selected_features() == []
+    assert relaxed.selected_features() == ["x1"]
+    assert relaxed.hit_counts == {"x1": 10, "x3": 0}
+    assert relaxed.classification()["hits"].to_list() == [10, 0]
+
+
+def test_boruta_base_tree_count_reaches_estimator(poisson_parquet, monkeypatch):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
+    recorded = []
+
+    def fit(self, data, params):
+        recorded.append(params)
+        return object()
+
+    monkeypatch.setattr(LightGBMModel, "fit", fit)
+    BorutaSelector(base_n_estimators=120)._fit_base(data, np.random.default_rng(1))
+    assert recorded[0]["n_estimators"] == 120
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"shadow_percentile": 0}, "shadow_percentile"),
+    ({"shadow_percentile": 101}, "shadow_percentile"),
+    ({"base_n_estimators": 0}, "base_n_estimators"),
+])
+def test_boruta_rejects_invalid_threshold_settings(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        BorutaSelector(**kwargs)
 
 
 def test_boruta_raw_candidates_expand_levels_without_changing_data(

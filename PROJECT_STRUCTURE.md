@@ -605,7 +605,8 @@ Defined in `selection/boruta.py`.
 
 1. For each iteration, shuffle every original feature to create shadow features.
 2. Fit a base model on original plus shadow features.
-3. Compare original feature importance to the maximum shadow importance.
+3. Compare original feature importance to the configured shadow importance
+   percentile (the maximum by default).
 4. Count "hits" across iterations.
 5. Use a binomial test to classify features as:
    - `confirmed`
@@ -622,6 +623,15 @@ The fitted selector exposes:
 - `selected_features()`: confirmed plus tentative features.
 - `confirmed_features()`: confirmed features only.
 - `classification()`: DataFrame with feature status.
+
+The default screen uses 30 trees per iteration and the strongest shadow
+(`base_n_estimators=30`, `shadow_percentile=100`). For a broader screen, set
+`shadow_percentile=95` or `90`, and optionally increase
+`base_n_estimators` so the base learner can use more features. A lower shadow
+percentile admits more hits and can retain more features, including more noise.
+`classification()` includes each feature's `hits` count for inspection. Changing
+`alpha` alone is not a feature-count control: `selected_features()` already
+includes tentative features, and a larger alpha can reject more of them.
 
 This selector fits the pipeline selector contract because `fit(data)` returns an
 object with `selected_features()`.

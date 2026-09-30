@@ -95,6 +95,14 @@ expect data at the stage named by `candidate_stage`. Candidates must be present
 in that stage. The supplied `ModelData`, including its comparison predictions
 and fold assignments, remains available for CV and double-lift reporting.
 
+Boruta's default threshold is the strongest shadow feature in each iteration.
+For a less strict screen, set `shadow_percentile=95` (or `90` for a broader
+screen). `base_n_estimators` controls the trees in each Boruta fit; its default
+is 30. Inspect `BorutaSelector(...).fit(encoded_train).classification()` for
+feature statuses and hit counts. Increasing `alpha` can reject more features;
+it does not make `selected_features()` longer because that method already
+includes tentative features.
+
 ## Screen features across CV folds
 
 `cv_feature_importance` fits a shallow XGBoost model on the training rows of

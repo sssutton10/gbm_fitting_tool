@@ -34,6 +34,9 @@ class BorutaSelector:
         candidate_features (list[str] | None): Starting features for selection; None uses
             all features. Raw categorical names include all their encoded levels.
         candidate_stage (Literal['raw', 'encoded']): Stage at which candidate names apply.
+        shadow_percentile (float): Percentile of shadow importance used as the hit
+            threshold. 100 uses the strongest shadow; lower values are less strict.
+        base_n_estimators (int): Number of trees in each Boruta base fit.
     """
 
     base_estimator: Literal["lightgbm", "random_forest"] = "lightgbm"
@@ -42,6 +45,8 @@ class BorutaSelector:
     seed: int = 42
     candidate_features: list[str] | None = None
     candidate_stage: Literal["raw", "encoded"] = "raw"
+    shadow_percentile: float = 100.0
+    base_n_estimators: int = 30
 
     def __post_init__(self) -> None:
         if self.candidate_stage not in ("raw", "encoded"):
@@ -51,6 +56,12 @@ class BorutaSelector:
                 raise ValueError("candidate_features must contain at least one feature")
             if len(set(self.candidate_features)) != len(self.candidate_features):
                 raise ValueError("candidate_features must be unique")
+        if not 0 < self.shadow_percentile <= 100:
+            raise ValueError("shadow_percentile must be in (0, 100]")
+        if isinstance(self.base_n_estimators, bool) or not isinstance(
+            self.base_n_estimators, int
+        ) or self.base_n_estimators < 1:
+            raise ValueError("base_n_estimators must be a positive integer")
 
     def fit(self, data: ModelData) -> FittedBorutaSelector:
         """Fit feature selection on the supplied training data.
@@ -87,10 +98,14 @@ class BorutaSelector:
             shadow_importances = [
                 imp_dict.get(f"shadow__{col}", 0.0) for col in original_features
             ]
-            max_shadow = max(shadow_importances) if shadow_importances else 0.0
+            shadow_cutoff = (
+                float(np.percentile(shadow_importances, self.shadow_percentile))
+                if shadow_importances
+                else 0.0
+            )
 
             for col in original_features:
-                if imp_dict.get(col, 0.0) > max_shadow:
+                if imp_dict.get(col, 0.0) > shadow_cutoff:
                     hit_counts[col] += 1
 
         # Binomial test: H0 = feature hits by chance (p=0.5)
@@ -108,6 +123,7 @@ class BorutaSelector:
         return FittedBorutaSelector(
             classification_map=classification,
             original_features=original_features,
+            hit_counts=hit_counts,
         )
 
     def _fit_base(self, data: ModelData, rng: np.random.Generator):
@@ -122,13 +138,19 @@ class BorutaSelector:
             from ins_gbm.models.lightgbm import LightGBMModel
 
             return LightGBMModel(objective=data.objective or "poisson").fit(
-                data, params={"n_estimators": 30, "verbose": -1, "seed": seed}
+                data,
+                params={
+                    "n_estimators": self.base_n_estimators,
+                    "verbose": -1,
+                    "seed": seed,
+                },
             )
         else:
             from ins_gbm.models.random_forest import RandomForestModel
 
             return RandomForestModel(objective=data.objective or "poisson").fit(
-                data, params={"n_estimators": 30, "random_state": seed}
+                data,
+                params={"n_estimators": self.base_n_estimators, "random_state": seed},
             )
 
 
@@ -139,10 +161,12 @@ class FittedBorutaSelector:
     Args:
         classification_map (dict[str, str]): Boruta classification for each original feature.
         original_features (list[str]): Names of features before Boruta selection.
+        hit_counts (dict[str, int]): Number of iterations each feature beat the shadow cutoff.
     """
 
     classification_map: dict[str, str]
     original_features: list[str]
+    hit_counts: dict[str, int] | None = None
 
     def selected_features(self) -> list[str]:
         """Return confirmed + tentative features."""
@@ -162,9 +186,10 @@ class FittedBorutaSelector:
 
     def classification(self) -> pl.DataFrame:
         """Return Boruta classifications for all original features."""
-        return pl.DataFrame(
-            {
-                "feature": self.original_features,
-                "status": [self.classification_map[f] for f in self.original_features],
-            }
-        )
+        columns = {
+            "feature": self.original_features,
+            "status": [self.classification_map[f] for f in self.original_features],
+        }
+        if self.hit_counts is not None:
+            columns["hits"] = [self.hit_counts[f] for f in self.original_features]
+        return pl.DataFrame(columns)
