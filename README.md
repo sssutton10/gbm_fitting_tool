@@ -64,6 +64,37 @@ The new recipe must produce the selected model columns. Plain `feature_names`
 lists still refer to raw inputs unless `feature_stage="encoded"` or
 `feature_stage="model"` is specified.
 
+## Start selection from a smaller candidate set
+
+Set candidates on `BorutaSelector` or `StagedImportanceSelector` while passing
+the original `ModelData` to fitting and CV. Raw candidates limit encoding and
+selection; each categorical raw feature includes all its one-hot levels. Encoded
+candidates limit selection after encoding and can name individual levels.
+Features outside the candidate set are excluded from the final model.
+
+```python
+from ins_gbm import BorutaSelector
+
+raw_recipe = ModelRecipe(
+    model=LightGBMModel(), encoder=OneHotEncoder(),
+    selection=BorutaSelector(candidate_features=["driver_age", "territory"]),
+)
+encoded_recipe = ModelRecipe(
+    model=LightGBMModel(), encoder=OneHotEncoder(),
+    selection=BorutaSelector(
+        candidate_features=["driver_age", "territory__north"],
+        candidate_stage="encoded",
+    ),
+)
+raw_fit = raw_recipe.fit(training)
+encoded_cv = encoded_recipe.cross_validate(training)
+```
+
+The same settings work on `StagedImportanceSelector`. Direct selector fits
+expect data at the stage named by `candidate_stage`. Candidates must be present
+in that stage. The supplied `ModelData`, including its comparison predictions
+and fold assignments, remains available for CV and double-lift reporting.
+
 ## Screen features across CV folds
 
 `cv_feature_importance` fits a shallow XGBoost model on the training rows of

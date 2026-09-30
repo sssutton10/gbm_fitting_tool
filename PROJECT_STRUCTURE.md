@@ -626,6 +626,16 @@ The fitted selector exposes:
 This selector fits the pipeline selector contract because `fit(data)` returns an
 object with `selected_features()`.
 
+Set `candidate_features=[...]` on `BorutaSelector` to limit its starting search
+space. `candidate_stage="raw"` (the default) names raw inputs and restricts them
+before encoding; a categorical name contributes all its encoded levels.
+`candidate_stage="encoded"` names individual post-encoding columns and restricts
+the selector after encoding. Features outside the candidate set do not enter the
+final model. The `ModelData` passed to `recipe.fit()` or
+`recipe.cross_validate()` is unchanged, so its folds and comparison predictions
+remain available for CV and double-lift comparisons. Direct selector fits
+expect data already at the named stage.
+
 ### Staged Importance Selection
 
 Defined in `selection/importance.py` and exported from `ins_gbm.selection`.
@@ -643,6 +653,11 @@ Each stage fits on the columns retained by the prior stage, ranks importance in
 descending order, and keeps at most `max_features` columns. Equal scores retain
 incoming feature order. Selection runs after one-hot encoding, so feature caps
 refer to encoded columns rather than original source fields.
+
+`StagedImportanceSelector` accepts the same `candidate_features` and
+`candidate_stage` settings as Boruta. The candidate set applies before the
+first importance stage; later stages operate on its survivors. Candidate lists
+must be nonempty, unique, and present at the requested stage.
 
 The usual pattern is a shallow, fast screening learner followed by a more
 realistic tree configuration for final pruning. Stage learner parameters remain
@@ -1679,7 +1694,9 @@ recipe = ModelRecipe(
         base_estimator="lightgbm",
         max_iter=50,
         seed=42,
+        candidate_features=["x1", "x3"],
     ),
+    selection_scope="fold",
     tuning=HyperparameterTuner(
         n_trials=25,
         cv_folds=5,
@@ -1689,9 +1706,14 @@ recipe = ModelRecipe(
     ),
 )
 
-result = recipe.fit(data, feature_names=["x1", "x3"])
+result = recipe.fit(data)
 history = result.tuning_history
 ```
+
+For individual one-hot levels, use
+`candidate_features=["x1", "territory__north"]` with
+`candidate_stage="encoded"`. Pass the same full `data` to CV reporting; the
+selector applies its candidate limit within each fit.
 
 This fit relearns the encoder, selector, and preprocessing inside tuning folds.
 It then fits them on all training rows for the returned model.

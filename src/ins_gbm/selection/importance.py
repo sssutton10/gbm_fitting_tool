@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -189,9 +189,14 @@ class StagedImportanceSelector:
     Args:
         stages (list[ImportanceSelectionStage]): Ordered selection stages or their fitted
             results.
+        candidate_features (list[str] | None): Starting features for selection; None uses
+            all features. Raw categorical names include all their encoded levels.
+        candidate_stage (Literal['raw', 'encoded']): Stage at which candidate names apply.
     """
 
     stages: list[ImportanceSelectionStage]
+    candidate_features: list[str] | None = None
+    candidate_stage: Literal["raw", "encoded"] = "raw"
 
     def __post_init__(self) -> None:
         """Validate and normalize values after initialization."""
@@ -204,14 +209,27 @@ class StagedImportanceSelector:
         names = [stage.name for stage in self.stages if stage.name is not None]
         if len(names) != len(set(names)):
             raise ValueError("selection stage names must be unique")
+        if self.candidate_stage not in ("raw", "encoded"):
+            raise ValueError("candidate_stage must be 'raw' or 'encoded'")
+        if self.candidate_features is not None:
+            if not self.candidate_features:
+                raise ValueError("candidate_features must contain at least one feature")
+            if len(set(self.candidate_features)) != len(self.candidate_features):
+                raise ValueError("candidate_features must be unique")
 
     def fit(self, data: ModelData) -> FittedStagedImportanceSelector:
         """Fit feature selection on the supplied training data.
 
+        For a direct fit, supply data at the stage named by ``candidate_stage``.
+
         Args:
             data (ModelData): Model data to fit, transform, predict, or evaluate.
         """
-        current = data
+        current = (
+            data.select_features(self.candidate_features)
+            if self.candidate_features is not None
+            else data
+        )
         fitted_stages: list[FittedImportanceSelectionStage] = []
 
         for index, stage in enumerate(self.stages, start=1):

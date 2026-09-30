@@ -8,6 +8,11 @@ import polars as pl
 
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.schema import FeatureSchema
+from ins_gbm.data.selection_candidates import (
+    select_encoded_candidates,
+    select_raw_candidates,
+    selector_without_candidates,
+)
 from ins_gbm.models.base import FittedModel, PredictionType
 from ins_gbm.persistence.metadata import ReproducibilityMetadata
 from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
@@ -525,7 +530,8 @@ class ModelPipeline:
             return data, None, None, None
         self._emit("select", "running feature selection")
         self._check_cancel()
-        fitted = self.recipe.selection.fit(data)
+        selection_data = select_encoded_candidates(data, self.recipe.selection)
+        fitted = selector_without_candidates(self.recipe.selection).fit(selection_data)
         selected = fitted.selected_features()
         stage_results = getattr(fitted, "stage_results", None)
         selection_metadata = getattr(fitted, "selection_metadata", None)
@@ -595,6 +601,7 @@ class ModelPipeline:
         train_data = self.data
         if feature_stage == "raw" and feature_names is not None:
             train_data = self.data.select_features(feature_names)
+        train_data = select_raw_candidates(train_data, self.recipe.selection)
         input_feature_names = list(train_data.feature_names)
         raw_train_data = train_data
         self._check_cancel()

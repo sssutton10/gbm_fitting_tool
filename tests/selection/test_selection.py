@@ -2,6 +2,8 @@ import polars as pl
 import pytest
 
 from ins_gbm.data.loader import load_model_data
+from ins_gbm.data.folds import CVConfig
+from ins_gbm.evaluation.comparison import compare_cv_double_lift
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 from ins_gbm.preprocessing.encoder import OneHotEncoder
@@ -10,6 +12,7 @@ from ins_gbm.preprocessing.steps import PreprocessingStep
 from ins_gbm.selection import ImportanceSelectionStage, StagedImportanceSelector
 from ins_gbm.selection.boruta import BorutaSelector
 from ins_gbm.selection.importance import ImportancePruner
+from ins_gbm.tuning.tuner import HyperparameterTuner
 
 # ── Boruta ─────────────────────────────────────────────────────────────────────
 
@@ -94,6 +97,130 @@ def test_boruta_only_trained_on_given_data(poisson_parquet):
     # Should fit without error on training data only
     fitted = selector.fit(train)
     assert fitted is not None
+
+
+def test_boruta_raw_candidates_expand_levels_without_changing_data(
+    poisson_parquet, monkeypatch
+):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x2", "x3"], objective="poisson",
+    )
+    seen = []
+
+    def fit_base(self, selection_data, rng):
+        seen.append(list(selection_data.feature_names))
+
+        class Fitted:
+            def feature_importance(self):
+                return pl.DataFrame({"feature": seen[-1], "importance": [0.0] * len(seen[-1])})
+
+        return Fitted()
+
+    monkeypatch.setattr(BorutaSelector, "_fit_base", fit_base)
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        selection=BorutaSelector(max_iter=1, candidate_features=["x2"]),
+        params={"n_estimators": 5, "verbose": -1},
+    )
+    fitted = recipe.fit(data)
+
+    assert data.feature_names == ["x1", "x2", "x3"]
+    assert fitted.input_feature_names == ["x2"]
+    assert fitted.selected_features == [name for name in seen[0] if not name.startswith("shadow__")]
+    assert all(name.startswith(("x2__", "shadow__x2__")) for name in seen[0])
+    assert fitted.predict(data).len() == data.n_rows
+
+
+def test_staged_encoded_candidates_keep_cv_comparisons(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x2", "x3"], objective="poisson",
+    )
+    data.cv_fold = pl.Series("fold", [i % 2 for i in range(data.n_rows)])
+    data.comparisons = pl.DataFrame({"benchmark": [1.0] * data.n_rows})
+    selector = StagedImportanceSelector(
+        stages=[ImportanceSelectionStage(
+            model=LightGBMModel(objective="poisson"), max_features=2,
+            params={"n_estimators": 5, "verbose": -1},
+        )],
+        candidate_features=["x1", "x2__A"], candidate_stage="encoded",
+    )
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        selection=selector, params={"n_estimators": 5, "verbose": -1},
+    )
+    fitted = recipe.fit(data)
+    assert fitted.selected_features == ["x1", "x2__A"]
+    assert fitted.selection_results[0].ranking["feature"].to_list() == ["x1", "x2__A"]
+    assert data.feature_names == ["x1", "x2", "x3"]
+
+    cv = CVConfig(folds="auto")
+    reference = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        params={"n_estimators": 5, "verbose": -1},
+    ).cross_validate(data, cv=cv)
+    candidate = recipe.cross_validate(data, cv=cv)
+    assert reference.data_signature == candidate.data_signature
+    assert "double_lift_score" in candidate.fold_metrics["metric"].to_list()
+    assert compare_cv_double_lift(reference, candidate).height > 0
+
+
+@pytest.mark.parametrize("selector", [
+    lambda names, stage: BorutaSelector(candidate_features=names, candidate_stage=stage),
+    lambda names, stage: StagedImportanceSelector(
+        stages=[ImportanceSelectionStage(model=LightGBMModel(), max_features=1)],
+        candidate_features=names, candidate_stage=stage,
+    ),
+])
+def test_selector_candidate_configuration_validation(selector):
+    with pytest.raises(ValueError, match="at least one"):
+        selector([], "raw")
+    with pytest.raises(ValueError, match="unique"):
+        selector(["x1", "x1"], "raw")
+    with pytest.raises(ValueError, match="candidate_stage"):
+        selector(["x1"], "other")
+
+
+def test_fold_local_tuning_respects_encoded_candidates(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x2", "x3"], objective="poisson",
+    )
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"),
+        encoder=OneHotEncoder(),
+        selection=StagedImportanceSelector(
+            stages=[ImportanceSelectionStage(
+                model=LightGBMModel(objective="poisson"), max_features=2,
+                params={"n_estimators": 5, "verbose": -1},
+            )],
+            candidate_features=["x1", "x2__A"], candidate_stage="encoded",
+        ),
+        selection_scope="fold",
+        tuning=HyperparameterTuner(n_trials=1, cv_folds=2, show_progress_bar=False),
+        params={"n_estimators": 5, "verbose": -1},
+    )
+
+    fitted = recipe.fit(data)
+    assert fitted.selected_features == ["x1", "x2__A"]
+    assert fitted.tuning_history.height == 1
+    assert fitted.predict(data).len() == data.n_rows
+
+
+def test_missing_encoded_candidate_fails_after_encoding(poisson_parquet):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x2"], objective="poisson",
+    )
+    recipe = ModelRecipe(
+        model=LightGBMModel(objective="poisson"), encoder=OneHotEncoder(),
+        selection=BorutaSelector(
+            candidate_features=["x2__absent"], candidate_stage="encoded",
+        ),
+    )
+    with pytest.raises(ValueError, match="missing columns.*x2__absent"):
+        recipe.fit(data)
 
 
 # ── ImportancePruner ───────────────────────────────────────────────────────────

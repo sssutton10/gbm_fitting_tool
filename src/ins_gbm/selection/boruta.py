@@ -31,19 +31,37 @@ class BorutaSelector:
         max_iter (int): Maximum number of Boruta iterations. Defaults to 50.
         alpha (float): Significance level for Boruta confirmation. Defaults to 0.05.
         seed (int): Random seed for reproducible fitting or splitting. Defaults to 42.
+        candidate_features (list[str] | None): Starting features for selection; None uses
+            all features. Raw categorical names include all their encoded levels.
+        candidate_stage (Literal['raw', 'encoded']): Stage at which candidate names apply.
     """
 
     base_estimator: Literal["lightgbm", "random_forest"] = "lightgbm"
     max_iter: int = 50
     alpha: float = 0.05
     seed: int = 42
+    candidate_features: list[str] | None = None
+    candidate_stage: Literal["raw", "encoded"] = "raw"
+
+    def __post_init__(self) -> None:
+        if self.candidate_stage not in ("raw", "encoded"):
+            raise ValueError("candidate_stage must be 'raw' or 'encoded'")
+        if self.candidate_features is not None:
+            if not self.candidate_features:
+                raise ValueError("candidate_features must contain at least one feature")
+            if len(set(self.candidate_features)) != len(self.candidate_features):
+                raise ValueError("candidate_features must be unique")
 
     def fit(self, data: ModelData) -> FittedBorutaSelector:
         """Fit feature selection on the supplied training data.
 
+        For a direct fit, supply data at the stage named by ``candidate_stage``.
+
         Args:
             data (ModelData): Model data to fit, transform, predict, or evaluate.
         """
+        if self.candidate_features is not None:
+            data = data.select_features(self.candidate_features)
         rng = np.random.default_rng(self.seed)
         original_features = list(data.feature_names)
         n_rows = data.n_rows

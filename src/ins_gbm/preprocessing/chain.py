@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.selection_candidates import (
+    select_encoded_candidates,
+    select_raw_candidates,
+    selector_without_candidates,
+)
 from ins_gbm.preprocessing.steps import validate_preprocessing_steps
 
 
@@ -117,6 +122,7 @@ def fit_transform_chain(
     raw_data = (
         data.select_features(feature_names) if feature_names is not None else data
     )
+    raw_data = select_raw_candidates(raw_data, selector)
     current = raw_data
     fitted_encoder: Any | None = None
     fitted_selector: Any | None = None
@@ -132,7 +138,8 @@ def fit_transform_chain(
 
     selected_features: list[str] | None = None
     if selector is not None:
-        fitted_selector = selector.fit(current)
+        selection_data = select_encoded_candidates(current, selector)
+        fitted_selector = selector_without_candidates(selector).fit(selection_data)
         selected_features = fitted_selector.selected_features()
         current = current.with_features(current.features.select(selected_features))
 
