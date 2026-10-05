@@ -10,6 +10,7 @@ import polars as pl
 from scipy.stats import binomtest
 
 from ins_gbm.data.model_data import ModelData
+from ins_gbm.data.schema import FeatureSchema
 
 
 @dataclass
@@ -89,7 +90,32 @@ class BorutaSelector:
             shadow_df = pl.DataFrame(shadow_cols)
             aug_features = pl.concat([data.features, shadow_df], how="horizontal")
             aug_names = list(aug_features.columns)
-            aug_data = replace(data, features=aug_features, feature_names=aug_names)
+            aug_schema = data.schema
+            if aug_schema is not None:
+                aug_schema = FeatureSchema(
+                    numeric=[
+                        *aug_schema.numeric,
+                        *(f"shadow__{name}" for name in aug_schema.numeric),
+                    ],
+                    categorical=[
+                        *aug_schema.categorical,
+                        *(f"shadow__{name}" for name in aug_schema.categorical),
+                    ],
+                    ordinal=[
+                        *aug_schema.ordinal,
+                        *(f"shadow__{name}" for name in aug_schema.ordinal),
+                    ],
+                    passthrough=[
+                        *aug_schema.passthrough,
+                        *(f"shadow__{name}" for name in aug_schema.passthrough),
+                    ],
+                )
+            aug_data = replace(
+                data,
+                features=aug_features,
+                feature_names=aug_names,
+                schema=aug_schema,
+            )
 
             fitted_model = self._fit_base(aug_data, rng)
             imp = fitted_model.feature_importance()

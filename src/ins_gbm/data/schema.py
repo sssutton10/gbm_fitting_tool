@@ -10,7 +10,8 @@ class FeatureSchema:
 
     Args:
         numeric (list[str]): Continuous feature names passed through numeric preprocessing.
-        categorical (list[str]): Categorical feature names encoded as indicator columns.
+        categorical (list[str]): Unordered categorical feature names available to encoders or
+            models with native categorical support.
         ordinal (list[str]): Ordinal feature names retained in their ordered representation.
         passthrough (list[str]): Feature names passed through without encoding.
     """

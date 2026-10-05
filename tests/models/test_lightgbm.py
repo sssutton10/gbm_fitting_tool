@@ -4,8 +4,12 @@ import numpy as np
 import polars as pl
 import pytest
 
+from ins_gbm.data.folds import CVConfig
 from ins_gbm.data.loader import load_model_data
+from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.lightgbm import LightGBMModel
+from ins_gbm.pipeline import ModelRecipe
+from ins_gbm.preprocessing.encoder import OneHotEncoder
 
 
 def _poisson_data(poisson_parquet):
@@ -202,3 +206,173 @@ def test_lgb_search_space_keys():
     assert "n_estimators" in space
     assert "learning_rate" in space
     assert "num_leaves" in space
+
+
+def test_lgb_uses_schema_categoricals_natively(monkeypatch):
+    """Schema categorical columns use LightGBM's native categorical splits."""
+    import lightgbm as lgb
+
+    features = pl.DataFrame(
+        {
+            "territory": ["north", "south", "north", None] * 10,
+        }
+    )
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 2.0, 0.0, 1.0] * 10),
+        feature_names=list(features.columns),
+        objective="poisson",
+    )
+    captured = {}
+    original_init = lgb.Dataset.__init__
+
+    def recording_init(self, *args, **kwargs):
+        captured["categorical_feature"] = kwargs.get("categorical_feature")
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(lgb.Dataset, "__init__", recording_init)
+
+    fitted = LightGBMModel().fit(
+        data,
+        params={
+            "n_estimators": 5,
+            "min_data_in_leaf": 1,
+            "min_data_per_group": 1,
+            "cat_smooth": 0,
+            "verbose": -1,
+        },
+    )
+
+    assert captured["categorical_feature"] == ["territory"]
+    assert fitted.feature_names == ["territory"]
+    assert any(
+        tree["tree_structure"].get("decision_type") == "=="
+        for tree in fitted.model.dump_model()["tree_info"]
+    )
+    assert np.isfinite(fitted.predict(data).to_numpy()).all()
+
+
+def test_lgb_native_categories_handle_unseen_and_missing_levels():
+    """Unseen and missing categories follow LightGBM's missing-value path."""
+    train_features = pl.DataFrame(
+        {
+            "territory": ["north", "south", "north", "south"] * 5,
+            "driver_age": [20, 45, 32, 57] * 5,
+        }
+    )
+    train = ModelData(
+        features=train_features,
+        target=pl.Series("claims", [0.0, 2.0, 0.0, 1.0] * 5),
+        feature_names=list(train_features.columns),
+        objective="poisson",
+    )
+    fitted = LightGBMModel().fit(
+        train,
+        params={"n_estimators": 5, "min_data_in_leaf": 1, "verbose": -1},
+    )
+    score_features = pl.DataFrame(
+        {"territory": ["west", None], "driver_age": [30, 40]}
+    )
+    score = ModelData(
+        features=score_features,
+        target=pl.Series("claims", [0.0, 0.0]),
+        feature_names=list(score_features.columns),
+        objective="poisson",
+    )
+
+    predictions = fitted.predict(score)
+
+    assert predictions.len() == 2
+    assert np.isfinite(predictions.to_numpy()).all()
+
+
+def test_lgb_allows_explicit_numeric_categorical_features(monkeypatch):
+    """Explicit names can mark integer-coded columns as categorical."""
+    import lightgbm as lgb
+
+    features = pl.DataFrame({"territory_code": [10, 20, 10, 20] * 5})
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 2.0, 0.0, 1.0] * 5),
+        feature_names=list(features.columns),
+        objective="poisson",
+    )
+    captured = {}
+    original_init = lgb.Dataset.__init__
+
+    def recording_init(self, *args, **kwargs):
+        captured["categorical_feature"] = kwargs.get("categorical_feature")
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(lgb.Dataset, "__init__", recording_init)
+
+    LightGBMModel(categorical_features=["territory_code"]).fit(
+        data, params={"n_estimators": 3, "verbose": -1}
+    )
+
+    assert captured["categorical_feature"] == ["territory_code"]
+
+
+def test_lgb_one_hot_encoder_disables_native_categorical_columns():
+    """One-hot encoded columns remain ordinary numeric model inputs."""
+    features = pl.DataFrame(
+        {"territory": ["north", "south"] * 10, "driver_age": [20, 45] * 10}
+    )
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 2.0] * 10),
+        feature_names=list(features.columns),
+        objective="poisson",
+    )
+
+    fitted = LightGBMModel().fit(
+        data,
+        encoder=OneHotEncoder(),
+        params={"n_estimators": 3, "verbose": -1},
+    )
+
+    assert fitted.feature_names == [
+        "driver_age",
+        "territory__north",
+        "territory__south",
+    ]
+
+
+def test_lgb_rejects_categorical_feature_in_params():
+    """Dataset categorical configuration uses the model's public option."""
+    features = pl.DataFrame({"territory": ["north", "south"]})
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 1.0]),
+        feature_names=["territory"],
+        objective="poisson",
+    )
+
+    with pytest.raises(ValueError, match="categorical_features"):
+        LightGBMModel().fit(
+            data,
+            params={"categorical_feature": ["territory"]},
+        )
+
+
+def test_lgb_native_categories_work_in_cross_validation():
+    """Each CV fit learns category codes from only its training fold."""
+    features = pl.DataFrame(
+        {
+            "territory": ["north", "south", "east", "west"] * 10,
+            "driver_age": [20, 45, 32, 57] * 10,
+        }
+    )
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 2.0, 0.0, 1.0] * 10),
+        feature_names=list(features.columns),
+        objective="poisson",
+    )
+
+    result = ModelRecipe(
+        model=LightGBMModel(), params={"n_estimators": 3, "verbose": -1}
+    ).cross_validate(data, cv=CVConfig(n_splits=4, seed=1, folds="random"))
+
+    assert result.predictions is not None
+    assert np.isfinite(result.predictions["gbm"].to_numpy()).all()

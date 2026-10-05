@@ -19,7 +19,6 @@ from ins_gbm.tuning.tuner import HyperparameterTuner
 
 
 def test_boruta_returns_classification_dataframe(poisson_parquet):
-    # Use only numeric features — in the full pipeline OHE encodes before Boruta
     """Verify boruta returns classification dataframe.
 
     Args:
@@ -41,6 +40,23 @@ def test_boruta_returns_classification_dataframe(poisson_parquet):
     assert all(
         s in {"confirmed", "tentative", "rejected"} for s in clf["status"].to_list()
     )
+
+
+def test_boruta_lightgbm_supports_native_categorical_shadows(poisson_parquet):
+    """Native categorical features and their shadows stay categorical."""
+    data = load_model_data(
+        path=str(poisson_parquet),
+        target="claim_count",
+        exposure="exposure",
+        feature_cols=["x1", "x2"],
+        objective="poisson",
+    )
+
+    fitted = BorutaSelector(
+        base_estimator="lightgbm", max_iter=2, base_n_estimators=2, seed=42
+    ).fit(data)
+
+    assert set(fitted.classification()["feature"].to_list()) == {"x1", "x2"}
 
 
 def test_boruta_selected_features_subset(poisson_parquet):

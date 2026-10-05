@@ -14,7 +14,7 @@ from ins_gbm.data.dtypes import (
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
-from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
+from ins_gbm.preprocessing.encoder import _MISSING_LEVEL, _NUMERIC_FILL
 
 Objective = Literal["poisson", "gamma"]
 
@@ -22,6 +22,40 @@ _LGB_OBJECTIVE = {
     "poisson": "poisson",
     "gamma": "gamma",
 }
+_CATEGORICAL_PARAM_ALIASES = {
+    "categorical_feature",
+    "categorical_column",
+    "cat_feature",
+    "cat_column",
+}
+
+
+def _category_strings(features: pl.DataFrame, name: str) -> pl.Expr:
+    """Normalize a categorical column before fitting or applying its code map."""
+    values = pl.col(name)
+    if features.schema[name].is_float():
+        values = values.fill_nan(None)
+    return values.cast(pl.Utf8).replace(_MISSING_LEVEL, None)
+
+
+def _categorical_matrix(
+    features: pl.DataFrame,
+    feature_names: list[str],
+    category_codes: dict[str, dict[str, int]],
+) -> np.ndarray:
+    """Encode fitted categorical levels while keeping other features numeric."""
+    if category_codes:
+        expressions = [
+            _category_strings(features, name)
+            .replace_strict(codes, default=None)
+            .cast(pl.Int32)
+            .alias(name)
+            for name, codes in category_codes.items()
+        ]
+        features = features.with_columns(expressions)
+    return replace_value_with_nan(
+        frame_to_fit_array(features, feature_names), _NUMERIC_FILL
+    )
 
 
 @dataclass
@@ -30,18 +64,24 @@ class LightGBMModel:
 
     Missing values
     --------------
-    With no encoder, expects numeric features ready for model fitting. When an
-    encoder is supplied to :meth:`fit`, raw features are encoded at fit time.
-    Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
+    With no encoder, categorical features are handled natively and other
+    features must be numeric. When an encoder is supplied to :meth:`fit`, raw
+    features are encoded at fit time. Encoded numeric values use
+    ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Dataset``, the wrapper converts that sentinel back
     to ``NaN`` so LightGBM can apply its native missing-value branch logic
     (learns the optimal direction at each split).
 
     Args:
         objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
+        categorical_features (list[str] | "auto"): Categorical feature names, or
+            "auto" to use the surviving names in ``ModelData.schema.categorical``.
+            Categories are learned from training rows and missing or unseen levels
+            use LightGBM's native missing-value handling.
     """
 
     objective: Objective | None = None
+    categorical_features: list[str] | Literal["auto"] = "auto"
 
     def capabilities(self) -> ModelCapabilities:
         """Describe supported objectives and model features."""
@@ -101,11 +141,55 @@ class LightGBMModel:
         objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
+        categorical_params = sorted(_CATEGORICAL_PARAM_ALIASES.intersection(p))
+        if categorical_params:
+            raise ValueError(
+                f"Set {categorical_params[0]!r} with "
+                "LightGBMModel(categorical_features=...) instead of params"
+            )
         p.setdefault("objective", _LGB_OBJECTIVE[objective])
         p.setdefault("verbose", -1)
 
-        X = frame_to_fit_array(data.features, data.feature_names)
-        X = replace_value_with_nan(X, _NUMERIC_FILL)
+        if (
+            isinstance(self.categorical_features, str)
+            and self.categorical_features != "auto"
+        ):
+            raise ValueError(
+                "categorical_features must be 'auto' or a list of feature names"
+            )
+        if self.categorical_features == "auto":
+            categorical_names = [
+                name
+                for name in (data.schema.categorical if data.schema is not None else [])
+                if name in data.feature_names
+            ]
+        else:
+            categorical_names = list(self.categorical_features)
+            missing = [
+                name for name in categorical_names if name not in data.feature_names
+            ]
+            if missing:
+                raise ValueError(
+                    f"Categorical features missing after preprocessing: {missing}"
+                )
+        if len(set(categorical_names)) != len(categorical_names):
+            raise ValueError("categorical_features must be unique")
+
+        category_codes: dict[str, dict[str, int]] = {}
+        for name in categorical_names:
+            levels = (
+                data.features.select(_category_strings(data.features, name).alias(name))
+                .to_series()
+                .drop_nulls()
+                .unique()
+                .sort()
+                .to_list()
+            )
+            category_codes[name] = {
+                level: index for index, level in enumerate(levels)
+            }
+
+        X = _categorical_matrix(data.features, data.feature_names, category_codes)
         y = series_to_fit_array(data.target)
 
         init_score_parts: list[np.ndarray] = []
@@ -129,6 +213,8 @@ class LightGBMModel:
             "feature_name": list(data.feature_names),
             "free_raw_data": True,
         }
+        if categorical_names:
+            dataset_kwargs["categorical_feature"] = categorical_names
         if init_score is not None:
             dataset_kwargs["init_score"] = init_score
         ds = lgb.Dataset(X, **dataset_kwargs)
@@ -149,8 +235,9 @@ class LightGBMModel:
                 prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
                     unavailable for Gamma.
             """
-            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
-            X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
+            X_pred = _categorical_matrix(
+                pred_data.features, feature_names, category_codes
+            )
             # LightGBM's default prediction is already on the response scale.
             # Request the tree contribution on the link scale so exposure and
             # user offsets can be applied exactly once.

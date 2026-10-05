@@ -258,7 +258,8 @@ FeatureSchema(
 Fields:
 
 - `numeric`: continuous or integer predictors.
-- `categorical`: unordered predictors that should be one-hot encoded.
+- `categorical`: unordered predictors available to an encoder or a model with
+  native categorical support.
 - `ordinal`: ordered numeric-like predictors that should pass through the
   one-hot encoder with numeric missing handling.
 - `passthrough`: columns copied as-is by the encoder.
@@ -791,10 +792,15 @@ Supports:
 - feature importance
 - exposure offset for Poisson
 - custom `ModelData.offset`
+- native categorical features
 
 Training behavior:
 
 - Converts feature and row-level fitting data to `float32` NumPy.
+- With `categorical_features="auto"`, uses surviving names from
+  `ModelData.schema.categorical` and passes them to the native `Dataset`.
+- Learns stable, consecutive category codes from the current training rows.
+  Explicit names can be supplied for integer-coded categorical columns.
 - Converts `_NUMERIC_FILL` to `np.nan`.
 - For Poisson with exposure, uses `log(exposure)` as an initial score.
 - If exposure and `data.offset` are both absent, omits `init_score` from the
@@ -805,6 +811,8 @@ Training behavior:
 
 Prediction behavior:
 
+- Reuses the fitted category codes; missing and unseen levels use LightGBM's
+  missing-value path.
 - Converts `_NUMERIC_FILL` back to `np.nan`.
 - Applies prediction-time `data.offset` if present.
 - For Poisson:
@@ -1664,12 +1672,10 @@ recipe = ModelRecipe(model=LightGBMModel())  # inherits "gamma" from data
 result = recipe.fit(data)
 ```
 
-### Categorical Features with One-Hot Encoding
+### Native Categorical Features in LightGBM
 
 ```python
 from ins_gbm.data.schema import FeatureSchema
-from ins_gbm.preprocessing.encoder import OneHotEncoder
-
 schema = FeatureSchema(
     numeric=["x1", "x3"],
     categorical=["territory"],
@@ -1686,9 +1692,15 @@ data = load_model_data(
 
 recipe = ModelRecipe(
     model=LightGBMModel(objective="poisson"),
-    encoder=OneHotEncoder(),
 )
 ```
+
+The schema is inferred automatically for string, categorical, enum, and boolean
+columns when it is omitted. For integer-coded categories, use
+`LightGBMModel(categorical_features=["territory_code"])`. Add
+`encoder=OneHotEncoder()` when individual levels must become model columns or
+when sharing an encoded matrix with a model that lacks native categorical
+support.
 
 ### Optuna Tuning
 

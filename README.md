@@ -31,7 +31,7 @@ holdout = load_model_data(
     objective="poisson",
 )
 
-recipe = ModelRecipe(model=LightGBMModel(), encoder=OneHotEncoder())
+recipe = ModelRecipe(model=LightGBMModel())
 fitted = recipe.fit(training)
 metrics = fitted.evaluate(holdout).metrics()
 counts = fitted.predict(holdout)
@@ -45,6 +45,40 @@ restored = load_model("output/frequency_model")
 
 `ModelPipeline(data, recipe).run()` and the original persistence functions remain
 supported. The shorter methods delegate to the same implementation.
+
+## Native categorical features in LightGBM
+
+`LightGBMModel` uses LightGBM's native categorical splits by default. With
+`categorical_features="auto"`, it takes categorical names from
+`ModelData.schema`. String, categorical, enum, and boolean columns are assigned
+to that schema automatically. Category codes are learned only from each fit's
+training rows, including within cross-validation, and are reused for prediction.
+Missing and previously unseen levels follow LightGBM's missing-value path.
+
+For an integer-coded category that schema inference would otherwise classify as
+numeric, name it explicitly:
+
+```python
+recipe = ModelRecipe(
+    model=LightGBMModel(categorical_features=["territory_code", "vehicle_code"])
+)
+```
+
+Parameters such as `cat_smooth`, `cat_l2`, `max_cat_threshold`, and
+`max_cat_to_onehot` can be supplied through `ModelRecipe.params` or directly to
+`LightGBMModel.fit(..., params=...)`. Set categorical names on
+`LightGBMModel(categorical_features=...)`, rather than in `params`.
+
+`OneHotEncoder` remains available when the same feature matrix must work across
+several model families, or when selection and importance should operate on
+individual category levels:
+
+```python
+one_hot_recipe = ModelRecipe(
+    model=LightGBMModel(),
+    encoder=OneHotEncoder(),
+)
+```
 
 ## Prune fitted model columns
 
@@ -127,10 +161,10 @@ candidates = ranking.filter(pl.col("n_folds_selected") >= 7)["feature"].to_list(
 final_fit = recipe.fit(training, feature_names=candidates)
 ```
 
-Without an encoder, the supplied features must be fit-ready numeric columns.
-For another model wrapper, pass its supported `importance_types`; for example,
-LightGBM supports `("split", "gain")`. `params` can override the shallow
-fitting defaults.
+Without an encoder, the model wrapper must support the supplied feature types;
+LightGBM can consume schema categorical columns natively. For another model
+wrapper, pass its supported `importance_types`; for example, LightGBM supports
+`("split", "gain")`. `params` can override the shallow fitting defaults.
 
 To rank one-hot levels separately, supply the same encoder used by the final
 recipe. It is fitted within each CV training fold. The returned names then
