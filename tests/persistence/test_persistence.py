@@ -1,16 +1,66 @@
 import os
 
 import cloudpickle
+import polars as pl
 import pytest
 
 from ins_gbm.data.loader import load_model_data
+from ins_gbm.data.model_data import ModelData
 from ins_gbm.ensemble.blending import BlendingEnsemble
 from ins_gbm.ensemble.stacking import StackingEnsemble
+from ins_gbm.models.catboost import CatBoostModel
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.persistence.io import load_pipeline, save_pipeline
 from ins_gbm.pipeline import ModelPipeline, ModelRecipe
 from ins_gbm.preprocessing.encoder import OneHotEncoder
 from ins_gbm.tuning.tuner import HyperparameterTuner
+
+
+@pytest.mark.parametrize("numeric_category", [False, True])
+def test_saved_catboost_preserves_native_categories(tmp_path, numeric_category):
+    pytest.importorskip("catboost")
+    categories = (
+        [10, 20, 10, 20]
+        if numeric_category
+        else ["north", "south", "north", "south"]
+    )
+    features = pl.DataFrame(
+        {"territory": categories * 5, "driver_age": [20, 45, 32, 57] * 5}
+    )
+    data = ModelData(
+        features=features,
+        target=pl.Series("claims", [0.0, 2.0, 0.0, 1.0] * 5),
+        feature_names=list(features.columns),
+        objective="poisson",
+    )
+    model = (
+        CatBoostModel(categorical_features=["territory"])
+        if numeric_category
+        else CatBoostModel()
+    )
+    fitted = ModelRecipe(model=model, params={"iterations": 5}).fit(data)
+    fitted.save(str(tmp_path))
+    loaded = load_pipeline(str(tmp_path))
+
+    score_features = pl.DataFrame(
+        {
+            "territory": [30, None] if numeric_category else ["west", None],
+            "driver_age": [30, 40],
+        }
+    )
+    expected = fitted.predict_raw(score_features)
+    actual = loaded.predict_raw(score_features)
+    score_data = ModelData(
+        features=score_features,
+        target=pl.Series("claims", [0.0, 0.0]),
+        feature_names=list(score_features.columns),
+        objective="poisson",
+    )
+
+    assert loaded.raw_train_data is None
+    assert loaded.fitted_model.model.get_cat_feature_indices() == [0]
+    assert actual.to_list() == pytest.approx(expected.to_list())
+    assert loaded.predict(score_data).to_list() == pytest.approx(expected.to_list())
 
 
 def test_save_load_preserves_predictions_without_metrics_artifact(

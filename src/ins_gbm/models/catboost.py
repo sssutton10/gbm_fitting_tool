@@ -14,7 +14,7 @@ from ins_gbm.data.dtypes import (
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.models.base import FittedModel, ModelCapabilities, resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
-from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
+from ins_gbm.preprocessing.encoder import _MISSING_LEVEL, _NUMERIC_FILL
 
 Objective = Literal["poisson", "gamma"]
 
@@ -24,6 +24,35 @@ _CB_OBJECTIVE = {
     # power=1.99 approximates Gamma (power=2) within this constraint.
     "gamma": "Tweedie:variance_power=1.99",
 }
+
+
+def _pool_matrix(
+    features: pl.DataFrame,
+    feature_names: list[str],
+    categorical_names: list[str],
+) -> np.ndarray:
+    """Keep native categories as strings and numeric features as floats."""
+    if not categorical_names:
+        return replace_value_with_nan(
+            frame_to_fit_array(features, feature_names), _NUMERIC_FILL
+        )
+
+    categorical = set(categorical_names)
+    matrix = np.empty((features.height, len(feature_names)), dtype=object)
+    for index, name in enumerate(feature_names):
+        if name in categorical:
+            values = pl.col(name)
+            if features.schema[name].is_float():
+                values = values.fill_nan(None)
+            matrix[:, index] = (
+                features.select(values.cast(pl.Utf8).fill_null(_MISSING_LEVEL))
+                .to_series()
+                .to_list()
+            )
+        else:
+            numeric = frame_to_fit_array(features, [name])[:, 0]
+            matrix[:, index] = replace_value_with_nan(numeric, _NUMERIC_FILL)
+    return matrix
 
 
 def _catboost_supports_offset() -> bool:
@@ -45,17 +74,22 @@ class CatBoostModel:
 
     Missing values
     --------------
-    With no encoder, expects numeric features ready for model fitting. When an
-    encoder is supplied to :meth:`fit`, raw features are encoded at fit time.
+    With no encoder, categorical features are passed to CatBoost natively and
+    other features must be numeric. When an encoder is supplied to :meth:`fit`,
+    raw features are encoded at fit time.
     Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Pool``, the wrapper converts that sentinel back to
     ``NaN`` so CatBoost can apply its native missing-value handling.
 
     Args:
         objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
+        categorical_features (list[str] | "auto"): Categorical feature names, or
+            "auto" to use the surviving names in ``ModelData.schema.categorical``.
+            Explicit names can mark numeric columns as categorical.
     """
 
     objective: Objective | None = None
+    categorical_features: list[str] | Literal["auto"] = "auto"
 
     def capabilities(self) -> ModelCapabilities:
         """Describe supported objectives and model features."""
@@ -113,12 +147,38 @@ class CatBoostModel:
         objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
+        if "cat_features" in p:
+            raise ValueError(
+                "Set cat_features with CatBoostModel(categorical_features=...) "
+                "instead of params"
+            )
         p.setdefault("loss_function", _CB_OBJECTIVE[objective])
         p.setdefault("verbose", 0)
         p.setdefault("allow_writing_files", False)
 
-        X = frame_to_fit_array(data.features, data.feature_names)
-        X = replace_value_with_nan(X, _NUMERIC_FILL)
+        if isinstance(self.categorical_features, str):
+            if self.categorical_features != "auto":
+                raise ValueError(
+                    "categorical_features must be 'auto' or a list of feature names"
+                )
+            categorical_names = [
+                name
+                for name in (data.schema.categorical if data.schema is not None else [])
+                if name in data.feature_names
+            ]
+        else:
+            categorical_names = list(self.categorical_features)
+            missing = [
+                name for name in categorical_names if name not in data.feature_names
+            ]
+            if missing:
+                raise ValueError(
+                    f"Categorical features missing after preprocessing: {missing}"
+                )
+        if len(set(categorical_names)) != len(categorical_names):
+            raise ValueError("categorical_features must be unique")
+
+        X = _pool_matrix(data.features, data.feature_names, categorical_names)
         y = series_to_fit_array(data.target)
 
         baseline_parts: list[np.ndarray] = []
@@ -142,6 +202,8 @@ class CatBoostModel:
             "weight": sample_weight,
             "feature_names": list(data.feature_names),
         }
+        if categorical_names:
+            pool_kwargs["cat_features"] = categorical_names
         if baseline is not None:
             pool_kwargs["baseline"] = baseline
         pool = Pool(**pool_kwargs)
@@ -167,8 +229,7 @@ class CatBoostModel:
                 prediction_type (str): Prediction scale: "response", "rate", or "link"; "rate" is
                     unavailable for Gamma.
             """
-            X_pred = frame_to_fit_array(pred_data.features, pred_data.feature_names)
-            X_pred = replace_value_with_nan(X_pred, _NUMERIC_FILL)
+            X_pred = _pool_matrix(pred_data.features, feature_names, categorical_names)
 
             baseline_parts: list[np.ndarray] = []
             if objective == "poisson" and pred_data.exposure is not None:
@@ -185,6 +246,8 @@ class CatBoostModel:
                 "data": X_pred,
                 "feature_names": feature_names,
             }
+            if categorical_names:
+                pred_pool_kwargs["cat_features"] = categorical_names
             if pred_baseline is not None:
                 pred_pool_kwargs["baseline"] = pred_baseline
             pred_pool = Pool(**pred_pool_kwargs)

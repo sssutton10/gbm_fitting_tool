@@ -69,6 +69,14 @@ Parameters such as `cat_smooth`, `cat_l2`, `max_cat_threshold`, and
 `LightGBMModel.fit(..., params=...)`. Set categorical names on
 `LightGBMModel(categorical_features=...)`, rather than in `params`.
 
+`CatBoostModel` also handles schema categorical columns natively by default.
+It passes string, categorical, enum, and boolean features to CatBoost as
+categorical values in both training and prediction Pools. To treat a numeric
+code as a category, set `CatBoostModel(categorical_features=["territory_code"])`.
+As with LightGBM, an explicit list replaces automatic selection; include every
+column you want treated as categorical. Set names on the model rather than
+passing `cat_features` in `params`.
+
 `OneHotEncoder` remains available when the same feature matrix must work across
 several model families, or when selection and importance should operate on
 individual category levels:

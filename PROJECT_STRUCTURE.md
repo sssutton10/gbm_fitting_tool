@@ -875,8 +875,12 @@ Supports:
 
 Training behavior:
 
-- Converts feature and row-level fitting data to `float32` NumPy.
-- Converts `_NUMERIC_FILL` to `np.nan`.
+- Converts numeric features and row-level fitting data to `float32` NumPy.
+- With `categorical_features="auto"`, passes surviving schema categorical
+  columns as strings and specifies `cat_features` on training and prediction
+  Pools. Explicit categorical feature names can include numeric-coded columns.
+- Converts `_NUMERIC_FILL` to `np.nan` in numeric features; missing categorical
+  values use the categorical missing-level string.
 - Sets `loss_function` from objective unless caller overrides it.
 - Uses `allow_writing_files=False` by default.
 - For Poisson with exposure, uses `log(exposure)` as CatBoost baseline only if
