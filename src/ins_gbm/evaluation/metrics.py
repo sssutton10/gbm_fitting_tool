@@ -4,6 +4,7 @@ from typing import Literal
 
 import numpy as np
 import polars as pl
+from scipy.integrate import trapezoid
 
 from ins_gbm.data.model_data import Objective
 
@@ -168,7 +169,7 @@ def normalized_gini(
         # Prepend (0, 0) for trapezoidal integration
         cum_actual = np.concatenate([[0.0], cum_actual])
         cum_weight = np.concatenate([[0.0], cum_weight])
-        return float(1.0 - 2.0 * np.trapezoid(cum_actual, cum_weight))
+        return float(1.0 - 2.0 * trapezoid(cum_actual, cum_weight))
 
     gini_model = _gini(np.argsort(-p))
     gini_perfect = _gini(np.argsort(-y))

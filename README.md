@@ -145,6 +145,14 @@ feature statuses and hit counts. Increasing `alpha` can reject more features;
 it does not make `selected_features()` longer because that method already
 includes tentative features.
 
+The final binomial tests use Bonferroni correction across candidate features.
+Set `multiple_testing="none"` to reproduce the previous unadjusted behavior.
+This implementation is a shadow-importance screen with a final binomial test;
+lowering the shadow percentile changes the heuristic and does not provide a
+guaranteed false discovery rate. Importance rankings and Boruta screens do not
+establish an optimal feature subset; compare complete recipes on outer CV or a
+separate holdout.
+
 ## Screen features across CV folds
 
 `cv_feature_importance` fits a shallow XGBoost model on the training rows of
@@ -229,6 +237,12 @@ folds, refitting preprocessing within each fold. Set `selection_scope="fold"`
 to refit encoding and selection within each tuning fold. Outer CV of a tuned
 recipe is nested CV.
 
+Use `selection_scope="fold"` when tuning should evaluate the complete learned
+selection workflow. With the default `"fixed"`, supervised selection has seen
+the inner validation targets, so the tuning score can be optimistic. Outer CV
+still refits the entire recipe on each outer training split. A feature list
+chosen using all rows outside the recipe also needs a separate evaluation set.
+
 The CV artifact stores fold metrics, out-of-fold predictions, fold assignments,
 and provenance. It does not store targets, exposure, weights, or features. If both
 CV results are loaded from disk, pass the original training data to
@@ -243,6 +257,39 @@ than averaging fold scores.
 
 `HyperparameterTuner(metric=None)` infers Poisson or Gamma deviance. Recipe params
 are base parameters; trial suggestions override overlapping keys.
+
+Tuning minimizes the pooled validation metric: folds contribute in proportion
+to their row count or effective metric weight, and RMSE pools squared errors
+before taking the square root. History contains completed trials only.
+
+Pass `search_space={...}` to replace the model's default Optuna distributions;
+parameters omitted from that space can be fixed in `recipe.params`. Integer and
+float distribution steps are preserved. The default spaces are starting points;
+their ranges and trial budgets cannot guarantee the best settings for every
+dataset. GPU modes and special bootstrap/boosting types may need a custom space.
+
+Set `cache_transforms=True` on the tuner to fit encoding, selection, and
+preprocessing once per training fold and reuse the transformed matrices across
+trials. This freezes stochastic transforms and holds all fold matrices in
+memory (with copies in each process worker), so caching is disabled by default.
+When running concurrent trials, set each model's thread budget explicitly:
+`num_threads` for LightGBM, `nthread` for XGBoost, `thread_count` for CatBoost,
+or `n_jobs` for Random Forest. This avoids excessive nested concurrency.
+
+LightGBM automatically enables `bagging_freq=1` when a supplied row-sampling
+fraction is below one, unless a bagging frequency is explicitly supplied.
+
+| Model | Poisson fitting | Gamma fitting | Categories without an encoder |
+| --- | --- | --- | --- |
+| LightGBM | Native Poisson with exposure/offset | Native Gamma with offset | Native |
+| XGBoost | `count:poisson` with exposure/offset | `reg:gamma` with offset | Numeric inputs required |
+| CatBoost | Native Poisson with baseline | Tweedie power 1.99, a Gamma approximation | Native |
+| Random Forest | Exposure-weighted rate regression with MSE | Severity regression with MSE | Numeric inputs required |
+
+CatBoost does not expose an exact native Gamma objective. Random Forest's
+objectives are approximation benchmarks, and it rejects explicit offsets.
+Native objective overrides that conflict with a wrapper's resolved objective
+are rejected to keep the log-link prediction contract valid.
 
 ## Prediction contract
 

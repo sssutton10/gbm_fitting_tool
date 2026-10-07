@@ -97,6 +97,8 @@ class XGBoostModel:
         objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
+        if "objective" in p and p["objective"] != _XGB_OBJECTIVE[objective]:
+            raise ValueError("params['objective'] conflicts with resolved objective")
         p.setdefault("objective", _XGB_OBJECTIVE[objective])
         p.setdefault("verbosity", 0)
 
@@ -134,6 +136,7 @@ class XGBoostModel:
         )
 
         feature_names = list(data.feature_names)
+        has_training_margin = base_margin is not None
 
         def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
             """Predict from the fitted estimator on the requested scale.
@@ -160,10 +163,19 @@ class XGBoostModel:
                 "feature_names": feature_names,
                 "missing": _NUMERIC_FILL,
             }
-            if pred_margin is not None:
-                dtest_kwargs["base_margin"] = pred_margin
+            if has_training_margin:
+                # Training margins replace XGBoost's intercept. Keep that
+                # convention even when prediction exposure/offset is omitted.
+                dtest_kwargs["base_margin"] = (
+                    pred_margin if pred_margin is not None
+                    else np.zeros(pred_data.n_rows, dtype=np.float32)
+                )
             dtest = xgb.DMatrix(X_pred, **dtest_kwargs)
             link = booster.predict(dtest, output_margin=True)
+            if not has_training_margin and pred_margin is not None:
+                # A new offset adds to the learned intercept rather than
+                # replacing it through DMatrix.base_margin.
+                link = link + pred_margin
             response = np.exp(link)
 
             if objective == "poisson":

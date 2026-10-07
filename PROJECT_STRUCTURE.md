@@ -51,6 +51,17 @@ Behavioral changes made during the 2026 correctness review:
 - Ensemble OOF refits preserve the fitted base model's effective parameters.
 - `HyperparameterTuner(metric=None)` infers objective-specific deviance and merges
   trial suggestions over `ModelRecipe.params`.
+- LightGBM enables row sampling when a sampling fraction is below one unless
+  the caller supplies a bagging frequency. XGBoost keeps prediction-time offsets
+  consistent with the intercept convention used during training.
+- Tuning pools validation scores by effective metric weight, preserves Optuna
+  distribution steps, and excludes pruned trials from completed history.
+- `HyperparameterTuner(search_space=..., cache_transforms=True)` supports custom
+  distributions and optional reuse of transforms fitted within training folds.
+- Boruta adjusts its final binomial tests across features with Bonferroni by
+  default; `multiple_testing="none"` restores unadjusted tests.
+- Model wrappers reject conflicting native objectives and validate targets
+  against the resolved objective even when `ModelData.objective` is absent.
 
 Artifacts created before these fixes contain cloudpickled prediction closures and
 may retain their original behavior. Refit old models when corrected numerical
@@ -137,6 +148,10 @@ does not currently expose a SHAP-specific API.
 
 Common local pitfall: the path contains a space. Quote paths in shell commands
 when needed.
+
+The core requirements include Polars >= 1.0 and Optuna >= 4.0 for the categorical
+mapping and process journal APIs. NumPy >= 1.26 remains supported; Gini integration
+uses SciPy's `trapezoid` rather than the NumPy 2.0-only API.
 
 ## Package Map
 
@@ -609,7 +624,8 @@ Defined in `selection/boruta.py`.
 3. Compare original feature importance to the configured shadow importance
    percentile (the maximum by default).
 4. Count "hits" across iterations.
-5. Use a binomial test to classify features as:
+5. Use a final two-sided binomial test against hit probability 0.5, with
+   Bonferroni adjustment across candidate columns by default, to classify features as:
    - `confirmed`
    - `tentative`
    - `rejected`
@@ -633,6 +649,15 @@ percentile admits more hits and can retain more features, including more noise.
 `classification()` includes each feature's `hits` count for inspection. Changing
 `alpha` alone is not a feature-count control: `selected_features()` already
 includes tentative features, and a larger alpha can reject more of them.
+
+`multiple_testing="none"` restores the previous unadjusted tests. The adjusted
+tests can leave more features tentative; since tentative features are retained,
+correction does not necessarily reduce the selected feature count. This is a
+shadow-importance screening heuristic, especially with a reduced shadow
+percentile, and does not guarantee an optimal subset or a false discovery rate.
+Validate the complete selection recipe with outer CV or an independent holdout.
+Invalid estimator names, iteration counts, significance levels, and tree counts
+are rejected before fitting.
 
 This selector fits the pipeline selector contract because `fit(data)` returns an
 object with `selected_features()`.
@@ -704,10 +729,14 @@ importance output.
 Selection modes:
 
 - `threshold`: keep features with importance greater than or equal to threshold.
-- `percentile`: keep features at or above a percentile cutoff.
+- `percentile`: keep the top specified percentage of scores, including ties;
+  for example, 25 retains the top quarter.
 - `top_n`: keep the top N features.
 
 Exactly one mode should be set. If none is set, the default threshold is `0.0`.
+`top_n` must be a positive integer, `percentile` must be in [0, 100], and
+`threshold` must be finite. Equal scores in top-N pruning retain their original
+fitted feature order.
 
 `ImportancePruner.fit()` accepts a fitted model or pipeline and ranks its fitted
 model columns, including one-hot indicators and preprocessing outputs:
@@ -778,7 +807,10 @@ resolved in this order:
 2. `ModelData.objective`;
 3. `poisson` as the legacy fallback when both are absent.
 
-The resolved value is stored on `FittedModel`.
+The resolved value is stored on `FittedModel`. Conflicting model/data objectives
+are rejected, and the resolved objective validates the target even when the data
+has no objective marker. Native `objective`/`loss_function` overrides must match
+the wrapper's objective so its exponential response and log-link remain valid.
 
 ### LightGBMModel
 
@@ -808,6 +840,9 @@ Training behavior:
 - If `data.offset` is present, adds it to the initial score.
 - Uses `data.weight` as sample weight if supplied.
 - Pops `n_estimators` from params and passes it as `num_boost_round`.
+- If a row-sampling fraction is below one, defaults `bagging_freq` to 1 so
+  sampling is effective. Explicit `bagging_freq` or `subsample_freq`, including
+  zero, takes precedence.
 
 Prediction behavior:
 
@@ -837,28 +872,30 @@ Supports:
 - sample weights
 - feature importance
 - exposure base margin for Poisson
+- custom `ModelData.offset` for either objective
 
 Training behavior:
 
 - Converts feature and row-level fitting data to `float32` NumPy.
 - Passes `_NUMERIC_FILL` as `missing` to `xgb.DMatrix`.
 - For Poisson with exposure, uses `log(exposure)` as `base_margin`.
-- If exposure is absent, omits `base_margin` from the training `DMatrix`.
+- Adds `data.offset` to the margin when supplied. If both exposure and offset
+  are absent, omits training `base_margin` and lets XGBoost learn its intercept.
 - Uses `data.weight` as sample weight if supplied.
 - Pops `n_estimators` from params and passes it as `num_boost_round`.
 
 Prediction behavior:
 
-- For Poisson with exposure, supplies prediction-time `base_margin`.
-- If prediction exposure is absent, omits prediction-time `base_margin`.
-- `response` returns the model response.
+- If training used a margin, prediction supplies the new exposure/offset margin,
+  or zero when neither is supplied. This prevents XGBoost's default intercept
+  from being reintroduced when scoring without exposure.
+- If training used no margin, prediction retains the learned intercept and adds
+  the new exposure/offset on the link scale rather than replacing the intercept.
+- `response` exponentiates the raw link prediction.
 - `rate` divides response by exposure if exposure is present.
 - `link` returns `log(response)`.
-- For Gamma, returns the raw model response.
-
-Pitfall: the optional `ModelData.offset` field is not currently added by the
-XGBoost wrapper, even though the capability object says offset support is true.
-The implemented offset-like behavior is exposure base margin for Poisson.
+- For Gamma, `response` returns severity, `link` returns its log, and `rate`
+  is rejected.
 
 ### CatBoostModel
 
@@ -881,18 +918,19 @@ Training behavior:
   Pools. Explicit categorical feature names can include numeric-coded columns.
 - Converts `_NUMERIC_FILL` to `np.nan` in numeric features; missing categorical
   values use the categorical missing-level string.
-- Sets `loss_function` from objective unless caller overrides it.
+- Sets `loss_function` from the resolved objective and rejects conflicting
+  overrides. A matching `objective` alias is normalized to `loss_function`.
 - Uses `allow_writing_files=False` by default.
 - For Poisson with exposure, uses `log(exposure)` as CatBoost baseline only if
   the installed CatBoost supports the `baseline` parameter.
-- If exposure is absent, omits `baseline` from both training and prediction
-  pools.
+- Adds `data.offset` to the baseline for either objective. If both exposure
+  and offset are absent, omits `baseline` from the corresponding Pool.
 - Uses `data.weight` as sample weight if supplied.
 
 Pitfalls:
 
 - CatBoost offset support depends on the installed CatBoost version.
-- The optional `ModelData.offset` field is not currently added by this wrapper.
+- Exposure or explicit offsets raise an error if baseline support is unavailable.
 - The Gamma implementation uses Tweedie power `1.99` because CatBoost requires
   the power to be strictly between 1 and 2.
 
@@ -908,20 +946,22 @@ Poisson behavior:
 - Uses exposure as sample weight, multiplied by `data.weight` when supplied.
 - `response` multiplies predicted rate by exposure.
 - `rate` returns predicted rate.
-- `link` returns `log(rate clipped above zero)`.
+- `link` returns the log of the clipped expected response, including exposure.
 - If exposure is absent, fits directly on the target and does not pass an
   exposure-derived `sample_weight`; a separate `data.weight` is still honored.
 
 Gamma behavior:
 
-- Fits directly on target with optional `data.weight`.
+- Fits directly on the untransformed target with MSE and optional `data.weight`.
 - Returns predictions clipped to be positive.
 
 Pitfalls:
 
 - No native exposure offset.
-- No native missing-value handling. Numeric sentinel values are treated as real
-  numbers.
+- The wrapper passes numeric sentinel values through as real numbers rather
+  than converting them to NaN; missing-value behavior depends on sklearn's
+  version and the supplied criterion.
+- Explicit `ModelData.offset` is rejected in fitting and prediction.
 - Useful as a benchmark, but not as a replacement for a Poisson likelihood model.
 
 ## ModelPipeline
@@ -958,9 +998,11 @@ Fields:
   `PreprocessingStep` wrappers.
 - `tuning`: optional `HyperparameterTuner`.
 - `params`: optional base params; tuning suggestions override overlapping keys.
+- `selection_scope`: `"fixed"` by default; `"fold"` refits encoding and learned
+  selection inside each tuning fold.
 
-Pitfall: if `tuning` is present, tuned best params take precedence over
-`recipe.params`.
+Tuned suggestions override overlapping base params. To keep a parameter fixed,
+omit it from the tuner's replacement `search_space` and supply it in `params`.
 
 ### Run Order
 
@@ -1111,6 +1153,8 @@ tuner = HyperparameterTuner(
     backend="process",
     journal_path=None,
     show_progress_bar=True,
+    search_space=None,       # use the model's default distributions
+    cache_transforms=False, # opt in when all fold matrices fit in memory
 )
 ```
 
@@ -1123,10 +1167,11 @@ Supported metrics:
 
 For a direct `HyperparameterTuner.tune(...)` call, each Optuna trial:
 
-1. Draw params from `model.default_search_space()`.
-2. Build fold splits:
-   - KFold if `use_data_folds=False`.
-   - `ModelData.cv_fold` if `use_data_folds=True`.
+1. Draw params from `search_space` or `model.default_search_space()`, preserving
+   distribution steps, and merge them over base params.
+2. Use fold splits resolved once before the search: `cv=CVConfig(...)` controls
+   the policy; otherwise `use_data_folds=None` uses stored folds when available,
+   `False` forces shuffled KFold, and `True` requires `ModelData.cv_fold`.
 3. Slice training and validation `ModelData`.
 4. Fit encoder on fold training data and transform fold validation data.
 5. Fit selector on fold training data and apply selected columns to validation.
@@ -1134,14 +1179,27 @@ For a direct `HyperparameterTuner.tune(...)` call, each Optuna trial:
    transform both training and validation data.
 7. Fit model on fold training data.
 8. Predict validation response.
-9. Score validation predictions.
-10. Report intermediate score to Optuna for pruning.
+9. Score validation predictions and pool scores by validation row count or
+   effective metric weight. Poisson deviance uses rate-scale inputs and
+   exposure times observation weight. RMSE pools squared errors before the root.
+10. Report the pooled score so far to Optuna's MedianPruner.
 
-`ModelPipeline.run()` deliberately invokes the tuner differently: it has
+With the default `selection_scope="fixed"`, `ModelPipeline.run()` has
 already fitted the encoder and completed feature selection, so it passes the
 fixed selected `ModelData` without an encoder or selector. In that path, steps
 4 and 5 above are already complete, and only the preprocessing chain is refit
 inside each tuning fold.
+
+Supervised fixed selection has seen inner validation targets, so that tuning
+score can be optimistic. Use `selection_scope="fold"` to refit encoding and
+selection within each inner training fold. Outer CV refits the complete recipe
+on each outer training partition. Lists derived from all rows outside the recipe
+also require separate evaluation data.
+
+With `cache_transforms=True`, steps 3–6 run once per fold before search and the
+prepared matrices are reused across trials. This freezes stochastic transforms
+and preserves training/validation separation. Caching is disabled by default
+because all fold matrices stay in memory and each process receives its own copy.
 
 The tuner returns:
 
@@ -1184,18 +1242,23 @@ cloudpickle-serializable.
 `show_progress_bar` displays completed trials and defaults to `True`. Set it to
 `False` for quiet batch runs.
 
-`history` has one row per trial with a recorded objective value and includes:
+`history` has one row per successfully completed trial and includes:
 
 - `trial`
 - `value`
 - one column per tuned hyperparameter
+
+Pruned and failed trials are excluded. Trial counts must be positive integers;
+metrics must return finite scores. Gini is an evaluation metric, not a supported
+tuning metric: the tuner minimizes the four error/deviance metrics listed above.
 
 Pitfalls:
 
 - Parallel TPE trial scheduling can produce different suggestions between
   runs even with the same seed.
 - Avoid CPU oversubscription: if `n_jobs` runs several trials concurrently,
-  consider limiting each model's own thread count.
+  set `num_threads` (LightGBM), `nthread` (XGBoost), `thread_count` (CatBoost),
+  or `n_jobs` (Random Forest) in the model's base params.
 - Each process holds its own copy of the tuning data, and each concurrent trial
   holds its fold data and fitted transforms, so increase `n_jobs`
   conservatively on very large datasets.
@@ -1213,9 +1276,24 @@ narrow_search_space(space, **overrides)
 
 This returns a copied search space with selected distributions replaced.
 
-Pitfall: there is no constructor parameter on `HyperparameterTuner` for a custom
-search space. To use a custom search space, wrap or subclass the model, or adjust
-the model method.
+Pass the returned dictionary as `HyperparameterTuner(search_space=space)`.
+This replaces the complete default space; omitted parameters may be fixed in
+`ModelRecipe.params`. An empty space evaluates only those base params.
+
+```python
+from optuna.distributions import IntDistribution
+from ins_gbm.tuning.search_spaces import narrow_search_space
+
+space = narrow_search_space(
+    LightGBMModel().default_search_space(),
+    n_estimators=IntDistribution(100, 400, step=50),
+)
+tuner = HyperparameterTuner(search_space=space, cache_transforms=True)
+```
+
+The default spaces and trial budgets are starting points rather than guarantees
+of optimal settings. GPU modes and special bootstrap/boosting types may need a
+different space. Compare complete recipes on outer CV or a separate holdout.
 
 ## Evaluation and Reporting
 
@@ -1484,8 +1562,8 @@ Pitfalls:
 
 - Base pipelines should have the same objective, compatible raw input rows, and
   compatible row order. The code does not perform deep compatibility checks.
-- OOF refits call `pipeline.recipe.model.fit(current_train)` without explicitly
-  passing tuned best params or `recipe.params`.
+- Fixed OOF refits preserve each base pipeline's effective fitted parameters;
+  `refit="retune"` performs tuning inside each fold instead.
 - Ensemble evaluation uses only the caller-provided holdout and does not retain
   training data on the resulting `EvaluationReport`.
 
@@ -1723,12 +1801,14 @@ recipe = ModelRecipe(
         candidate_features=["x1", "x3"],
     ),
     selection_scope="fold",
+    params={"num_threads": 1},
     tuning=HyperparameterTuner(
         n_trials=25,
         cv_folds=5,
         metric="poisson_deviance",
         seed=42,
         n_jobs=4,
+        cache_transforms=True,
     ),
 )
 
@@ -2034,8 +2114,9 @@ The main invariant to preserve is final-holdout isolation:
 
 - fit the main pipeline encoder and selector only on the supplied training
   data, never on the final holdout.
-- fit encoding, learned selection, and reducers only on each CV training fold
-  during tuning unless fixed selection was explicitly requested.
+- outer CV fits encoding, learned selection, and reducers on each outer training
+  split. Inner tuning refits reducers within training folds; encoding and
+  selection are fixed by default, or fold-local with `selection_scope="fold"`.
 - optimize blend weights or stacking meta-learners without the final holdout.
 - evaluate once on a caller-provided final holdout.
 

@@ -27,6 +27,7 @@ from ins_gbm.evaluation.metrics import (
     poisson_deviance,
     rmse,
 )
+from ins_gbm.models.base import resolve_objective
 from ins_gbm.preprocessing.chain import fit_transform_chain
 from ins_gbm.progress import PipelineCancelled, ProgressCallback, ProgressEvent
 
@@ -86,6 +87,24 @@ class _ObjectiveConfig:
     metric: str
     base_params: dict[str, Any]
     cancellation_path: str | None = None
+    prepared_folds: list[tuple[ModelData, ModelData]] | None = None
+
+
+def _prepare_fold(
+    config: _ObjectiveConfig, train_idx: np.ndarray, val_idx: np.ndarray,
+) -> tuple[ModelData, ModelData]:
+    """Fit transforms using only this fold's training rows."""
+    train_data = slice_model_data(config.tuning_data, train_idx)
+    val_data = slice_model_data(config.tuning_data, val_idx)
+    result = fit_transform_chain(
+        train_data,
+        encoder=config.encoder,
+        selector=config.selector,
+        preprocessing=config.preprocessing_chain,
+        schema=config.encoder_schema,
+        model_selected_features=config.model_selected_features,
+    )
+    return result.data, result.chain.transform(val_data)
 
 
 def _select_schema(
@@ -120,9 +139,9 @@ def _suggest_from_distribution(trial: Any, name: str, dist: Any) -> Any:
     import optuna
 
     if isinstance(dist, optuna.distributions.IntDistribution):
-        return trial.suggest_int(name, dist.low, dist.high, log=dist.log)
+        return trial.suggest_int(name, dist.low, dist.high, step=dist.step, log=dist.log)
     elif isinstance(dist, optuna.distributions.FloatDistribution):
-        return trial.suggest_float(name, dist.low, dist.high, log=dist.log)
+        return trial.suggest_float(name, dist.low, dist.high, step=dist.step, log=dist.log)
     elif isinstance(dist, optuna.distributions.CategoricalDistribution):
         return trial.suggest_categorical(name, dist.choices)
     else:
@@ -154,6 +173,7 @@ def _evaluate_trial(
     metric_fn = _METRIC_FN[config.metric]
 
     fold_scores: list[float] = []
+    fold_weights: list[float] = []
     for fold_idx, (train_idx, val_idx) in enumerate(config.fold_splits):
         cancelled = (stop_requested is not None and stop_requested()) or (
             config.cancellation_path is not None
@@ -162,26 +182,18 @@ def _evaluate_trial(
         if cancelled:
             raise PipelineCancelled("cancelled during CV fold")
 
-        train_data = slice_model_data(config.tuning_data, train_idx)
-        val_data = slice_model_data(config.tuning_data, val_idx)
-
-        transform_result = fit_transform_chain(
-            train_data,
-            encoder=config.encoder,
-            selector=config.selector,
-            preprocessing=config.preprocessing_chain,
-            schema=config.encoder_schema,
-            model_selected_features=config.model_selected_features,
+        train_data, val_data = (
+            config.prepared_folds[fold_idx]
+            if config.prepared_folds is not None
+            else _prepare_fold(config, train_idx, val_idx)
         )
-        train_data = transform_result.data
-        val_data = transform_result.chain.transform(val_data)
 
         fitted_model = config.model.fit(train_data, params=params)
         preds = fitted_model.predict(val_data, prediction_type="response")
 
         metric_actual = val_data.target
         metric_predicted = preds
-        if val_data.objective == "poisson" and config.metric == "poisson_deviance":
+        if config.metric == "poisson_deviance":
             metric_actual, metric_predicted, weights = _poisson_rate_metric_inputs(
                 val_data.target,
                 preds,
@@ -197,13 +209,23 @@ def _evaluate_trial(
             metric_predicted,
             weights=weights,
         )
-        fold_scores.append(score)
+        if not np.isfinite(score):
+            raise ValueError("Tuning metric must return a finite score")
+        fold_scores.append(score ** 2 if config.metric == "rmse" else score)
+        fold_weights.append(
+            float(weights.cast(pl.Float64).sum())
+            if weights is not None else float(val_data.n_rows)
+        )
 
-        trial.report(float(np.mean(fold_scores)), fold_idx)
+        pooled_score = float(np.average(fold_scores, weights=fold_weights))
+        if config.metric == "rmse":
+            pooled_score = float(np.sqrt(pooled_score))
+
+        trial.report(pooled_score, fold_idx)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
-    return float(np.mean(fold_scores))
+    return pooled_score
 
 
 def _study_history(study: Any) -> pl.DataFrame:
@@ -212,9 +234,11 @@ def _study_history(study: Any) -> pl.DataFrame:
     Args:
         study (Any): Optuna study containing the trial results.
     """
+    from optuna.trial import TrialState
+
     rows = []
     for trial in study.trials:
-        if trial.value is not None:
+        if trial.state == TrialState.COMPLETE and trial.value is not None:
             row: dict = {"trial": trial.number, "value": trial.value}
             row.update(trial.params)
             rows.append(row)
@@ -254,6 +278,10 @@ class HyperparameterTuner:
         journal_path (Optional[str | os.PathLike[str]]): Optional path for the process backend
             journal.
         show_progress_bar (bool): Whether to display a tuning progress bar. Defaults to True.
+        search_space (dict | None): Complete replacement for the model's default
+            distributions. Base params fix parameters omitted from this space.
+        cache_transforms (bool): Fit fold transforms once and reuse their matrices
+            across trials. Uses additional memory, and freezes stochastic transforms.
     """
 
     n_trials: int = 20
@@ -266,6 +294,8 @@ class HyperparameterTuner:
     backend: Literal["thread", "process"] = "thread"
     journal_path: str | os.PathLike[str] | None = None
     show_progress_bar: bool = True
+    search_space: dict[str, Any] | None = None
+    cache_transforms: bool = False
 
     def tune(
         self,
@@ -346,6 +376,13 @@ class HyperparameterTuner:
             with stop_lock:
                 return bool(should_stop())
 
+        if self.cache_transforms:
+            config.prepared_folds = []
+            for train_idx, val_idx in config.fold_splits:
+                if stop_requested():
+                    raise PipelineCancelled("cancelled during fold preparation")
+                config.prepared_folds.append(_prepare_fold(config, train_idx, val_idx))
+
         trial_progress = tqdm(
             total=self.n_trials,
             desc="Hyperparameter tuning",
@@ -380,6 +417,12 @@ class HyperparameterTuner:
 
     def _validate_settings(self) -> None:
         """Reject unsupported tuning worker and backend settings."""
+        if (
+            not isinstance(self.n_trials, int)
+            or isinstance(self.n_trials, bool)
+            or self.n_trials < 1
+        ):
+            raise ValueError("n_trials must be a positive integer")
         if (
             not isinstance(self.n_jobs, int)
             or isinstance(self.n_jobs, bool)
@@ -422,7 +465,7 @@ class HyperparameterTuner:
         """
         from ins_gbm.data.folds import resolve_folds
 
-        objective = getattr(model, "objective", None) or data.objective or "poisson"
+        objective = resolve_objective(getattr(model, "objective", None), data)
         metric = self.metric or (
             "gamma_deviance" if objective == "gamma" else "poisson_deviance"
         )
@@ -445,7 +488,10 @@ class HyperparameterTuner:
             feature_names,
         )
 
-        search_space = model.default_search_space()
+        search_space = (
+            model.default_search_space()
+            if self.search_space is None else dict(self.search_space)
+        )
         if preprocessors is not None and preprocessor is not None:
             raise ValueError("Pass either preprocessor or preprocessors, not both")
         preprocessing_chain = (

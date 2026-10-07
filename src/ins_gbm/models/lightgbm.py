@@ -141,6 +141,9 @@ class LightGBMModel:
         objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
+        for name in ("objective", "objective_type", "app", "application", "loss"):
+            if name in p and p[name] != _LGB_OBJECTIVE[objective]:
+                raise ValueError(f"params[{name!r}] conflicts with resolved objective {objective!r}")
         categorical_params = sorted(_CATEGORICAL_PARAM_ALIASES.intersection(p))
         if categorical_params:
             raise ValueError(
@@ -149,6 +152,12 @@ class LightGBMModel:
             )
         p.setdefault("objective", _LGB_OBJECTIVE[objective])
         p.setdefault("verbose", -1)
+        # Row sampling is otherwise silently disabled by LightGBM's default.
+        if not {"bagging_freq", "subsample_freq"}.intersection(p) and any(
+            p.get(name, 1.0) < 1.0
+            for name in ("subsample", "bagging_fraction", "sub_row")
+        ):
+            p["bagging_freq"] = 1
 
         if (
             isinstance(self.categorical_features, str)

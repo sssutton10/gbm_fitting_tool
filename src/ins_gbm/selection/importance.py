@@ -18,7 +18,7 @@ class ImportancePruner:
 
     Exactly one of threshold, percentile, or top_n should be set.
     - threshold: keep features with importance >= threshold
-    - percentile: keep features at or above this percentile (0-100)
+    - percentile: keep the top specified percentage of scores (0-100), including ties
     - top_n: keep top-N features by importance
 
     Args:
@@ -38,9 +38,18 @@ class ImportancePruner:
             x is not None for x in [self.threshold, self.percentile, self.top_n]
         )
         if n_set == 0:
-            self.threshold = 0.0  # default: keep all non-zero importance features
+            self.threshold = 0.0  # default: keep all nonnegative importance features
         elif n_set > 1:
             raise ValueError("Set only one of: threshold, percentile, top_n")
+        if self.top_n is not None and (
+            isinstance(self.top_n, bool) or not isinstance(self.top_n, int)
+            or self.top_n < 1
+        ):
+            raise ValueError("top_n must be a positive integer")
+        if self.percentile is not None and not 0 <= self.percentile <= 100:
+            raise ValueError("percentile must be in [0, 100]")
+        if self.threshold is not None and not np.isfinite(self.threshold):
+            raise ValueError("threshold must be finite")
 
     def fit(
         self,
@@ -77,7 +86,7 @@ class ImportancePruner:
             raise ValueError("Feature importance scores must be finite")
 
         if self.top_n is not None:
-            order = np.argsort(-scores)
+            order = np.argsort(-scores, kind="stable")
             keep = [names[i] for i in order[: self.top_n]]
         elif self.percentile is not None:
             cutoff = np.percentile(scores, 100.0 - self.percentile)

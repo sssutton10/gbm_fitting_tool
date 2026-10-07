@@ -20,7 +20,7 @@ class RandomForestModel:
 
     Does not support native exposure offsets. For Poisson frequency, exposure
     is incorporated via sample weights (exposure-weighted MSE), which is an
-    approximation. For Gamma severity, log-transformed target with MSE is used.
+    approximation. For Gamma severity, the untransformed target is fit with MSE.
     Both are documented limitations — this model is a benchmark, not a GLM-style
     objective wrapper.
 

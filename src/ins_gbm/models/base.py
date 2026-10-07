@@ -30,7 +30,14 @@ def resolve_objective(
         raise ValueError(
             f"model objective {model_objective!r} conflicts with data objective {data.objective!r}"
         )
-    return model_objective or data.objective or "poisson"
+    objective = model_objective or data.objective or "poisson"
+    if objective not in {"poisson", "gamma"}:
+        raise ValueError("objective must be 'poisson' or 'gamma'")
+    if objective == "poisson" and (data.target < 0).any():
+        raise ValueError("Poisson target must be non-negative")
+    if objective == "gamma" and (data.target <= 0).any():
+        raise ValueError("Gamma target must be strictly positive")
+    return objective
 
 
 def validate_prediction_type(prediction_type: str, objective: Objective) -> None:

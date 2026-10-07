@@ -147,6 +147,12 @@ class CatBoostModel:
         objective = resolve_objective(self.objective, data)
 
         p = dict(params or {})
+        for name in ("loss_function", "objective"):
+            if name in p and p[name] != _CB_OBJECTIVE[objective]:
+                raise ValueError(f"params[{name!r}] conflicts with resolved objective {objective!r}")
+        # CatBoost rejects simultaneous aliases, even when their values match.
+        if "objective" in p:
+            p["loss_function"] = p.pop("objective")
         if "cat_features" in p:
             raise ValueError(
                 "Set cat_features with CatBoostModel(categorical_features=...) "

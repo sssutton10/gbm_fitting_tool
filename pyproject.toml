@@ -8,11 +8,11 @@ version = "0.1.0"
 description = "Polars-native GBM fitting library for insurance frequency and severity models"
 requires-python = ">=3.11"
 dependencies = [
-    "polars>=0.20",
+    "polars>=1.0",
     "numpy>=1.26",
     "scipy>=1.11",
     "scikit-learn>=1.4",
-    "optuna>=3.5",
+    "optuna>=4.0",
     "tqdm>=4.66",
     "matplotlib>=3.8",
     "pyarrow>=14.0",

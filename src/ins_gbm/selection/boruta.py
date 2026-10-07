@@ -21,7 +21,8 @@ class BorutaSelector:
     1. For each iteration, create shadow features (shuffled copies of all features).
     2. Fit a model on original + shadow features.
     3. Record whether each original feature's importance > max shadow importance (a "hit").
-    4. After max_iter iterations, apply a two-sided binomial test against p=0.5:
+    4. After max_iter iterations, apply a two-sided binomial test against p=0.5,
+       with Bonferroni correction across input features by default:
        - confirmed: significantly more hits than expected by chance
        - rejected: significantly fewer hits than expected by chance
        - tentative: neither
@@ -38,6 +39,9 @@ class BorutaSelector:
         shadow_percentile (float): Percentile of shadow importance used as the hit
             threshold. 100 uses the strongest shadow; lower values are less strict.
         base_n_estimators (int): Number of trees in each Boruta base fit.
+        multiple_testing (Literal['bonferroni', 'none']): Adjustment across features.
+            The binomial comparison is a screening heuristic, especially when
+            shadow_percentile is reduced; it does not guarantee false discovery rates.
     """
 
     base_estimator: Literal["lightgbm", "random_forest"] = "lightgbm"
@@ -48,8 +52,17 @@ class BorutaSelector:
     candidate_stage: Literal["raw", "encoded"] = "raw"
     shadow_percentile: float = 100.0
     base_n_estimators: int = 30
+    multiple_testing: Literal["bonferroni", "none"] = "bonferroni"
 
     def __post_init__(self) -> None:
+        if self.multiple_testing not in ("bonferroni", "none"):
+            raise ValueError("multiple_testing must be 'bonferroni' or 'none'")
+        if self.base_estimator not in ("lightgbm", "random_forest"):
+            raise ValueError("base_estimator must be 'lightgbm' or 'random_forest'")
+        if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, int) or self.max_iter < 1:
+            raise ValueError("max_iter must be a positive integer")
+        if not 0 < self.alpha < 1:
+            raise ValueError("alpha must be in (0, 1)")
         if self.candidate_stage not in ("raw", "encoded"):
             raise ValueError("candidate_stage must be 'raw' or 'encoded'")
         if self.candidate_features is not None:
@@ -74,6 +87,9 @@ class BorutaSelector:
         """
         if self.candidate_features is not None:
             data = data.select_features(self.candidate_features)
+        data.validate(require_multiple_folds=False)
+        if not data.feature_names:
+            raise ValueError("Boruta requires at least one feature")
         rng = np.random.default_rng(self.seed)
         original_features = list(data.feature_names)
         n_rows = data.n_rows
@@ -136,12 +152,16 @@ class BorutaSelector:
 
         # Binomial test: H0 = feature hits by chance (p=0.5)
         classification = {}
+        alpha = (
+            self.alpha / len(original_features)
+            if self.multiple_testing == "bonferroni" else self.alpha
+        )
         for col, hits in hit_counts.items():
             result = binomtest(hits, self.max_iter, p=0.5)
             p_val = result.pvalue
-            if p_val < self.alpha and hits > self.max_iter / 2:
+            if p_val < alpha and hits > self.max_iter / 2:
                 classification[col] = "confirmed"
-            elif p_val < self.alpha and hits <= self.max_iter / 2:
+            elif p_val < alpha and hits <= self.max_iter / 2:
                 classification[col] = "rejected"
             else:
                 classification[col] = "tentative"
