@@ -108,6 +108,69 @@ def test_catboost_feature_importance(poisson_parquet):
     assert len(imp) == len(data.feature_names)
 
 
+def test_catboost_loss_importance_is_lazy_and_cached(monkeypatch, poisson_parquet):
+    from catboost import CatBoostRegressor
+
+    original_importance = CatBoostRegressor.get_feature_importance
+    calls = []
+
+    def record_importance(self, *args, **kwargs):
+        if kwargs.get("type") == "LossFunctionChange":
+            calls.append(kwargs["data"])
+        return original_importance(self, *args, **kwargs)
+
+    monkeypatch.setattr(CatBoostRegressor, "get_feature_importance", record_importance)
+    data = _poisson(poisson_parquet)
+    fitted = CatBoostModel().fit(data, params={"iterations": 5, "thread_count": 1})
+    fitted.predict(data)
+    fitted.feature_importance("PredictionValuesChange")
+    fitted.feature_importance("FeatureImportance")
+    with pytest.raises(ValueError, match="importance_type"):
+        fitted.feature_importance("unknown")
+    assert calls == []
+
+    pool = fitted.importance_fn.pool
+    expected = original_importance(fitted.model, data=pool, type="LossFunctionChange")
+    first = fitted.feature_importance()
+    second = fitted.feature_importance("LossFunctionChange")
+    assert len(calls) == 1
+    np.testing.assert_allclose(first["importance"].to_numpy(), expected)
+    assert first.equals(second)
+    assert fitted.feature_importance().equals(second)
+    assert len(calls) == 1
+    assert fitted.importance_fn.pool is None
+
+
+def test_catboost_cv_and_tuning_skip_loss_importance(monkeypatch, poisson_parquet):
+    from catboost import CatBoostRegressor
+
+    from ins_gbm import CVConfig
+    from ins_gbm.pipeline import ModelRecipe
+    from ins_gbm.tuning.tuner import HyperparameterTuner
+
+    original_importance = CatBoostRegressor.get_feature_importance
+
+    def reject_loss_importance(self, *args, **kwargs):
+        if kwargs.get("type") == "LossFunctionChange":
+            pytest.fail("CV and tuning must not compute unused LossFunctionChange")
+        return original_importance(self, *args, **kwargs)
+
+    monkeypatch.setattr(CatBoostRegressor, "get_feature_importance", reject_loss_importance)
+    recipe = ModelRecipe(
+        model=CatBoostModel(),
+        params={"iterations": 3, "thread_count": 1},
+        tuning=HyperparameterTuner(
+            n_trials=1,
+            cv_folds=2,
+            search_space={},
+            show_progress_bar=False,
+        ),
+    )
+    data = _poisson(poisson_parquet)
+    result = recipe.cross_validate(data, cv=CVConfig(n_splits=2))
+    assert np.isfinite(result.predictions["gbm"].to_numpy()).all()
+
+
 def test_catboost_capabilities():
     """Verify catboost capabilities."""
     caps = CatBoostModel(objective="poisson").capabilities()

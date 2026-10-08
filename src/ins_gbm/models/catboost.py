@@ -69,6 +69,56 @@ def _catboost_supports_offset() -> bool:
 
 
 @dataclass
+class _CatBoostImportance:
+    """Defer data-dependent importance and keep serialized state compact.
+
+    The training Pool is retained until LossFunctionChange is requested, then
+    released. Serialization materializes that score so saved models retain all
+    supported importance types without persisting training rows.
+    """
+
+    model: object
+    feature_names: list[str]
+    pool: object | None
+    loss_function_importance: np.ndarray | None = None
+
+    def _loss_function_change(self) -> np.ndarray:
+        if self.loss_function_importance is None:
+            if np.all(self.model.get_tree_leaf_counts() == 1):
+                # CatBoost can divide by zero for constant trees in small folds.
+                scores = np.zeros(len(self.feature_names))
+            else:
+                scores = self.model.get_feature_importance(
+                    data=self.pool, type="LossFunctionChange"
+                )
+            self.loss_function_importance = scores
+            self.pool = None
+        return self.loss_function_importance
+
+    def __call__(self, importance_type: str | None = None) -> pl.DataFrame:
+        importance_type = importance_type or "LossFunctionChange"
+        # Only scalar scores that can be ranked one per input feature.
+        allowed = {"FeatureImportance", "PredictionValuesChange", "LossFunctionChange"}
+        if importance_type not in allowed:
+            raise ValueError(
+                "CatBoost importance_type must be one of: "
+                "'FeatureImportance', 'PredictionValuesChange', 'LossFunctionChange'"
+            )
+        scores = (
+            self._loss_function_change()
+            if importance_type == "LossFunctionChange"
+            else self.model.get_feature_importance(type=importance_type)
+        )
+        return pl.DataFrame(
+            {"feature": self.feature_names, "importance": scores.astype(float).tolist()}
+        )
+
+    def __getstate__(self) -> dict:
+        self._loss_function_change()
+        return self.__dict__.copy()
+
+
+@dataclass
 class CatBoostModel:
     """CatBoost wrapper for Poisson (frequency) and Gamma (severity) objectives.
 
@@ -80,6 +130,9 @@ class CatBoostModel:
     Encoded numeric values use ``_NUMERIC_FILL`` (``-999_999_999.0``).
     Before constructing the ``Pool``, the wrapper converts that sentinel back to
     ``NaN`` so CatBoost can apply its native missing-value handling.
+
+    Feature importance defaults to ``LossFunctionChange`` and is calculated
+    lazily when requested (or when saving a compact fitted model).
 
     Args:
         objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
@@ -225,19 +278,6 @@ class CatBoostModel:
         model = CatBoostRegressor(**p)
         model.fit(pool)
 
-        # LossFunctionChange normally requires the training Pool. Cache its
-        # compact result now so the fitted wrapper does not retain that matrix.
-        if np.all(model.get_tree_leaf_counts() == 1):
-            # Aggressive feature sampling can produce only constant trees,
-            # especially in small CV folds. No feature contributes to such a
-            # model; CatBoost's native LossFunctionChange can divide by zero.
-            loss_function_importance = np.zeros(len(data.feature_names))
-        else:
-            loss_function_importance = model.get_feature_importance(
-                data=pool,
-                type="LossFunctionChange",
-            )
-
         feature_names = list(data.feature_names)
         has_offset = _catboost_supports_offset()
 
@@ -285,36 +325,6 @@ class CatBoostModel:
                     return pl.Series(link)
             return pl.Series(link if prediction_type == "link" else response)
 
-        def _importance(importance_type: str | None = None) -> pl.DataFrame:
-            # These types produce one scalar per input feature.  Interaction
-            # and SHAP outputs are intentionally excluded because they are not
-            # rankable 1:1 here.
-            """Return feature importance from the fitted estimator.
-
-            Args:
-                importance_type (Optional[str]): Optional framework-specific importance measure.
-            """
-            importance_type = importance_type or "PredictionValuesChange"
-            allowed = {
-                "FeatureImportance",
-                "PredictionValuesChange",
-                "LossFunctionChange",
-            }
-            if importance_type not in allowed:
-                raise ValueError(
-                    "CatBoost importance_type must be one of: "
-                    "'FeatureImportance', 'PredictionValuesChange', "
-                    "'LossFunctionChange'"
-                )
-            scores = (
-                loss_function_importance
-                if importance_type == "LossFunctionChange"
-                else model.get_feature_importance(type=importance_type)
-            )
-            return pl.DataFrame(
-                {"feature": feature_names, "importance": scores.astype(float).tolist()}
-            )
-
         return FittedModel(
             model=model,
             params=p,
@@ -322,6 +332,6 @@ class CatBoostModel:
             objective=objective,
             feature_names=feature_names,
             predict_fn=_predict,
-            importance_fn=_importance,
+            importance_fn=_CatBoostImportance(model, feature_names, pool),
             transform_chain=transform_result.chain,
         )

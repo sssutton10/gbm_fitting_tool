@@ -355,6 +355,16 @@ one loaded candidate pool across fits. To select encoded columns such as
 `"territory__urban"`, pass `feature_stage="encoded"` with `feature_names`.
 Each cross-validation fold fits its own encoder before selecting those columns.
 
+Model wrappers calculate feature importance on request. CatBoost's
+default importance is `LossFunctionChange`, deferred until importance is
+requested or the fitted model is saved. Its compact scores are cached so saved
+models need no training rows. Until then, the fitted CatBoost wrapper retains
+its training Pool in memory.
+CV scoring and tuning do not request importance; Boruta, staged importance
+selection, and `cv_feature_importance()` calculate it as part of selection.
+CatBoost itself still calculates `PredictionValuesChange` inside its native
+`fit()`.
+
 See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for architecture and migration
 details. The runnable workflow is `examples/example_usage.py`, with a companion
 notebook at `examples/example_usage.ipynb`.

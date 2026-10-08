@@ -63,6 +63,39 @@ def test_saved_catboost_preserves_native_categories(tmp_path, numeric_category):
     assert loaded.predict(score_data).to_list() == pytest.approx(expected.to_list())
 
 
+def test_saved_catboost_materializes_lazy_loss_importance(tmp_path, monkeypatch):
+    pytest.importorskip("catboost")
+    from catboost import CatBoostRegressor
+
+    data = ModelData(
+        features=pl.DataFrame({"territory": ["north", "south"] * 10}),
+        target=pl.Series("claims", [0.0, 2.0] * 10),
+        feature_names=["territory"],
+        objective="poisson",
+    )
+    fitted = ModelRecipe(
+        model=CatBoostModel(), encoder=OneHotEncoder(),
+        params={"iterations": 5, "thread_count": 1},
+    ).fit(data)
+    importance_fn = fitted.fitted_model.importance_fn
+    assert importance_fn.loss_function_importance is None
+    assert importance_fn.pool is not None
+
+    fitted.save(str(tmp_path))
+    expected = fitted.fitted_model.feature_importance("LossFunctionChange")
+    assert importance_fn.pool is None
+
+    def reject_recalculation(*args, **kwargs):
+        pytest.fail("Saved LossFunctionChange must not require recalculation")
+
+    monkeypatch.setattr(CatBoostRegressor, "get_feature_importance", reject_recalculation)
+    loaded = load_pipeline(str(tmp_path))
+    assert loaded.raw_train_data is None
+    assert loaded.fitted_model.importance_fn.pool is None
+    assert loaded.fitted_model.feature_importance("LossFunctionChange").equals(expected)
+    assert loaded.fitted_model.feature_importance().equals(expected)
+
+
 def test_save_load_preserves_predictions_without_metrics_artifact(
     poisson_parquet, tmp_path
 ):

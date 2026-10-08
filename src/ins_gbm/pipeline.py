@@ -93,7 +93,8 @@ class FittedPipeline:
     The raw training data is retained in memory for OOF ensemble workflows, but
     is omitted from persisted artifacts. The expanded transformed training
     matrix is reconstructed only when ``train_data`` is explicitly accessed and
-    is never cached on this object.
+    is never cached on this object. CatBoost's importance callback separately
+    retains its training Pool until LossFunctionChange is requested or saved.
 
     Args:
         fitted_model (FittedModel): Fitted model to evaluate or persist.

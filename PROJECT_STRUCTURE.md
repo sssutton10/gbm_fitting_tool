@@ -926,6 +926,11 @@ Training behavior:
 - Adds `data.offset` to the baseline for either objective. If both exposure
   and offset are absent, omits `baseline` from the corresponding Pool.
 - Uses `data.weight` as sample weight if supplied.
+- Defaults to `LossFunctionChange`, defers it until requested, caches its scores,
+  and releases the training Pool afterward. Serialization also materializes those scores to
+  preserve data-free importance access in compact artifacts. The Pool is retained
+  in memory until either operation. CV scoring and tuning do not request it.
+- CatBoost's own `fit()` still computes `PredictionValuesChange` internally.
 
 Pitfalls:
 
