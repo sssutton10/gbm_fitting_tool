@@ -124,6 +124,38 @@ def test_catboost_search_space_keys():
     assert "depth" in space
 
 
+def test_catboost_constant_trees_have_zero_loss_importance(monkeypatch, poisson_parquet):
+    from catboost import CatBoostRegressor
+
+    original_importance = CatBoostRegressor.get_feature_importance
+
+    def reject_constant_loss_importance(self, *args, **kwargs):
+        if kwargs.get("type") == "LossFunctionChange":
+            pytest.fail("Constant trees must not call native LossFunctionChange")
+        return original_importance(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CatBoostRegressor, "get_feature_importance", reject_constant_loss_importance
+    )
+    data = _poisson(poisson_parquet)
+    fitted = CatBoostModel().fit(
+        data,
+        params={
+            "iterations": 3,
+            "depth": 3,
+            "colsample_bylevel": 1e-10,
+            "thread_count": 1,
+            "random_seed": 42,
+        },
+    )
+
+    assert np.all(fitted.model.get_tree_leaf_counts() == 1)
+    importance = fitted.feature_importance("LossFunctionChange")
+    assert importance["feature"].to_list() == data.feature_names
+    np.testing.assert_array_equal(importance["importance"].to_numpy(), 0.0)
+    assert np.isfinite(fitted.predict(data).to_numpy()).all()
+
+
 def _categorical_data(features: pl.DataFrame) -> ModelData:
     return ModelData(
         features=features,

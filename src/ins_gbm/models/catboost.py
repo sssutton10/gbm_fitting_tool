@@ -102,18 +102,26 @@ class CatBoostModel:
         )
 
     def default_search_space(self) -> dict:
-        """Return Optuna distributions for tunable model parameters."""
+        """Return a CPU search space balancing capacity and training cost.
+
+        More boosting rounds and meaningful leaf regularization support wide
+        candidate sets. Limit symmetric-tree depth and allow aggressive feature
+        sampling to keep those additional rounds affordable. No validation Pool
+        is supplied by this wrapper, so iterations are fitted in full.
+        """
         import optuna
 
         return {
-            "iterations": optuna.distributions.IntDistribution(50, 500),
+            "iterations": optuna.distributions.IntDistribution(200, 1200, step=100),
             "learning_rate": optuna.distributions.FloatDistribution(
-                0.01, 0.3, log=True
+                0.03, 0.2, log=True
             ),
-            "depth": optuna.distributions.IntDistribution(3, 10),
-            "l2_leaf_reg": optuna.distributions.FloatDistribution(1e-8, 10.0, log=True),
+            "depth": optuna.distributions.IntDistribution(3, 8),
+            "l2_leaf_reg": optuna.distributions.FloatDistribution(0.1, 100.0, log=True),
             "subsample": optuna.distributions.FloatDistribution(0.5, 1.0),
-            "colsample_bylevel": optuna.distributions.FloatDistribution(0.5, 1.0),
+            "colsample_bylevel": optuna.distributions.FloatDistribution(
+                0.1, 1.0, log=True
+            ),
         }
 
     def fit(
@@ -219,10 +227,16 @@ class CatBoostModel:
 
         # LossFunctionChange normally requires the training Pool. Cache its
         # compact result now so the fitted wrapper does not retain that matrix.
-        loss_function_importance = model.get_feature_importance(
-            data=pool,
-            type="LossFunctionChange",
-        )
+        if np.all(model.get_tree_leaf_counts() == 1):
+            # Aggressive feature sampling can produce only constant trees,
+            # especially in small CV folds. No feature contributes to such a
+            # model; CatBoost's native LossFunctionChange can divide by zero.
+            loss_function_importance = np.zeros(len(data.feature_names))
+        else:
+            loss_function_importance = model.get_feature_importance(
+                data=pool,
+                type="LossFunctionChange",
+            )
 
         feature_names = list(data.feature_names)
         has_offset = _catboost_supports_offset()

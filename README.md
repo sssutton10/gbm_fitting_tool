@@ -88,6 +88,56 @@ one_hot_recipe = ModelRecipe(
 )
 ```
 
+## CatBoost tuning on wide feature sets
+
+`CatBoostModel.default_search_space()` is intended for CPU tuning. It searches
+200–1,200 iterations in steps of 100, learning rates of 0.03–0.2 (log scale),
+depths of 3–8, `l2_leaf_reg` of 0.1–100 (log scale), `subsample` of 0.5–1.0,
+and `colsample_bylevel` of 0.1–1.0 (log scale). Lower feature-sampling fractions
+help control the cost of fitting hundreds of predictors; the depth cap avoids
+the largest symmetric trees. These are starting ranges, not a guarantee that
+CatBoost will outperform another model family. Custom tuner search spaces and
+the model-search example's tree/depth overrides take precedence.
+
+For an initial native-categorical CPU search, limit categorical statistics to
+individual features and run one tuning trial at a time:
+
+```python
+from ins_gbm import CatBoostModel, HyperparameterTuner, ModelRecipe
+
+catboost_recipe = ModelRecipe(
+    model=CatBoostModel(objective="poisson"),
+    params={
+        "random_seed": 42,
+        "thread_count": 4,
+        "bootstrap_type": "Bernoulli",  # Compatible with tuned subsample.
+        "max_ctr_complexity": 1,
+    },
+    tuning=HyperparameterTuner(n_trials=20, cv_folds=3, seed=42, n_jobs=1),
+)
+catboost_fit = catboost_recipe.fit(training)
+```
+
+`max_ctr_complexity=1` disables combinations in CatBoost's categorical
+statistics, which can reduce runtime but can also lose useful interactions.
+After pruning, consider comparing it with `max_ctr_complexity=2` on the smaller
+feature set. These fixed parameters are optional and are not imposed by the
+wrapper. See CatBoost's [training-speed guidance](https://catboost.ai/docs/en/concepts/speed-up-training).
+
+The wrapper does not supply a validation Pool for early stopping: each fit runs
+its full requested iteration count. If the best trials reach 1,200 iterations,
+consider extending that range after reducing the feature pool. Assess runtime
+on your data before launching a large search. The default feature-sampling
+range is not suitable for ordinary GPU Poisson training, where CatBoost does
+not support `rsm`; supply a custom search space without `colsample_bylevel`
+when using that configuration.
+
+`ImportancePruner` uses the importance of the already fitted model and does not
+perform a separate shallow screen. Retune the reduced feature set, and keep a
+holdout separate from both discovery and tuning. For an outer CV estimate of
+the complete selection procedure, selection must be relearned inside each
+outer training fold; passing a selection learned on all rows freezes it.
+
 ## Prune fitted model columns
 
 `ImportancePruner` ranks the columns actually fitted by a model, including
