@@ -18,11 +18,15 @@ Objective = Literal["poisson", "gamma"]
 class RandomForestModel:
     """Random Forest benchmark model.
 
-    Does not support native exposure offsets. For Poisson frequency, exposure
-    is incorporated via sample weights (exposure-weighted MSE), which is an
-    approximation. For Gamma severity, the untransformed target is fit with MSE.
-    Both are documented limitations — this model is a benchmark, not a GLM-style
-    objective wrapper.
+    Does not support native exposure offsets. For Poisson frequency, fit claim
+    rates with exposure weights and Poisson deviance splits. For Gamma severity,
+    fit the untransformed target with squared-error splits; sklearn has no Gamma
+    criterion. This model is a benchmark, not a GLM-style objective wrapper.
+
+    Defaults use 200 trees, maximum depth 12, and 80% of features per split.
+    Minimum leaf sizes are 10 for sparse Poisson counts and 5 for Gamma severity.
+    Fits use one worker and seed 42. Explicit ``params`` override any default,
+    including the criterion. The Poisson criterion requires a positive target sum.
 
     Args:
         objective (Optional[Objective]): Model objective: "poisson" or "gamma". Optional.
@@ -83,13 +87,21 @@ class RandomForestModel:
         if data.offset is not None:
             raise ValueError("RandomForestModel does not support offsets")
 
-        p = dict(params or {})
-        p.setdefault("random_state", 42)
+        p = {
+            "criterion": "poisson" if objective == "poisson" else "squared_error",
+            "n_estimators": 200,
+            "max_depth": 12,
+            "min_samples_leaf": 10 if objective == "poisson" else 5,
+            "max_features": 0.8,
+            "n_jobs": 1,
+            "random_state": 42,
+        }
+        p.update(params or {})
 
         X = frame_to_fit_array(data.features, data.feature_names)
         y = series_to_fit_array(data.target)
 
-        # Approximate Poisson objective: weight by exposure, fit on claim rate
+        # Exposure-weighted rate deviance gives the count-deviance split ordering.
         if objective == "poisson" and data.exposure is not None:
             exposure = series_to_fit_array(data.exposure)
             y_fit = y / exposure  # fit on claim rate

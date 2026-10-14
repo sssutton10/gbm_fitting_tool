@@ -73,11 +73,65 @@ def test_rf_poisson_response_floors_zero_rate_predictions(poisson_parquet):
     ).validate()
 
     fitted = RandomForestModel(objective="poisson").fit(
-        zero_target_data, params={"n_estimators": 10}
+        zero_target_data, params={"n_estimators": 10, "criterion": "squared_error"}
     )
     preds = fitted.predict(zero_target_data, prediction_type="response")
 
     assert (preds == 1e-10).all()
+
+
+def test_rf_poisson_criterion_rejects_all_zero_targets(poisson_parquet):
+    data = _poisson(poisson_parquet)
+    data = replace(data, target=pl.Series("claim_count", np.zeros(data.n_rows)))
+
+    with pytest.raises(ValueError, match="(?i)sum of y is not strictly positive"):
+        RandomForestModel().fit(data, params={"n_estimators": 1})
+
+
+@pytest.mark.parametrize("objective, leaf_size", [("poisson", 10), ("gamma", 5)])
+@pytest.mark.parametrize("explicit_objective", [False, True])
+def test_rf_objective_defaults(
+    poisson_parquet, gamma_parquet, objective, leaf_size, explicit_objective
+):
+    data = _poisson(poisson_parquet) if objective == "poisson" else _gamma(gamma_parquet)
+    model = RandomForestModel(objective=objective if explicit_objective else None)
+    if explicit_objective:
+        data = replace(data, objective=None)
+
+    fitted = model.fit(data)
+
+    expected = {
+        "criterion": "poisson" if objective == "poisson" else "squared_error",
+        "n_estimators": 200,
+        "max_depth": 12,
+        "min_samples_leaf": leaf_size,
+        "max_features": 0.8,
+        "n_jobs": 1,
+        "random_state": 42,
+    }
+    assert fitted.objective == objective
+    assert fitted.params == expected
+    assert all(fitted.model.get_params()[key] == value for key, value in expected.items())
+
+
+def test_rf_explicit_params_override_defaults_without_mutation(poisson_parquet):
+    params = {
+        "criterion": "squared_error",
+        "n_estimators": 3,
+        "max_depth": None,
+        "min_samples_leaf": 1,
+        "max_features": 1.0,
+        "n_jobs": 2,
+        "random_state": 7,
+        "bootstrap": False,
+    }
+    original = params.copy()
+
+    fitted = RandomForestModel().fit(_poisson(poisson_parquet), params=params)
+
+    assert params == original
+    assert fitted.params == original
+    assert all(fitted.model.get_params()[key] == value for key, value in original.items())
 
 
 def test_rf_poisson_combines_exposure_and_model_weight(poisson_parquet, monkeypatch):
@@ -104,6 +158,8 @@ def test_rf_poisson_combines_exposure_and_model_weight(poisson_parquet, monkeypa
             y (object): The y.
             sample_weight (object): The sample weight. Optional.
         """
+        captured["y"] = np.asarray(y)
+        captured["criterion"] = self.criterion
         captured["sample_weight"] = np.asarray(sample_weight)
         return original_fit(self, X, y, sample_weight=sample_weight)
 
@@ -113,6 +169,10 @@ def test_rf_poisson_combines_exposure_and_model_weight(poisson_parquet, monkeypa
     )
 
     expected = data.exposure.to_numpy() * model_weight.to_numpy()
+    assert captured["criterion"] == "poisson"
+    np.testing.assert_allclose(
+        captured["y"], data.target.to_numpy() / data.exposure.to_numpy()
+    )
     np.testing.assert_allclose(captured["sample_weight"], expected)
 
 

@@ -334,12 +334,20 @@ fraction is below one, unless a bagging frequency is explicitly supplied.
 | LightGBM | Native Poisson with exposure/offset | Native Gamma with offset | Native |
 | XGBoost | `count:poisson` with exposure/offset | `reg:gamma` with offset | Numeric inputs required |
 | CatBoost | Native Poisson with baseline | Tweedie power 1.99, a Gamma approximation | Native |
-| Random Forest | Exposure-weighted rate regression with MSE | Severity regression with MSE | Numeric inputs required |
+| Random Forest | Exposure-weighted rate regression with Poisson deviance splits | Severity regression with MSE | Numeric inputs required |
 
 CatBoost does not expose an exact native Gamma objective. Random Forest's
 objectives are approximation benchmarks, and it rejects explicit offsets.
 Native objective overrides that conflict with a wrapper's resolved objective
 are rejected to keep the log-link prediction contract valid.
+
+Random Forest defaults follow the resolved model/data objective: `criterion="poisson"`
+with `min_samples_leaf=10` for frequency, and `criterion="squared_error"` with
+`min_samples_leaf=5` for Gamma severity (sklearn has no Gamma criterion). Both use
+`n_estimators=200`, `max_depth=12`, `max_features=0.8`, `n_jobs=1`, and
+`random_state=42`. These are starting points for tuning; explicit `params`
+override any of these defaults, including `criterion`. The Poisson criterion
+requires at least one positive training target; all-zero targets raise `ValueError`.
 
 ## Prediction contract
 
