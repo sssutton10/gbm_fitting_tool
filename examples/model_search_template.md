@@ -83,8 +83,9 @@ No procedure guarantees beating the refit on new data.
    Poisson/Gamma deviance on aligned nested OOF predictions. Try every pair, all
    finalists together, equal-weight variants, and all single-model endpoints.
    Multiple optimization starts are used. This is a bounded search for a strong
-   blend, not a globally best ensemble guarantee. Unlike the library's current
-   convenience blend helper, this template optimizes deviance rather than MSE.
+   blend, not a globally best ensemble guarantee. The library's convenience
+   blend helper also supports deviance with `metric="auto"`; this template adds
+   multiple starts and a search across model subsets.
 6. Choose the single model or blend on development validation; separately retain
    the best genuine multi-model blend. Save weights and member paths before any
    test data is read. Test evaluation never changes the selected weights.

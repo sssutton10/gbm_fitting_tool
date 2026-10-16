@@ -1550,8 +1550,8 @@ Defined in `ensemble/stacking.py`.
 
 Stacking flow:
 
-1. For each fitted base pipeline, refit the pipeline recipe inside KFold splits
-   of that pipeline's training data.
+1. For each fitted base pipeline, refit its recipe inside shared CV splits,
+   reusing predefined fold IDs when present or generating random folds.
 2. Collect out-of-fold predictions into a matrix.
 3. Fit a meta-learner on that matrix and the training target.
 4. For prediction, get base predictions from the original fitted pipelines and
@@ -1559,14 +1559,25 @@ Stacking flow:
 
 Default meta-learner:
 
-- `sklearn.linear_model.Ridge`
+- `PoissonRegressor` for frequency, `GammaRegressor` for severity.
+- `meta_learner="ridge"` retains response-scale Ridge; custom estimators are supported.
+- `meta_alpha=1.0` controls built-in regularization.
 
-Predictions are clipped to be positive.
+Poisson targets and response predictions are counts. The distribution-aware
+stacker internally divides targets and base responses by
+`b = exposure * exp(offset)`, fits on log normalized predictions with weights
+`b * observation_weight`, then multiplies by the scoring row's `b` to return
+counts. Without an explicit offset, this is exposure-weighted rate fitting.
+Obtain ordinary rates by dividing final counts by scoring exposure. Gamma uses
+`b = exp(offset)` and observation weights only, returning severity without any
+exposure conversion. Ridge/custom learners retain response-scale features and
+positive clipping. See [the ensemble guide](docs/ensembles.md) for formulas.
 
 Pitfalls:
 
 - Base pipelines should have the same objective, compatible raw input rows, and
-  compatible row order. The code does not perform deep compatibility checks.
+  compatible row order. Targets, exposure, weights, offsets, and fold IDs are
+  checked for alignment; feature values may differ between pipelines.
 - Fixed OOF refits preserve each base pipeline's effective fitted parameters;
   `refit="retune"` performs tuning inside each fold instead.
 - Ensemble evaluation uses only the caller-provided holdout and does not retain
@@ -1576,7 +1587,7 @@ Pitfalls:
 
 Defined in `ensemble/pipeline.py`.
 
-Unified wrapper for blending and stacking:
+Unified wrapper for blending, stacking, seed averaging, and bagging:
 
 ```python
 ensemble_result = EnsemblePipeline(
@@ -1596,6 +1607,47 @@ Returns `EnsembleResult`:
 `EnsembleResult.evaluate(holdout_data)` to create an `EvaluationReport`; the
 method builds a proxy `FittedModel` so the standard report machinery can call
 the ensemble.
+
+### Ensemble cross-validation and shared candidate comparisons
+
+`cross_validate_candidates({"single": recipe, "ensemble": configuration}, data,
+cv=outer_cv)` evaluates models and ensemble configurations together and returns
+named `CVResult` objects for existing comparisons, double lift, plots, and
+persistence. `EnsemblePipeline.cross_validate()` and `CrossValidationReport`
+also accept an individual ensemble configuration. The runner lives in
+`evaluation/candidates.py` and reuses report scoring/result assembly.
+
+Each outer fold independently refits all training transforms and models;
+combination learning is confined to inner data. Validation blending uses an
+internal split and rejects external validation data. Matching fixed-parameter
+base fits and response predictions are cached per outer fold, keyed by built-in
+configuration and ordered row indices. Custom configurations and tuning
+searches bypass sharing. Outer `base_refit` and ensemble inner `refit` are
+independent; `inner_cv` overrides candidate inner splits.
+
+Results retain response-scale outer OOF predictions (Poisson counts / Gamma
+severity), per-fold parameter records, provenance, and invocation-wide fit/cache
+counts under `cv_config["execution"]`. Cached models and training data are not
+retained in results. See [the ensemble guide](docs/ensembles.md) for examples,
+parameter-reuse caveats, and rate/count handling.
+
+### Seed averaging and bagging
+
+`EnsemblePipeline([template], method="seed_average", n_members=5)` refits one
+fitted template on all rows with distinct model seeds.
+`method="bagging"` samples `floor(sample_fraction * n_rows)` rows per member,
+with replacement by default or without replacement with `bootstrap=False`.
+Both reuse fitted model parameters without tuning, independently refit recipe
+transforms/selection, and preserve manually fixed feature subsets. Members fit
+sequentially and average response-scale predictions: expected counts for
+Poisson and severity for Gamma. All four model families are supported.
+Generated members and reproducibility settings are available through
+`result.base_pipelines` and `result.configuration`.
+
+`result.save(directory)` / `save_ensemble(result, directory)` write a compact
+complete ensemble; `load_ensemble(directory)` restores prediction and evaluation.
+Raw training rows and stacking OOF matrices are omitted. See
+[the ensemble guide](docs/ensembles.md) for examples and count/rate handling.
 
 ## Persistence
 

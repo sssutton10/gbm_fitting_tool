@@ -373,6 +373,93 @@ selection, and `cv_feature_importance()` calculate it as part of selection.
 CatBoost itself still calculates `PredictionValuesChange` inside its native
 `fit()`.
 
+## Ensemble methods and prediction scales
+
+`EnsemblePipeline` supports `"blending"`, `"stacking"`, `"seed_average"`, and
+`"bagging"`. Seed averaging and bagging start from one fitted pipeline, reuse
+its model parameters, and independently refit transforms for each member:
+
+```python
+bagged = EnsemblePipeline(
+    [fitted], method="bagging", n_members=5, seed=42,
+    sample_fraction=0.8, bootstrap=True,
+).run()
+seed_average = EnsemblePipeline([fitted], method="seed_average", n_members=5).run()
+bagged.save("output/bagged")  # load_ensemble("output/bagged") restores it
+```
+
+**Poisson targets are counts, with exposure supplied separately.** Ensemble
+`predict()` returns expected counts; divide by scoring exposure to obtain rates.
+For example, predicted count `0.3` at exposure `0.5` means rate `0.6`. Bagging and
+seed averaging average response counts. Gamma inputs and predictions are
+severity, without exposure conversion.
+
+**Stacking now defaults to Poisson/Gamma regression**, using log normalized base
+predictions. Without an explicit offset, Poisson stacking internally fits rates
+with exposure times observation weights, then multiplies by scoring exposure to
+return counts. Explicit offsets are also normalized out and restored once;
+Gamma stacking normalizes only for offsets and uses observation weights.
+Select `meta_learner="ridge"` to retain the previous response-scale approach,
+or supply a custom estimator. `meta_alpha=1.0` controls built-in regularization.
+
+See [the ensemble guide](docs/ensembles.md) for the exact count/rate and offset
+formulas, severity examples, fold controls, sampling behavior, and save/load.
+
+## Compare models and ensembles using training-data CV
+
+Keep the final holdout reserved while comparing candidates:
+
+```python
+from ins_gbm import CVConfig, cross_validate_candidates, compare_reports
+
+results = cross_validate_candidates(
+    {"single": single_recipe, "blend": blend_candidate, "stack": stack_candidate},
+    train, cv=CVConfig(n_splits=5, seed=42), base_refit="fixed",
+    inner_cv=CVConfig(n_splits=3, seed=42, folds="random"),
+)
+print(compare_reports(results))
+print(results["stack"].cv_config["execution"])
+```
+
+Candidates are `ModelRecipe` or `EnsemblePipeline` configurations. Matching
+base fits and predictions are shared within outer folds; combination weights
+and meta-models are fitted independently using only outer training rows.
+Choose grouped inner folds when your data requires group isolation. All
+ensemble methods support individual `candidate.cross_validate(train, cv=...)`
+and `CrossValidationReport(recipe=candidate, ...)`, returning standard,
+persistable `CVResult` objects. Poisson OOF outputs remain expected counts.
+See [the ensemble CV guide](docs/ensembles.md#comparing-candidates-before-opening-the-final-holdout)
+for tuning policies, manual feature subsets, internal validation splitting,
+fit-count interpretation, and final holdout evaluation.
+
+## Ensemble folds and weight optimization
+
+OOF blending and stacking reuse the base pipelines' training `ModelData.cv_fold`
+assignments when available, otherwise they generate random folds. Set
+`use_data_folds=True` to require existing folds, or `False` to generate random
+folds. Alternatively pass `cv=CVConfig(folds="predefined")`; `CVConfig` also
+controls the random fold count and seed. All base pipelines must have aligned
+training rows and fold assignments.
+
+```python
+from ins_gbm import EnsemblePipeline
+
+ensemble = EnsemblePipeline(
+    fitted_pipelines=[first, second],
+    blend_mode="oof",
+    use_data_folds=True,
+    metric="auto",
+).run()
+```
+
+For blending with `blend_mode="oof"` or `"validation"`, `metric="auto"` selects
+Poisson or Gamma deviance from the fitted models' common objective. Explicit
+`"poisson_deviance"` and `"gamma_deviance"` must match that objective. The default
+remains `"mse"`. Optimization respects observation weights; Poisson deviance
+uses exposure-weighted rates, matching evaluation. These options are also
+available directly on `BlendingEnsemble`, and fold controls are available on
+`StackingEnsemble`. Evaluate the result on a separate final holdout.
+
 See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for architecture and migration
 details. The runnable workflow is `examples/example_usage.py`, with a companion
 notebook at `examples/example_usage.ipynb`.

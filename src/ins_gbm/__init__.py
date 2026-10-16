@@ -7,6 +7,7 @@ from ins_gbm.data.loader import load_model_data
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
+from ins_gbm.evaluation.candidates import cross_validate_candidates
 from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
 from ins_gbm.models.catboost import CatBoostModel
@@ -14,6 +15,7 @@ from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.models.random_forest import RandomForestModel
 from ins_gbm.models.xgboost import XGBoostModel
 from ins_gbm.persistence.cv_io import load_cv_result
+from ins_gbm.persistence.ensemble_io import load_ensemble, save_ensemble
 from ins_gbm.persistence.io import load_model, load_pipeline, save_pipeline
 from ins_gbm.pipeline import FittedPipeline, ModelPipeline, ModelRecipe
 from ins_gbm.preprocessing.encoder import OneHotEncoder
@@ -55,9 +57,12 @@ __all__ = [
     "compare_cv_double_lift",
     "compare_reports",
     "cv_feature_importance",
+    "cross_validate_candidates",
     "load_cv_result",
+    "load_ensemble",
     "load_model",
     "load_model_data",
     "load_pipeline",
     "save_pipeline",
+    "save_ensemble",
 ]

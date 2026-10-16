@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import polars as pl
 
-from ins_gbm.data.dtypes import FIT_DTYPE, series_to_fit_array
+from ins_gbm.data.dtypes import FIT_DTYPE
+from ins_gbm.data.folds import CVConfig
 from ins_gbm.data.model_data import ModelData, slice_model_data
 from ins_gbm.ensemble._utils import (
     _apply_pipeline_recipe_fold_transforms,
     _predict_from_pipeline,
+    _resolve_ensemble_folds,
     _validate_ensemble_pipelines,
 )
 
@@ -65,6 +67,16 @@ class BlendingEnsemble:
 
     refit : {"fixed", "retune"}
         Use fitted model parameters in each OOF fold, or retune each fold.
+    use_data_folds : bool or None
+        None uses ``ModelData.cv_fold`` when present, True requires it, and
+        False generates random folds. Ignored outside OOF mode.
+    cv : CVConfig or None
+        Fold configuration overriding ``cv_folds`` and ``seed``. Cannot be
+        combined with ``use_data_folds``.
+    metric : {"mse", "auto", "poisson_deviance", "gamma_deviance"}
+        Loss for optimized weights. Default is MSE; "auto" selects deviance
+        for the fitted models' objective. Observation weights are respected;
+        Poisson deviance uses exposure-weighted rates, as in evaluation.
     """
 
     mode: Literal["fixed", "validation", "oof"] = "fixed"
@@ -72,6 +84,9 @@ class BlendingEnsemble:
     cv_folds: int = 5
     seed: int = 42
     refit: str = "fixed"
+    use_data_folds: bool | None = None
+    cv: CVConfig | None = None
+    metric: str = "mse"
 
     def fit(
         self,
@@ -147,9 +162,8 @@ class BlendingEnsemble:
             [_predict_from_pipeline(p, validation_data) for p in pipelines],
             axis=1,
         )
-        actual = series_to_fit_array(validation_data.target)
         return FittedBlendingEnsemble(
-            weights=_optimize_weights(preds, actual).tolist(),
+            weights=self._learn_weights(preds, validation_data, pipelines),
             fitted_pipelines=list(pipelines),
         )
 
@@ -159,18 +173,18 @@ class BlendingEnsemble:
         Args:
             pipelines (object): Base fitted pipelines to combine.
         """
-        from sklearn.model_selection import KFold
-
         training_data = [pipeline._require_raw_train_data() for pipeline in pipelines]
         ref_train = training_data[0]
         n = ref_train.n_rows
-        kf = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.seed)
+        fold_splits = _resolve_ensemble_folds(
+            ref_train, self.cv, self.cv_folds, self.seed, self.use_data_folds
+        )
         oof_preds = np.zeros((n, len(pipelines)), dtype=FIT_DTYPE)
 
         for p_idx, (pipeline, pipeline_data) in enumerate(
             zip(pipelines, training_data)
         ):
-            for train_idx, val_idx in kf.split(range(n)):
+            for train_idx, val_idx in fold_splits:
                 fold_train = slice_model_data(pipeline_data, train_idx)
                 fold_val = slice_model_data(pipeline_data, val_idx)
                 if self.refit == "retune" and pipeline.recipe.tuning is not None:
@@ -202,21 +216,71 @@ class BlendingEnsemble:
                     predictions = fitted_model.predict(current_val, "response")
                 oof_preds[val_idx, p_idx] = predictions.to_numpy()
 
-        actual = series_to_fit_array(ref_train.target)
         return FittedBlendingEnsemble(
-            weights=_optimize_weights(oof_preds, actual).tolist(),
+            weights=self._learn_weights(oof_preds, ref_train, pipelines),
             fitted_pipelines=list(pipelines),
         )
 
+    def _learn_weights(self, preds, data, pipelines) -> list[float]:
+        """Resolve the loss against the base models' common objective."""
+        objective = pipelines[0].fitted_model.objective
+        metric = f"{objective}_deviance" if self.metric == "auto" else self.metric
+        if (
+            metric in {"poisson_deviance", "gamma_deviance"}
+            and metric != f"{objective}_deviance"
+        ):
+            raise ValueError(
+                f"metric {metric!r} is incompatible with objective {objective!r}"
+            )
+        return _optimize_weights(
+            preds,
+            data.target.to_numpy(),
+            metric=metric,
+            sample_weight=data.weight.to_numpy() if data.weight is not None else None,
+            exposure=data.exposure.to_numpy() if data.exposure is not None else None,
+        ).tolist()
 
-def _optimize_weights(preds: np.ndarray, actual: np.ndarray) -> np.ndarray:
-    """Scipy-optimize blend weights (sum to 1, non-negative) to minimise MSE.
+
+def _optimize_weights(
+    preds: np.ndarray,
+    actual: np.ndarray,
+    *,
+    metric: str = "mse",
+    sample_weight: np.ndarray | None = None,
+    exposure: np.ndarray | None = None,
+) -> np.ndarray:
+    """Minimize the chosen loss with nonnegative weights summing to one.
 
     Args:
         preds (np.ndarray): Matrix of base model predictions.
         actual (np.ndarray): Observed outcomes aligned with predictions.
     """
     from scipy.optimize import minimize
+    from ins_gbm.evaluation.metrics import (
+        _poisson_rate_metric_inputs,
+        gamma_deviance,
+        poisson_deviance,
+    )
+
+    if metric not in {"mse", "poisson_deviance", "gamma_deviance"}:
+        raise ValueError(
+            f"Unknown metric: {metric!r}. Choose 'mse', 'auto', "
+            "'poisson_deviance', or 'gamma_deviance'."
+        )
+    # SLSQP uses small finite-difference steps; float32 can hide loss changes.
+    preds = np.asarray(preds, dtype=np.float64)
+    actual = np.asarray(actual, dtype=np.float64)
+    if not np.all(np.isfinite(preds)) or not np.all(np.isfinite(actual)):
+        raise ValueError("predictions and actual values must be finite")
+    if metric != "mse":
+        if np.any(preds <= 0):
+            raise ValueError("predicted values must be positive for deviance")
+        if np.any(actual < 0) or (metric == "gamma_deviance" and np.any(actual == 0)):
+            raise ValueError(f"actual values are outside the domain of {metric}")
+
+    y = pl.Series(actual)
+    observation_weight = pl.Series(sample_weight) if sample_weight is not None else None
+    exposure_series = pl.Series(exposure) if exposure is not None else None
 
     n_models = preds.shape[1]
     x0 = np.ones(n_models) / n_models
@@ -227,7 +291,16 @@ def _optimize_weights(preds: np.ndarray, actual: np.ndarray) -> np.ndarray:
         Args:
             w (object): Candidate blending weights.
         """
-        return np.mean((actual - preds @ w) ** 2)
+        blended = preds @ w
+        if metric == "mse":
+            return float(np.average((actual - blended) ** 2, weights=sample_weight))
+        predicted = pl.Series(blended)
+        if metric == "poisson_deviance":
+            rate_y, rate_predicted, weights = _poisson_rate_metric_inputs(
+                y, predicted, exposure_series, observation_weight
+            )
+            return poisson_deviance(rate_y, rate_predicted, weights)
+        return gamma_deviance(y, predicted, observation_weight)
 
     result = minimize(
         objective,
@@ -237,4 +310,6 @@ def _optimize_weights(preds: np.ndarray, actual: np.ndarray) -> np.ndarray:
         constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}],
         options={"ftol": 1e-9},
     )
+    if not result.success or not np.isfinite(result.fun):
+        raise RuntimeError(f"Blend weight optimization failed: {result.message}")
     return result.x

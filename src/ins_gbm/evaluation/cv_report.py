@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
     from ins_gbm.data.model_data import Objective
+    from ins_gbm.ensemble.pipeline import EnsemblePipeline
     from ins_gbm.pipeline import FeatureStage, ModelRecipe
 
 GBM_MODEL_LABEL: str = "gbm"
@@ -214,10 +215,10 @@ class CVResult:
 
 @dataclass
 class CrossValidationReport:
-    """Run and summarize cross-validation for a model recipe.
+    """Run and summarize outer cross-validation for a model or ensemble.
 
     Args:
-        recipe (ModelRecipe): Unfitted pipeline recipe.
+        recipe (ModelRecipe | EnsemblePipeline): Model recipe or ensemble configuration.
         data (ModelData): Model data to fit, transform, predict, or evaluate.
         n_folds (int): Number of cross-validation folds. Defaults to 5.
         benchmark_col (Optional[str]): Optional column containing benchmark predictions. Optional.
@@ -226,9 +227,12 @@ class CrossValidationReport:
         show_progress_bar (bool): Whether to display a tuning progress bar. Defaults to True.
         cv (Optional[CVConfig]): Cross-validation configuration or explicit fold assignments.
             Optional.
+        base_refit (str): Ensemble outer fitting policy, "fixed" or "retune".
+        inner_cv (CVConfig | None): Override inner ensemble folds, independently of cv.
+        validation_fraction (float): Internal blend-validation fraction for ensemble CV.
     """
 
-    recipe: ModelRecipe
+    recipe: ModelRecipe | EnsemblePipeline
     data: ModelData
     n_folds: int = 5
     benchmark_col: str | None = None
@@ -236,6 +240,9 @@ class CrossValidationReport:
     seed: int = 42
     show_progress_bar: bool = True
     cv: CVConfig | None = None
+    base_refit: str = "fixed"
+    inner_cv: CVConfig | None = None
+    validation_fraction: float = 0.2
 
     def run(
         self,
@@ -250,6 +257,21 @@ class CrossValidationReport:
             feature_stage (FeatureStage): Stage at which feature names apply: "raw", "encoded", or
                 "model". Defaults to 'raw'.
         """
+        from ins_gbm.ensemble.pipeline import EnsemblePipeline
+
+        if isinstance(self.recipe, EnsemblePipeline):
+            if feature_names is not None or feature_stage != "raw":
+                raise ValueError(
+                    "Ensemble CV uses each template's feature definitions; "
+                    "global feature_names/feature_stage overrides are unsupported"
+                )
+            from ins_gbm.evaluation.candidates import _cross_validate_candidates
+
+            return _cross_validate_candidates(
+                {"ensemble": self.recipe}, self.data,
+                base_refit=self.base_refit, inner_cv=self.inner_cv,
+                validation_fraction=self.validation_fraction, report=self,
+            )["ensemble"]
         self.data.validate()
         self._validate()
         clean_data, fold_ids, benchmark, fold_features = self._prepare_data(
@@ -267,49 +289,19 @@ class CrossValidationReport:
         rows, predictions, row_folds, fold_params = self._evaluate_folds(
             clean_data, unique_folds, folds, benchmark, fold_features, feature_stage
         )
-        fold_metrics = pl.DataFrame(rows).sort(["fold", "model", "metric"])
-        summary = (
-            fold_metrics.group_by(["model", "metric"])
-            .agg(
-                [
-                    pl.col("value").mean().alias("mean"),
-                    pl.col("value").std(ddof=1).alias("std"),
-                ]
-            )
-            .sort(["model", "metric"])
-        )
-        prediction_columns = {GBM_MODEL_LABEL: pl.Series(GBM_MODEL_LABEL, predictions)}
-        if benchmark is not None:
-            prediction_columns["benchmark"] = benchmark.rename("benchmark")
-        row_folds_series = pl.Series("fold", row_folds)
-        return CVResult(
-            fold_metrics=fold_metrics,
-            summary=summary,
+        return _assemble_cv_result(
+            data=clean_data, rows=rows, predictions=predictions,
+            row_folds=row_folds, fold_params=fold_params, benchmark=benchmark,
             fold_col=(self.fold_col or "cv_fold") if uses_predefined else None,
-            predictions=pl.DataFrame(prediction_columns),
-            actual=self.data.target,
-            exposure=self.data.exposure,
-            weight=self.data.weight,
-            objective=self.data.objective,
             feature_names=(
-                list(feature_names)
-                if feature_stage == "encoded"
+                list(feature_names) if feature_stage == "encoded"
                 else list(clean_data.feature_names)
             ),
-            fold_params=fold_params,
-            row_folds=row_folds_series,
             cv_config={
                 "folds": "predefined" if uses_predefined else "random",
                 "n_splits": len(folds),
                 "seed": None if uses_predefined else config.seed,
             },
-            data_signature=_cv_data_signature(
-                clean_data.objective,
-                clean_data.target,
-                clean_data.exposure,
-                clean_data.weight,
-                row_folds_series,
-            ),
         )
 
     def _prepare_data(
@@ -605,3 +597,47 @@ class CrossValidationReport:
                 train_idx = np.concatenate([indices[:start], indices[end:]])
                 folds.append((train_idx, held_idx))
             return folds
+
+
+def _assemble_cv_result(
+    *, data: ModelData, rows: list[dict], predictions: np.ndarray,
+    row_folds: list, fold_params: dict, benchmark: pl.Series | None,
+    fold_col: str | None, feature_names: list[str], cv_config: dict,
+) -> CVResult:
+    """Build the shared result format for ordinary and ensemble CV."""
+    fold_metrics = pl.DataFrame(rows).sort(["fold", "model", "metric"])
+    summary = (
+        fold_metrics.group_by(["model", "metric"])
+        .agg(
+            [
+                pl.col("value").mean().alias("mean"),
+                pl.col("value").std(ddof=1).alias("std"),
+            ]
+        )
+        .sort(["model", "metric"])
+    )
+    prediction_columns = {GBM_MODEL_LABEL: pl.Series(GBM_MODEL_LABEL, predictions)}
+    if benchmark is not None:
+        prediction_columns["benchmark"] = benchmark.rename("benchmark")
+    row_folds_series = pl.Series("fold", row_folds)
+    return CVResult(
+        fold_metrics=fold_metrics,
+        summary=summary,
+        fold_col=fold_col,
+        predictions=pl.DataFrame(prediction_columns),
+        actual=data.target,
+        exposure=data.exposure,
+        weight=data.weight,
+        objective=data.objective,
+        feature_names=feature_names,
+        fold_params=fold_params,
+        row_folds=row_folds_series,
+        cv_config=cv_config,
+        data_signature=_cv_data_signature(
+            data.objective,
+            data.target,
+            data.exposure,
+            data.weight,
+            row_folds_series,
+        ),
+    )
