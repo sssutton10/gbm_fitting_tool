@@ -20,6 +20,9 @@ def load_model_data(
 ) -> ModelData:
     """Read a data file and assemble a validated model data object.
 
+    For Poisson fits, use a rate target and omit exposure by default. Exposure
+    is never inferred from column names. Supply it explicitly for count targets.
+
     Args:
         path (str): Path to the input data file.
         target (str): Observed outcome series aligned with feature rows.

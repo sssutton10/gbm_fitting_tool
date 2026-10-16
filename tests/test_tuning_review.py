@@ -247,3 +247,17 @@ def test_gini_supports_the_declared_numpy_126_api(monkeypatch):
     monkeypatch.delattr(np, "trapezoid", raising=False)
     target = pl.Series([1., 2., 3.])
     assert normalized_gini(target, target) == pytest.approx(1.)
+
+
+@pytest.mark.parametrize("kind", ["lightgbm", "xgboost", "catboost", "rf"])
+def test_fractional_rate_targets_default_to_no_exposure(kind):
+    model, params = _model(kind)
+    data = ModelData(
+        features=pl.DataFrame({"x": np.linspace(-1, 1, 60)}),
+        feature_names=["x"], target=pl.Series(np.resize([0., .15, .4, .85], 60)),
+    ).validate()
+    fitted = model.fit(data, params)
+    assert data.exposure is None
+    response = fitted.predict(data).to_numpy()
+    assert np.isfinite(response).all() and (response > 0).all()
+    np.testing.assert_allclose(fitted.predict(data, "rate"), response, rtol=2e-6)

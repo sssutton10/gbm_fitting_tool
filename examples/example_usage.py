@@ -37,12 +37,11 @@ def frequency_data(seed: int = 42) -> tuple[ModelData, ModelData]:
     exposure = rng.uniform(0.2, 1.0, n)
     offset = rng.normal(0, 0.08, n)
     rate = np.exp(-2.0 + 0.015 * (age - 45) + offset)
-    target = rng.poisson(rate * exposure).astype(float)
-    benchmark = np.maximum(target.mean() * exposure / exposure.mean(), 1e-6)
+    target = rng.poisson(rate * exposure).astype(float) / exposure
+    benchmark = np.full(n, max(target.mean(), 1e-6))
     data = ModelData(
         features=pl.DataFrame({"driver_age": age}),
-        target=pl.Series("claim_count", target),
-        exposure=pl.Series("exposure", exposure),
+        target=pl.Series("claim_rate", target),
         offset=pl.Series("offset", offset),
         comparisons=pl.DataFrame({"portfolio_average": benchmark}),
         cv_fold=pl.Series("fold", np.arange(n) % 3),
@@ -103,19 +102,15 @@ def main() -> None:
     print("Frequency holdout")
     print(frequency_fit.evaluate(frequency_holdout).metrics())
     rates = frequency_fit.predict(frequency_holdout, prediction_type="rate")
-    counts = frequency_fit.predict(
-        frequency_holdout.features,
-        exposure=frequency_holdout.exposure,
-        offset=frequency_holdout.offset,
+    response = frequency_fit.predict(
+        frequency_holdout.features, offset=frequency_holdout.offset,
     )
-    np.testing.assert_allclose(
-        counts.to_numpy(), rates.to_numpy() * frequency_holdout.exposure.to_numpy()
-    )
+    np.testing.assert_allclose(response, rates)
 
     args.output.mkdir(parents=True, exist_ok=True)
     frequency_fit.save(str(args.output / "frequency"))
     restored = load_model(str(args.output / "frequency"))
-    np.testing.assert_allclose(restored.predict(frequency_holdout), counts)
+    np.testing.assert_allclose(restored.predict(frequency_holdout), rates)
 
     if args.cross_validate:
         cv_path = args.output / "frequency" / "cv_report"

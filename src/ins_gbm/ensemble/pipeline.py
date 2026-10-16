@@ -33,11 +33,11 @@ class EnsembleResult:
         save_ensemble(self, output_dir)
 
     def predict(self, data: ModelData) -> pl.Series:
-        """Return response means: expected counts for Poisson, severity for Gamma.
+        """Return predicted rates for Poisson rate targets with exposure omitted.
 
-        Poisson rates can be obtained by dividing the returned expected counts
-        by data.exposure. Pass count targets and exposure separately; the
-        ensemble performs any internal rate normalization itself.
+        This default workflow fits and combines rates directly. Optional count
+        targets with explicit exposure return expected counts; divide those by
+        scoring exposure for rates. Gamma returns expected severity.
 
         Args:
             data (ModelData): Model data to fit, transform, predict, or evaluate.
@@ -181,7 +181,8 @@ class EnsemblePipeline:
         internal split. The reserved final holdout is never needed. Outer
         ``base_refit`` defaults to fitted params; ``self.refit`` independently
         controls inner fitting. ``inner_cv`` overrides this candidate's inner
-        fold settings. Outputs are Poisson expected counts or Gamma severity.
+        fold settings. Outputs are Poisson rates when exposure is omitted, counts
+        when exposure is supplied, or Gamma severity.
         """
         from ins_gbm.evaluation.candidates import cross_validate_candidates
 

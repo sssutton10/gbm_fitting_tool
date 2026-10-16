@@ -27,9 +27,10 @@ def _stacking_inputs(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Normalize response means by exposure/offset before taking log features.
 
-    Poisson response is expected count. With no explicit offset, dividing by
-    exposure produces a rate. An explicit offset is also divided out here,
-    and restored once in the final response. Gamma only removes the offset.
+    Poisson response is a rate when exposure is absent (the default).
+    With count targets and explicit exposure, dividing by exposure gives a rate.
+    An explicit offset is also divided out here and restored once in the final
+    response. Gamma only removes the offset.
     """
     data.validate_for_prediction()
     baseline = np.ones(data.n_rows, dtype=np.float64)
@@ -113,9 +114,10 @@ class StackingEnsemble:
     meta_learner : {None, "auto", "ridge"} or sklearn estimator
         None/"auto" selects PoissonRegressor or GammaRegressor. Built-in
         distribution learners use log base means with exposure/offset removed,
-        and restore the scoring baseline exactly once. Poisson targets enter
-        as counts and are normalized internally to exposure/offset-adjusted
-        rates with baseline times observation weights. Gamma targets are
+        and restore the scoring baseline exactly once. By default Poisson
+        targets are rates with exposure omitted, fitted directly with observation
+        weights. Optional count targets with exposure are normalized internally
+        to rates with baseline times observation weights. Gamma targets are
         severity, normalized only for explicit offsets, with observation weights.
         "ridge" and custom estimators use response-scale inputs and targets.
         Custom estimators must accept sample_weight when data has weights.
@@ -234,7 +236,9 @@ class StackingEnsemble:
             features, baseline = _stacking_inputs(oof_matrix, ref_train, objective)
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 target = target / baseline
-                if objective == "poisson":
+                if objective == "poisson" and (
+                    ref_train.exposure is not None or ref_train.offset is not None
+                ):
                     weights = baseline if weights is None else baseline * weights
             if not np.all(np.isfinite(target)) or np.any(target < 0) or (
                 objective == "gamma" and np.any(target <= 0)

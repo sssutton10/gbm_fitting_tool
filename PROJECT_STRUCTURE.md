@@ -19,13 +19,13 @@ The preferred common workflow is now:
 from ins_gbm import CVConfig, LightGBMModel, ModelRecipe, load_model_data
 
 data = load_model_data(
-    "training.parquet", target="claim_count", exposure="exposure",
+    "training.parquet", target="claim_rate",
     objective="poisson", cv_fold="fold_id",
 )
 recipe = ModelRecipe(model=LightGBMModel())
 cv_result = recipe.cross_validate(data, cv=CVConfig(folds="auto"))
 fitted = recipe.fit(data)
-predictions = fitted.predict(data.features, exposure=data.exposure)
+predictions = fitted.predict(data.features)  # rates directly; exposure stays None
 fitted.save("output/model")
 cv_result.save("output/model/cv_report")
 ```
@@ -224,7 +224,8 @@ Deep imports remain available for specialized and internal-facing objects.
 The library supports two modeling objectives:
 
 - `poisson`: policy-level frequency modeling. The target is a non-negative
-  claim count or frequency response. `exposure` is optional; when omitted, no
+  frequency rate by default, with `exposure=None`, across fits and ensembles.
+  Count targets with explicit exposure are also supported. When omitted, no
   exposure offset, base margin, baseline, or exposure-derived sample weight is
   passed to the model.
 - `gamma`: policy-level severity modeling. The target must be strictly positive.
@@ -1563,7 +1564,9 @@ Default meta-learner:
 - `meta_learner="ridge"` retains response-scale Ridge; custom estimators are supported.
 - `meta_alpha=1.0` controls built-in regularization.
 
-Poisson targets and response predictions are counts. The distribution-aware
+Poisson targets and response predictions are rates by default, with exposure
+left empty. Without an offset, stacking fits rates directly using only optional
+observation weights. For optional count targets with exposure, the distribution-aware
 stacker internally divides targets and base responses by
 `b = exposure * exp(offset)`, fits on log normalized predictions with weights
 `b * observation_weight`, then multiplies by the scoring row's `b` to return

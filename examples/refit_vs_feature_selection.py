@@ -3,7 +3,7 @@
 Example (replace paths and RAW column names with your own):
     python examples/refit_vs_feature_selection.py \
         --train training.parquet --holdout holdout.parquet \
-        --target claim_count --exposure exposure \
+        --target claim_rate \
         --existing driver_age vehicle_age \
         --candidates driver_age vehicle_age territory annual_miles \
         --stage-sizes 6 3 --cross-validate
@@ -12,7 +12,8 @@ Uses the September 28, 2026 API. Both models are trained from scratch: the
 baseline reuses the existing model's features, not its fitted trees. Holdout
 rows must be separate from training, selection, and tuning. If rows are related
 (e.g. repeated policies), supply appropriate training fold IDs with --fold-col.
-For severity use --objective gamma and omit --exposure.
+Default to rate targets with --exposure omitted. Supply --exposure explicitly
+only for count targets. For severity use --objective gamma and omit --exposure.
 --cross-validate saves both nested CV reports and compares their standard
 metrics and double lift; it adds one complete outer CV run per recipe.
 """
@@ -46,7 +47,7 @@ def main() -> None:
     parser.add_argument("--holdout", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--objective", choices=["poisson", "gamma"], default="poisson")
-    parser.add_argument("--exposure")
+    parser.add_argument("--exposure", help="Optional exposure column for count targets; omit for rate targets")
     parser.add_argument("--weight")
     parser.add_argument("--fold-col", help="Predefined folds in the training file only")
     parser.add_argument(

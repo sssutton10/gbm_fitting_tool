@@ -46,8 +46,9 @@ class ResamplingEnsemble:
 
     Model parameters are reused without tuning; transforms and configured
     selection are fitted independently. Members are averaged on the response
-    scale: expected counts for Poisson, severity for Gamma. Poisson targets
-    must remain counts, with exposure supplied separately, never pre-divided.
+    scale: rates for Poisson rate targets with exposure omitted (the default),
+    severity for Gamma. Optional Poisson count targets with explicit exposure
+    produce expected counts.
 
     Args:
         method: "seed_average" uses every row; "bagging" samples rows uniformly.

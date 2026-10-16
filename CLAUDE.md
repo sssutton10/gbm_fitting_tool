@@ -73,7 +73,7 @@ Random Forest (sklearn) has no native missing-value support, so it receives the 
 
 ## Objectives & Prediction
 
-- `"poisson"`: frequency. Requires positive `exposure`. LightGBM uses `init_score=log(exposure)`, XGBoost uses `base_margin=log(exposure)`. `prediction_type="rate"` is invalid for gamma.
+- `"poisson"`: frequency. Default to nonnegative rate targets and leave `exposure=None` across all fits and ensembles. `response` and `rate` then both return rates. Exposure is optional; supply positive exposure only with count targets, enabling `init_score=log(exposure)` in LightGBM and `base_margin=log(exposure)` in XGBoost. `prediction_type="rate"` is invalid for gamma.
 - `"gamma"`: severity. Target must be strictly positive. CatBoost Gamma uses `Tweedie:variance_power=1.99` (CatBoost rejects exactly 2.0).
 
 ## Leakage Guardrails

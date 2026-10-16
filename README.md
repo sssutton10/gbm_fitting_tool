@@ -15,6 +15,11 @@ an older interpreter. The package is named `ins_gbm`; do not rename it to
 
 ## Fit, evaluate, predict, and save
 
+Use a rate target and leave `exposure` empty (`None`, or `null` in JSON) by
+default, across model fitting, tuning, CV, evaluation, and ensembles. The tool
+fits the supplied rates directly; it does not infer exposure or convert them
+to counts. Supply observation `weight` separately when wanted.
+
 Keep the final holdout separate from every fitting, selection, and tuning step.
 
 ```python
@@ -23,21 +28,19 @@ from ins_gbm import (
 )
 
 training = load_model_data(
-    "training.parquet", target="claim_count", exposure="exposure",
+    "training.parquet", target="claim_rate",
     objective="poisson",
 )
 holdout = load_model_data(
-    "holdout.parquet", target="claim_count", exposure="exposure",
+    "holdout.parquet", target="claim_rate",
     objective="poisson",
 )
 
 recipe = ModelRecipe(model=LightGBMModel())
 fitted = recipe.fit(training)
 metrics = fitted.evaluate(holdout).metrics()
-counts = fitted.predict(holdout)
-rates = fitted.predict(
-    holdout.features, exposure=holdout.exposure, prediction_type="rate",
-)
+rates = fitted.predict(holdout)
+raw_rates = fitted.predict(holdout.features)
 
 fitted.save("output/frequency_model")
 restored = load_model("output/frequency_model")
@@ -351,7 +354,11 @@ requires at least one positive training target; all-zero targets raise `ValueErr
 
 ## Prediction contract
 
-- Poisson `response` is expected count; `rate` is count per unit exposure.
+- With a Poisson rate target and no exposure, `response` and `rate` both return
+  predicted rates. Fractional nonnegative targets are supported.
+- For optional count modeling, supply count targets and positive exposure;
+  `response` then returns expected counts and `rate` divides by exposure.
+  Do not supply an exposure offset with an already divided rate target.
 - Gamma `response` is expected severity and does not support `rate`.
 - For both objectives, `link` is `log(response)`.
 - Explicit offsets add on the link scale. Poisson combines offset and
@@ -388,16 +395,18 @@ seed_average = EnsemblePipeline([fitted], method="seed_average", n_members=5).ru
 bagged.save("output/bagged")  # load_ensemble("output/bagged") restores it
 ```
 
-**Poisson targets are counts, with exposure supplied separately.** Ensemble
-`predict()` returns expected counts; divide by scoring exposure to obtain rates.
-For example, predicted count `0.3` at exposure `0.5` means rate `0.6`. Bagging and
-seed averaging average response counts. Gamma inputs and predictions are
-severity, without exposure conversion.
+**Use Poisson rate targets with exposure left empty by default.** Every ensemble
+`predict()` returns rates directly in this workflow. Blending, bagging, and seed
+averaging average rates on the response scale. Gamma inputs and predictions
+remain severity. Count targets with explicitly supplied exposure remain supported;
+those predictions are counts and can be divided by scoring exposure for rates.
 
 **Stacking now defaults to Poisson/Gamma regression**, using log normalized base
-predictions. Without an explicit offset, Poisson stacking internally fits rates
-with exposure times observation weights, then multiplies by scoring exposure to
-return counts. Explicit offsets are also normalized out and restored once;
+predictions. With rate targets and no exposure or offset, Poisson stacking fits
+the supplied rates and observation weights, returning rates directly. When count
+targets and exposure are explicitly supplied, it internally fits rates weighted
+by exposure times observation weights and restores scoring exposure for counts.
+Explicit offsets are also normalized out and restored once;
 Gamma stacking normalizes only for offsets and uses observation weights.
 Select `meta_learner="ridge"` to retain the previous response-scale approach,
 or supply a custom estimator. `meta_alpha=1.0` controls built-in regularization.

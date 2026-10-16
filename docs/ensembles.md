@@ -4,25 +4,28 @@
 stacking, seed averaging, and bagging. All methods return `EnsembleResult`
 with `predict(data)`, `evaluate(holdout_data)`, and `save(directory)`.
 
-## Counts and rates are different scales
+## Rate targets by default
 
-For **Poisson frequency**, supply observed claim **counts** as `ModelData.target`
-and policy exposure separately as `ModelData.exposure`. Do not divide the
-training targets by exposure before passing them to the tool. Every base
-pipeline's `response` prediction, and every ensemble `predict()` result, is an
-**expected count for that scoring row's exposure**.
+For **Poisson frequency**, supply nonnegative observed **rates** as
+`ModelData.target` and leave `ModelData.exposure=None` (the default). Every base
+pipeline and ensemble fits those rates directly. Fractional targets and zero
+rates are supported. No exposure is inferred or applied. Optional
+`ModelData.weight` supplies observation weights independently.
 
 ```python
-expected_counts = result.predict(scoring_data)
-predicted_rates = expected_counts / scoring_data.exposure
+predicted_rates = result.predict(scoring_data)  # exposure remains None
 ```
 
-An expected count of `0.3` for exposure `0.5` means a rate of `0.6` claims per
-unit exposure. If exposure becomes `1.0` with features and explicit offset
-unchanged, the expected count becomes `0.6`; the rate stays `0.6`. This scaling
-holds for the built-in distribution-aware stacker, seed averaging, and bagging.
-If exposure is absent, it is treated as one. Ensemble `predict()` has no
-`prediction_type` argument; divide counts by exposure explicitly to get rates.
+Blending, stacking, seed averaging, bagging, tuning, and outer CV all follow this
+same convention. `response` and `rate` predictions coincide without exposure.
+Keep training and scoring targets, weights, and exposure definitions consistent.
+
+Count modeling remains available explicitly: supply count targets and positive
+exposure separately. Response predictions then represent expected counts for
+that scoring row; divide by scoring exposure to obtain rates. For example, count
+`0.3` at exposure `0.5` means rate `0.6`. Do not supply an exposure offset for a
+target already divided by exposure. Ensemble `predict()` returns the response
+scale and has no `prediction_type` argument.
 
 For **Gamma severity**, targets and response predictions are positive severity
 amounts. There is no count-to-rate conversion. Exposure is neither a severity
@@ -79,9 +82,9 @@ Other model settings remain unchanged. Different seeds need not produce
 meaningfully different fits when the model has no active stochastic behavior.
 
 Predictions are an equal-weight **arithmetic average on the response scale**.
-For Poisson this averages expected counts, not their logarithms. On a common
-scoring row, averaging expected counts and dividing by its exposure equals
-averaging member rates. Gamma averages expected severity.
+For the default Poisson rate targets with no exposure, this averages rates
+directly. For explicit count targets with exposure, it averages counts; dividing
+by the common scoring exposure gives the average rate. Gamma averages severity.
 
 Generated members are available through `result.base_pipelines`. Bagging
 members have different training samples; do not pass them to stacking/OOF
@@ -117,7 +120,15 @@ Alternatively pass `cv=CVConfig(...)`. `refit="fixed"` reuses fitted model
 parameters inside folds; `"retune"` repeats configured tuning in each training
 fold. The supplied full-data fitted pipelines are used for final predictions.
 
-### Poisson: internal rate fitting, external count predictions
+### Poisson: direct rate fitting by default
+
+With rate targets and no exposure or offset, meta-features are `log(mu_j)`,
+the meta-target is the supplied rate `y`, and only optional observation weights
+are passed. Predictions are rates directly. No exposure-derived weights or
+count conversion are applied. Explicit offsets are normalized and restored as
+described below.
+
+### Optional counts with exposure
 
 Let `y` be observed count, `mu_j` each base model's expected count, `e` exposure,
 `o` explicit log offset, and `w` observation weight. Missing exposure/weight is
@@ -169,9 +180,13 @@ scaling guarantees of the built-in distribution learners.
 OOF blend weights; explicit `"poisson_deviance"` / `"gamma_deviance"` must match
 the model objective. The default remains `"mse"`.
 
-Poisson deviance is evaluated on `y/e` and `mu/e`, weighted by `e*w`, consistent
+Without exposure, Poisson deviance and MSE compare supplied rates and predicted
+rates directly, using only optional observation weights.
+
+With explicit count targets and exposure, Poisson deviance is evaluated on
+`y/e` and `mu/e`, weighted by `e*w`, consistent
 with the evaluation report. The explicit offset is already incorporated in
-`mu` and is not a second metric weight. MSE measures **count-scale** errors for
+`mu` and is not a second metric weight. MSE measures **response-scale** errors for
 Poisson, using observation weights without an additional exposure multiplier.
 Gamma deviance uses severity and observation weights.
 
@@ -249,8 +264,9 @@ stack_cv = CrossValidationReport(
 Here `outer_cv` is a `CVConfig` chosen for your evaluation. The returned
 `CVResult` uses the existing `"gbm"` prediction column for compatibility with
 comparisons, double lift, plots, and persistence. The column name also represents
-ensemble predictions. Poisson OOF predictions are **expected counts**, not
-rates; metrics use the existing exposure-weighted rate deviance and count MSE.
+ensemble predictions. Poisson OOF predictions are **rates** by default, with
+exposure omitted; metrics compare rates directly. Explicit count targets with
+exposure produce count OOF predictions, exposure-weighted rate deviance, and count MSE.
 Gamma OOF predictions are severity. Exposure and offsets follow the same
 normalization/restoration formulas documented above.
 
@@ -351,7 +367,7 @@ from ins_gbm import load_ensemble, save_ensemble
 bagged.save("output/frequency_bagged")
 # Equivalent: save_ensemble(bagged, "output/frequency_bagged")
 loaded = load_ensemble("output/frequency_bagged")
-expected_counts = loaded.predict(scoring_data)
+predicted_rates = loaded.predict(scoring_data)
 report = loaded.evaluate(holdout)
 ```
 

@@ -29,6 +29,10 @@ No procedure guarantees beating the refit on new data.
   in `categorical_features`; those columns are converted to strings. Encoding is
   learned independently in every fitting fold. An unseen category scores as all
   zeros for that raw variable, following the current library encoder.
+- By default use a nonnegative `claim_rate` target and leave `exposure` null.
+  All single fits and blends then predict rates directly. `weight` is optional
+  and independent. For count modeling, explicitly supply count targets and an
+  exposure column; do not combine rate targets with an exposure offset.
 - For severity, set `objective` to `gamma`, use a positive severity target, and
   normally set `exposure` to null. Use the same target/weight definition for every
   candidate. This template does not supply explicit offsets because Random Forest
@@ -148,7 +152,9 @@ An existing output directory is rejected to avoid mixing experiments.
 
 For new raw scoring data, load each member listed in `selection.json` with
 `load_model`, obtain its response predictions, and sum them with the locked
-weights. Poisson responses are expected counts; blend counts for the same rows
-and exposures, then divide by exposure if rates are needed. Do not blend link
+weights. With the default rate targets and null exposure, Poisson responses
+and blended predictions are rates directly. For explicitly configured count
+targets with exposure, blend counts then divide by scoring exposure for rates.
+Do not blend link
 predictions. Model paths in the manifest are absolute; update them if moving
 artifacts. Load only trusted pickle files.

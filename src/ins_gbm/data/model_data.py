@@ -30,13 +30,14 @@ class ModelData:
     Args:
         features (pl.DataFrame): Input feature frame; rows align with the target and optional
             series.
-        target (pl.Series): Observed outcome series aligned with feature rows.
+        target (pl.Series): Observed outcome aligned with feature rows. For Poisson,
+            use nonnegative rates with exposure omitted by default.
         feature_names (list[str]): Ordered names of input features to use.
         exposure (Optional[pl.Series]): Positive exposure per row for frequency models;
-            optional.
+            omit for rate targets (the default). Supply only with count targets.
         weight (Optional[pl.Series]): Nonnegative sample weight per row; optional.
         schema (Optional[FeatureSchema]): Optional feature schema; inferred when omitted.
-        objective (Optional[Objective]): Insurance objective: "poisson" for counts or "gamma"
+        objective (Optional[Objective]): Insurance objective: "poisson" for rates/counts or "gamma"
             for positive severity; optional for prediction data.
         offset (Optional[pl.Series]): Optional offset on the model link scale, aligned with
             feature rows.
