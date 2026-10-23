@@ -103,6 +103,76 @@ def test_shared_candidates_match_independent_and_reduce_actual_fits(portfolio, m
     assert compare_cv_double_lift(shared["single"], shared["stack"]).height > 0
 
 
+@pytest.mark.parametrize("scale", ["rate", "count", "severity"])
+def test_stacking_double_lift_matches_independent_bucket_calculation(portfolio, scale):
+    data, recipe, _, _ = portfolio
+    objective = "gamma" if scale == "severity" else "poisson"
+    data = replace(
+        data, objective=objective,
+        exposure=data.exposure if scale == "count" else None,
+        target=data.target + .5 if scale == "severity" else data.target,
+    )
+    recipe = replace(recipe, model=LightGBMModel(objective=objective))
+    first = recipe.fit(data)
+    second = replace(recipe, params={**recipe.params, "num_leaves": 3}).fit(data)
+    candidate = EnsemblePipeline([first, second], method="stacking")
+    cv = CVConfig(folds="predefined")
+    single = CrossValidationReport(recipe, data, cv=cv, show_progress_bar=False).run()
+    stack = candidate.cross_validate(data, cv=cv, show_progress_bar=False)
+
+    # Independently rebuild each stack to check that the stored comparison
+    # predictions are the final outer-held-out response, in original row order.
+    _, splits = resolve_folds(data, cv)
+    for train_rows, held_rows in splits:
+        train = slice_model_data(data, train_rows)
+        held = slice_model_data(data, held_rows)
+        bases = [_refit_pipeline(p, train, p.fitted_model.params) for p in (first, second)]
+        expected = replace(candidate, fitted_pipelines=bases, cv=cv).run().predict(held)
+        np.testing.assert_allclose(stack.predictions["gbm"][held_rows], expected, rtol=1e-6)
+
+    y = data.target.to_numpy().astype(float)
+    a = single.predictions["gbm"].to_numpy().astype(float)
+    b = stack.predictions["gbm"].to_numpy().astype(float)
+    weights = data.weight.to_numpy().astype(float)
+    if scale == "count":
+        exposure = data.exposure.to_numpy()
+        y, a, b = y / exposure, a / exposure, b / exposure
+        weights = weights * exposure
+
+    # Do not call the production double-lift helpers for the reference score.
+    def manual_score(rows):
+        order = rows[np.argsort((b / a)[rows], kind="stable")]
+        w = weights[order]
+        buckets = np.minimum(
+            np.floor((np.cumsum(w) - w / 2) / w.sum() * 10).astype(int), 9,
+        )
+        score = 0.
+        for bucket in np.unique(buckets):
+            indices = order[buckets == bucket]
+            actual, pred_a, pred_b = [
+                np.average(values[indices], weights=weights[indices])
+                for values in (y, a, b)
+            ]
+            score += abs(pred_a - actual) - abs(pred_b - actual)
+        return score
+
+    scores = compare_cv_double_lift(single, stack)
+    expected = manual_score(np.arange(data.n_rows))
+    assert scores["score"][0] == pytest.approx(expected, rel=1e-7, abs=1e-8)
+    for row in scores.filter(pl.col("scope") == "fold").iter_rows(named=True):
+        rows = np.flatnonzero(single.row_folds.to_numpy() == int(row["fold"]))
+        assert row["score"] == pytest.approx(manual_score(rows), rel=1e-7, abs=1e-8)
+
+    comparison = compare_reports({"single": single, "stack": stack})
+    row = comparison.filter(pl.col("metric") == "double_lift_score").row(0, named=True)
+    assert row["single"] is None
+    assert row["stack"] == f"{expected:+.4f}"
+    assert row["preferred"] == (
+        "tie" if abs(expected) < 1e-6 else "stack" if expected > 0 else "single"
+    )
+    assert compare_cv_double_lift(stack, stack)["score"].to_list() == [0.] * 4
+
+
 @pytest.mark.parametrize("mode", ["fixed", "oof", "validation"])
 def test_against_manually_rebuilt_outer_ensemble(portfolio, mode):
     data, _, first, second = portfolio

@@ -107,6 +107,76 @@ class _FailingModel:
         raise RuntimeError("worker boom")
 
 
+class _NonFiniteModel(_RecordingModel):
+    """Simulate a numerically unstable trial followed by a usable one."""
+
+    def __init__(self, value, always_invalid=False, invalid_fit=1):
+        super().__init__()
+        self.value = value
+        self.always_invalid = always_invalid
+        self.invalid_fit = invalid_fit
+
+    def fit(self, data, params=None):
+        fitted = super().fit(data, params)
+        if self.always_invalid or len(self.fit_feature_names) == self.invalid_fit:
+            value = self.value
+
+            class InvalidFitted:
+                def predict(self, validation_data, prediction_type="response"):
+                    return pl.Series([value] * validation_data.n_rows)
+
+            return InvalidFitted()
+        return fitted
+
+
+@pytest.mark.parametrize("backend", ["thread", "process"])
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+@pytest.mark.parametrize("invalid_fit", [1, 2])
+def test_tuner_skips_nonfinite_trial_and_continues(
+    poisson_parquet, backend, value, invalid_fit,
+):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
+    tuner = HyperparameterTuner(
+        n_trials=2, cv_folds=2, backend=backend, show_progress_bar=False,
+    )
+    events = []
+    with np.errstate(invalid="ignore"):
+        params, history = tuner.tune(
+            data, _NonFiniteModel(value, invalid_fit=invalid_fit),
+            feature_names=["x3"], progress=events.append,
+        )
+
+    assert params == {}
+    assert history["trial"].to_list() == [1]
+    assert np.isfinite(history["value"].to_numpy()).all()
+    # Process callbacks can be replayed after the next trial already finishes.
+    if invalid_fit == 2 and backend == "thread":
+        assert events[0].payload["best_value"] is None
+    assert np.isfinite(events[-1].payload["best_value"])
+
+
+@pytest.mark.parametrize("backend", ["thread", "process"])
+def test_tuner_reports_diagnostics_when_all_trials_nonfinite(poisson_parquet, backend):
+    data = load_model_data(
+        path=str(poisson_parquet), target="claim_count", exposure="exposure",
+        feature_cols=["x1", "x3"], objective="poisson",
+    )
+    tuner = HyperparameterTuner(
+        n_trials=2, cv_folds=2, backend=backend, show_progress_bar=False,
+    )
+    with np.errstate(invalid="ignore"), pytest.raises(
+        ValueError,
+        match=r"without a finite-scoring trial.*poisson_deviance.*fold 1 with 1 features",
+    ):
+        tuner.tune(
+            data, _NonFiniteModel(float("inf"), always_invalid=True),
+            feature_names=["x3"],
+        )
+
+
 class _SlowPidModel(_PidModel):
     """Slowpidmodel."""
 

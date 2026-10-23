@@ -210,7 +210,23 @@ def _evaluate_trial(
             weights=weights,
         )
         if not np.isfinite(score):
-            raise ValueError("Tuning metric must return a finite score")
+            predictions = preds.cast(pl.Float64).to_numpy()
+            finite_predictions = predictions[np.isfinite(predictions)]
+            prediction_range = (
+                f"[{finite_predictions.min():.6g}, {finite_predictions.max():.6g}]"
+                if finite_predictions.size else "no finite predictions"
+            )
+            reason = (
+                f"{config.metric} returned a non-finite score in CV fold "
+                f"{fold_idx + 1} with {len(train_data.feature_names)} features; "
+                f"finite response prediction range: {prediction_range}; "
+                f"non-finite predictions: {np.count_nonzero(~np.isfinite(predictions))}"
+            )
+            trial.set_user_attr("numerical_failure", reason)
+            optuna.logging.get_logger(__name__).warning(
+                "Pruning trial %s: %s; parameters: %s", trial.number, reason, params
+            )
+            raise optuna.TrialPruned(reason)
         fold_scores.append(score ** 2 if config.metric == "rmse" else score)
         fold_weights.append(
             float(weights.cast(pl.Float64).sum())
@@ -226,6 +242,25 @@ def _evaluate_trial(
             raise optuna.TrialPruned()
 
     return pooled_score
+
+
+def _best_params(study: Any) -> dict:
+    """Report numerical failures clearly when no usable trial remains."""
+    from optuna.trial import TrialState
+
+    if not any(trial.state == TrialState.COMPLETE for trial in study.trials):
+        failures = [
+            trial.user_attrs["numerical_failure"]
+            for trial in study.trials
+            if "numerical_failure" in trial.user_attrs
+        ]
+        if failures:
+            raise ValueError(
+                "Hyperparameter tuning completed without a finite-scoring trial. "
+                f"Last numerical failure: {failures[-1]}. "
+                "Inspect the trial parameters, exposure, weights and offsets."
+            )
+    return study.best_params
 
 
 def _study_history(study: Any) -> pl.DataFrame:
@@ -261,6 +296,9 @@ class HyperparameterTuner:
     each training fold to prevent target leakage. ``backend="thread"`` retains
     Optuna's in-process concurrency; ``backend="process"`` coordinates
     subprocess workers through JournalStorage.
+
+    Trials returning non-finite metric scores are pruned; tuning raises a
+    diagnostic error if no trial produces a finite score.
 
     Args:
         n_trials (int): Number of Optuna trials to run. Defaults to 20.
@@ -400,7 +438,7 @@ class HyperparameterTuner:
                     stop_requested=stop_requested,
                     has_should_stop=should_stop is not None,
                 )
-                best_params = study.best_params
+                best_params = _best_params(study)
                 history = _study_history(study)
             else:
                 best_params, history = self._optimize_processes(
@@ -576,6 +614,10 @@ class HyperparameterTuner:
                         finished = sum(
                             frozen.state.is_finished() for frozen in study.trials
                         )
+                        try:
+                            best_value = study.best_value
+                        except ValueError:
+                            best_value = None
                         progress(
                             ProgressEvent(
                                 stage="tuning",
@@ -584,7 +626,7 @@ class HyperparameterTuner:
                                 total=self.n_trials,
                                 payload={
                                     "trial_value": trial.value,
-                                    "best_value": study.best_value,
+                                    "best_value": best_value,
                                 },
                             )
                         )
@@ -685,7 +727,7 @@ class HyperparameterTuner:
                 if cancelled:
                     raise PipelineCancelled("cancelled during hyperparameter tuning")
                 # Materialize results while a temporary journal still exists.
-                return study.best_params, _study_history(study)
+                return _best_params(study), _study_history(study)
             except BaseException:
                 self._stop_workers(processes)
                 raise
@@ -854,7 +896,7 @@ class HyperparameterTuner:
                 try:
                     best_value = study.best_value
                 except ValueError:
-                    best_value = trial.value
+                    best_value = None
                 progress(
                     ProgressEvent(
                         stage="tuning",
