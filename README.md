@@ -254,6 +254,38 @@ Plain raw feature names use `recipe.fit(training, feature_names=selected)`.
 Encoded names require `feature_stage="encoded"`; the final recipe must produce
 every selected encoded column.
 
+To screen preprocessing outputs, pass `preprocessing` with the same ordered
+steps used by the final recipe. Encoding runs first, followed by preprocessing;
+both are fitted independently on each fold's training rows and targets.
+`feature_names`, when supplied to the screen, still names raw input columns.
+
+```python
+from ins_gbm import PCAReducer, PreprocessingStep
+
+preprocessing = [PreprocessingStep(
+    name="ages",
+    preprocessor=PCAReducer(n_components=1),
+    feature_names=["driver_age", "vehicle_age"],
+)]
+recipe = ModelRecipe(
+    model=LightGBMModel(), encoder=OneHotEncoder(),
+    preprocessing=preprocessing,
+)
+ranking = cv_feature_importance(
+    training, model=recipe.model, encoder=recipe.encoder,
+    preprocessing=recipe.preprocessing, importance_types=("split", "gain"),
+)
+selected = ranking.filter(pl.col("n_folds_selected") >= 3)["feature"].to_list()
+fitted = recipe.fit(training, feature_names=selected, feature_stage="model")
+```
+
+The ranking includes components such as `ages__pca_1` and any columns passed
+through by the steps. Select these outputs with `feature_stage="model"` so the
+recipe retains their inputs until preprocessing is complete. Scores aggregate
+by output name; independently fitted PCA/PLS components can represent different
+directions across folds. This screen does not align components or attribute
+their importance back to raw inputs.
+
 ## Tune and cross-validate
 
 ```python

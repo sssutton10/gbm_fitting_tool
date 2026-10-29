@@ -8,6 +8,9 @@ from ins_gbm import (
     ModelData,
     ModelRecipe,
     OneHotEncoder,
+    PCAReducer,
+    PLSReducer,
+    PreprocessingStep,
     cv_feature_importance,
 )
 from ins_gbm.models.base import FittedModel, ModelCapabilities
@@ -161,7 +164,8 @@ def test_invalid_importance_type_is_reported():
         cv_feature_importance(data, importance_types=())
 
 
-def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
+@pytest.mark.parametrize("with_preprocessing", [False, True])
+def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit(with_preprocessing):
     """Verify encoded levels are ranked and can be used for final fit."""
 
     class EncodedRecordingModel(RecordingModel):
@@ -212,15 +216,21 @@ def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
         cv_fold=pl.Series([0] * 6 + [1] * 6),
     )
     model = EncodedRecordingModel()
+    preprocessing = (
+        [PreprocessingStep("numeric", PCAReducer(1), ["x"])]
+        if with_preprocessing else []
+    )
+    numeric_name = "numeric__pca_1" if with_preprocessing else "x"
     ranking = cv_feature_importance(
         data,
         model=model,
         encoder=OneHotEncoder(),
+        preprocessing=preprocessing,
         importance_types="gain",
     )
-    assert set(ranking["feature"].to_list()) == {"x", "group__A", "group__B"}
+    assert ranking["feature"].to_list() == [numeric_name, "group__B", "group__A"]
     by_name = {row["feature"]: row for row in ranking.to_dicts()}
-    assert by_name["x"]["n_folds_selected"] == 2
+    assert by_name[numeric_name]["n_folds_selected"] == 2
     assert by_name["group__A"]["n_folds_selected"] == 1
     assert by_name["group__B"]["mean_gain"] == 0.5
     assert all(
@@ -229,14 +239,98 @@ def test_encoded_levels_are_ranked_and_can_be_used_for_final_fit():
     )
 
     selected = ranking["feature"].to_list()
+    if with_preprocessing:
+        selected = selected[:2]
     recipe = ModelRecipe(
         model=LightGBMModel(objective="poisson"),
         encoder=OneHotEncoder(),
+        preprocessing=preprocessing,
         params={"n_estimators": 3, "min_child_samples": 1},
     )
-    fitted = recipe.fit(data, feature_names=selected, feature_stage="encoded")
+    fitted = recipe.fit(
+        data,
+        feature_names=selected,
+        feature_stage="model" if with_preprocessing else "encoded",
+    )
     assert fitted.train_data.feature_names == selected
     assert fitted.predict(data).len() == data.n_rows
+
+
+def test_supervised_preprocessing_is_fold_local_and_steps_run_in_order():
+    """Fit sequential transforms using only training rows and their targets."""
+    data = ModelData(
+        features=pl.DataFrame({"a": range(12), "b": [1, 3, 2] * 4, "unused": range(12)}),
+        target=pl.Series([0, 2, 1, 3, 2, 4, 5, 3, 6, 4, 7, 5]),
+        feature_names=["a", "b", "unused"],
+        cv_fold=pl.Series([0] * 6 + [1] * 6),
+    )
+    fits = []
+
+    class RecordingPLS:
+        """Record training inputs while using a real supervised reducer."""
+
+        def fit(self, features, target):
+            """Fit PLS on the supplied fold."""
+            fits.append((features.clone(), target.to_list()))
+            return PLSReducer(1).fit(features, target)
+
+    class TransformedModel(RecordingModel):
+        """Assign known importance to each transformed column."""
+
+        def fit(self, data, params=None):
+            """Record the model matrix and report unit importance."""
+            self.fits.append(data.features.clone())
+            return FittedModel(
+                model=None,
+                params=params,
+                framework="fake",
+                objective="poisson",
+                feature_names=data.feature_names,
+                predict_fn=None,
+                importance_fn=lambda kind: pl.DataFrame(
+                    {
+                        "feature": data.feature_names,
+                        "importance": [1.0] * len(data.feature_names),
+                    }
+                ),
+            )
+
+    model = TransformedModel()
+    ranking = cv_feature_importance(
+        data,
+        model=model,
+        feature_names=["a", "b"],
+        importance_types="gain",
+        preprocessing=[
+            PreprocessingStep("supervised", RecordingPLS(), ["a", "b"]),
+            PreprocessingStep("reduced", PCAReducer(1), ["supervised__pls_1"]),
+        ],
+    )
+    assert len(fits) == 2
+    for (features, target), start in zip(fits, [6, 0]):
+        assert features.equals(data.features.slice(start, 6).select("a", "b"))
+        assert target == data.target.slice(start, 6).to_list()
+    assert all(frame.columns == ["reduced__pca_1"] for frame in model.fits)
+    assert ranking.to_dicts() == [
+        {"feature": "reduced__pca_1", "n_folds_selected": 2, "mean_gain": 1.0}
+    ]
+
+
+def test_preprocessing_validation_is_shared():
+    """Reject invalid targeted steps before fitting the model."""
+    data = ModelData(
+        features=pl.DataFrame({"a": range(12)}),
+        target=pl.Series([0, 1] * 6),
+        feature_names=["a"],
+    )
+    step = PreprocessingStep("duplicate", PCAReducer(1), ["a"])
+    with pytest.raises(ValueError, match="names must be unique"):
+        cv_feature_importance(data, preprocessing=[step, step])
+    with pytest.raises(ValueError, match="missing features"):
+        cv_feature_importance(
+            data,
+            preprocessing=[PreprocessingStep("missing", PCAReducer(1), ["absent"])],
+        )
 
 
 def test_default_xgboost_importances_when_installed():

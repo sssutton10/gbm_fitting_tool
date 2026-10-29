@@ -14,6 +14,7 @@ from ins_gbm.models.catboost import CatBoostModel
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.models.random_forest import RandomForestModel
 from ins_gbm.models.xgboost import XGBoostModel
+from ins_gbm.preprocessing.chain import fit_transform_chain
 
 
 def _shallow_params(model: Any) -> dict[str, Any]:
@@ -40,6 +41,7 @@ def cv_feature_importance(
     cv: CVConfig | None = None,
     feature_names: Sequence[str] | None = None,
     encoder: Any = None,
+    preprocessing: list[Any] | None = None,
     importance_types: Sequence[str] | str = ("weight", "gain", "cover"),
     params: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
@@ -52,9 +54,13 @@ def cv_feature_importance(
 
     ``n_folds_selected`` counts folds where *any requested measure* is > 0.
     ``mean_<type>`` averages over every fold, including zero for a feature
-    absent from a fold's importance output. Without ``encoder``, rows retain
-    the input feature order. With an encoder, it is fitted separately on each
-    fold's training rows and rows report the union of encoded columns.
+    absent from a fold's importance output. Encoding and ordered preprocessing
+    are fitted separately on each fold's training rows (and training targets
+    for supervised transforms). Rows report the union of final model columns
+    in first-seen order, retaining input order when no transforms are supplied.
+    ``feature_names`` always refers to raw inputs. Apply selected transformed
+    columns to a matching recipe with ``feature_stage="model"``. Component
+    scores are aggregated by name; PCA/PLS directions can differ across folds.
     For other model wrappers, supply importance types supported by that model.
     Explicit ``params`` override the shallow defaults for built-in wrappers.
 
@@ -65,6 +71,8 @@ def cv_feature_importance(
             Optional.
         feature_names (Sequence[str] | None): Ordered names of input features to use. Optional.
         encoder (Any): Optional encoder applied before model fitting.
+        preprocessing (list[Any] | None): Ordered preprocessing steps applied after
+            encoding and before model fitting. Optional.
         importance_types (Sequence[str] | str): Importance measures to compute.
         params (dict[str, Any] | None): Optional model or estimator parameter mapping.
     """
@@ -97,14 +105,12 @@ def cv_feature_importance(
 
     for train_indices, _ in splits:
         train_data = slice_model_data(selected, train_indices)
-        if encoder is not None:
-            fitted_encoder = encoder.fit(train_data.features, train_data.schema)
-            train_data = train_data.with_features(
-                fitted_encoder.transform(train_data.features)
-            )
+        train_data = fit_transform_chain(
+            train_data, encoder=encoder, preprocessing=preprocessing
+        ).data
         fold_names = list(train_data.feature_names)
         if len(fold_names) != len(set(fold_names)):
-            raise ValueError("encoded feature names must be unique")
+            raise ValueError("model feature names must be unique")
         for name in fold_names:
             if name not in name_set:
                 name_set.add(name)
