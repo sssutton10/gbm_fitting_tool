@@ -77,8 +77,10 @@ At a high level, the tool does this:
    preprocessing.
 4. Fit encoding and selection, optionally tune on folds with the selected
    features, then fit preprocessing and the model on all training rows.
-5. Evaluate an explicitly supplied holdout with the fitted artifacts.
-6. Optionally export reports, persist the fitted pipeline, or combine fitted
+5. Optionally audit the fitted specification with permutation importance or
+   native importance versus shadow noise, using training CV folds.
+6. Evaluate an explicitly supplied holdout with the fitted artifacts.
+7. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
 
 The main package is:
@@ -196,6 +198,8 @@ src/ins_gbm/
         report.py
         cv_report.py
         comparison.py
+        permutation.py
+        noise.py
     ensemble/
         __init__.py
         _utils.py
@@ -1103,6 +1107,10 @@ Important methods:
 - `predict(data, prediction_type="response")`
 - `predict_raw(features, exposure=None, weight=None, prediction_type="response")`
 - `evaluate(holdout_data)`
+- `permutation_importance_cv(data, cv=None, n_repeats=5, max_samples=None, seed=42,
+  show_progress_bar=True)`
+- `noise_screening_cv(data, cv=None, importance_type=None, n_shadow_repeats=3,
+  seed=42, show_progress_bar=True)`
 - `retune(tuner, progress=None, should_stop=None)`
 
 Use `result.predict(holdout_data)` for raw holdout data, or
@@ -1449,6 +1457,126 @@ Save a CV report explicitly with `result.save("output/model/cv_report")` and
 reload it with `load_cv_result(...)`. The report stores metrics, aligned OOF
 predictions, fold assignments, and provenance, but no targets, weights, or
 features. A saved fitted model alone cannot reconstruct its CV predictions.
+
+### Post-fit Permutation Importance
+
+Defined in `evaluation/permutation.py`, exposed through
+`FittedPipeline.permutation_importance_cv()`. The result type
+`PermutationImportanceResult` is exported at package level.
+
+```python
+permutation = fitted.permutation_importance_cv(
+    data,
+    cv=CVConfig(folds="auto", n_splits=5, seed=42),
+    n_repeats=5,
+    max_samples=10_000,  # optional validation-row cap per fold; default is None
+    seed=42,
+)
+print(permutation.summary)
+permutation.repeat_importances.write_csv("permutation_repeats.csv")
+```
+
+The diagnostic freezes the fitted parameters and feature selections, fits one
+model per training-fold combination, and measures held-out deviance changes
+when each raw input is shuffled. Encoding and preprocessing are refitted on
+each training partition without running selection or tuning. Raw categorical
+values are shuffled before encoding, preserving their indicator groups.
+Targets, exposure, weights, offsets, and fold assignments remain aligned.
+
+Positive importance means shuffled deviance exceeded baseline deviance;
+negative values are retained. Scoring uses the existing exposure/weight-aware
+Poisson or weighted Gamma deviance. Inputs discarded by the frozen selection
+can remain in this raw-input report with zero importance. Missing frozen
+selected columns raise instead of silently changing the specification.
+
+`PermutationImportanceResult` contains:
+
+- `summary`: mean importance, standard deviation across fold means, mean
+  within-fold repeat standard deviation, and fraction of positive fold means.
+- `fold_importances`: mean importance and shuffle variability per fold/input.
+- `repeat_importances`: baseline score, shuffled score, and delta per repeat.
+- `baseline_scores`: fold sizes, evaluated row counts, and unshuffled deviance.
+- `settings`: resolved folds, seeds, repeat/sample settings, and frozen model
+  parameters and selections.
+
+Fold means receive equal weight. Standard deviations use `ddof=0` and describe
+stability rather than confidence intervals. For K folds, P raw inputs, and R
+repeats, runtime is K fits plus K × (1 + P × R) validation prediction/scoring
+passes. A positive integer `max_samples` caps validation rows, using the same
+sample for baseline and every permutation; it does not reduce training size.
+
+### Post-fit Native Importance versus Shadow Noise
+
+Defined in `evaluation/noise.py`, exposed through
+`FittedPipeline.noise_screening_cv()`. The result type `NoiseScreeningResult`
+is exported at package level.
+
+```python
+noise = fitted.noise_screening_cv(
+    data,
+    cv=CVConfig(folds="auto", n_splits=5, seed=42),
+    n_shadow_repeats=3,
+    seed=42,
+    # importance_type="split",  # optional override for a fitted LightGBM model
+)
+print(noise.settings["importance_type"])
+print(noise.summary)
+noise.fit_importances.write_csv("noise_screening_fits.csv")
+```
+
+The framework comes from the fitted pipeline; no model type is supplied again.
+Default measures are LightGBM `gain`, XGBoost `total_gain`, CatBoost
+`PredictionValuesChange`, and Random Forest `impurity`. `importance_type`
+accepts any measure supported by that wrapper, as listed under Staged
+Importance Selection. Unsupported measures are rejected before refitting.
+
+Each training-fold combination refits transforms and applies the frozen feature
+selections. The report appends shuffled copies of the final model design and
+fits an augmented model per shadow repeat, retaining fitted parameters and the
+estimator seed. Shadows change across repeats; selection and tuning never run.
+With the built-in one-hot encoder and no preprocessing, selected levels from
+each raw input share a permutation and their native scores are summed. With
+preprocessing or custom encoding, individual final columns/components are
+reported instead; component importance is not attributed back to raw inputs.
+Shadows are appended after preprocessing and do not change learned transforms.
+The reporting stage and group membership are recorded in `settings`.
+
+`NoiseScreeningResult` contains:
+
+- `summary`: mean real, matched-shadow, and strongest-shadow importance;
+  normalized shares and margins; fractions beating matched/strongest shadows;
+  and standard deviation of fold mean importance shares.
+- `fold_importances`: averages over shadow realizations within each fold.
+- `fit_importances`: raw scores, normalized shares/margins, and win indicators
+  per fold, shadow repeat, and reported variable/component.
+- `fit_details`: training size and normalization total per augmented fit.
+- `settings`: framework, chosen measure, fold policy, seeds, groups, and frozen
+  model parameters and selections.
+
+Normalized shares divide by the sum of absolute grouped real and shadow scores
+within each fit. All-zero fits produce zero shares, and ties do not count as
+wins. Signed native scores are preserved. Repeats are averaged within folds,
+then folds receive equal weight; standard deviations use `ddof=0`. Native
+importance measures and frameworks should be assessed separately.
+
+For K folds and S shadow repeats, runtime is K × S augmented fits on a wider
+design. Gain/split/impurity extraction requires no repeated validation
+predictions. CatBoost `LossFunctionChange` performs additional training-data
+work. These are training-importance comparisons; held-out rows are not scored.
+Win fractions are not p-values, and beating noise does not prove predictive
+improvement. The strongest-shadow benchmark also depends on the number and
+sizes of feature groups.
+
+Both diagnostics accept predefined or generated folds through `CVConfig`.
+`CVConfig.seed` controls generated splits; the method's `seed` controls shadows
+or validation sampling/permutations. Both leave the original pipeline unchanged
+and retain tables rather than models or training rows. Explicit raw `data`
+also lets loaded pipelines run either diagnostic without reattaching training
+rows. If selection/tuning already used these rows, the reports audit that frozen
+specification rather than independently validating the earlier choices.
+Correlated inputs can mask each other's importance. See section 6 of
+`examples/example_usage.ipynb` for runnable examples of both diagnostics and CSV
+exports before final holdout evaluation.
 
 ### Report Comparison
 
@@ -1969,7 +2097,8 @@ Major areas:
 - `tests/tuning/`: Optuna tuning and predefined folds.
 - `tests/selection/`: Boruta, CV importance screening, standalone importance
   pruning, and staged importance selection.
-- `tests/evaluation/`: metrics, plots, reports, CV reports, comparison helpers.
+- `tests/evaluation/`: metrics, plots, reports, CV reports, comparison helpers,
+  post-fit permutation importance, and native shadow-noise screening.
 - `tests/ensemble/`: blending, stacking, and ensemble pipeline.
 - `tests/persistence/`: save/load behavior.
 - `tests/test_pipeline.py`: main pipeline behavior.

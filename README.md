@@ -286,6 +286,125 @@ by output name; independently fitted PCA/PLS components can represent different
 directions across folds. This screen does not align components or attribute
 their importance back to raw inputs.
 
+## Post-fit native importance versus noise
+
+Compare selected variables with shuffled shadow features, using the fitted
+model's own framework, parameters, and feature selections:
+
+```python
+noise = fitted.noise_screening_cv(
+    training,
+    cv=CVConfig(folds="auto", n_splits=5, seed=42),
+    n_shadow_repeats=3,
+    seed=42,
+    # importance_type="split",  # optional framework-specific override
+)
+print(noise.summary)
+noise.fit_importances.write_csv("noise_screening.csv")
+```
+
+No model type needs to be supplied again. Defaults are LightGBM `gain`,
+XGBoost `total_gain`, CatBoost `PredictionValuesChange`, and Random Forest
+`impurity`. Set `importance_type` to another measure supported by that wrapper:
+LightGBM `gain`/`split`; XGBoost `weight`/`gain`/`cover`/`total_gain`/`total_cover`;
+CatBoost `FeatureImportance`/`PredictionValuesChange`/`LossFunctionChange`;
+Random Forest `impurity`.
+
+Each fold refits encoding and preprocessing on its training portion, applies
+the frozen selections, then appends shuffled copies of the final model design.
+Each shadow repeat fits an augmented model with fresh shadows and the same
+fitted parameters, including the estimator seed. Selection and tuning never
+run. `CVConfig` supports the same predefined/generated folds as other reports;
+the method's `seed` independently controls the shadow permutations. The report
+uses only the training combinations of those folds; it does not score held-out
+rows. Loaded pipelines work with explicitly supplied data.
+
+With the built-in one-hot encoder and no preprocessing, selected levels from
+the same raw variable share a shadow permutation, and their importance is
+summed for comparison. Without encoding, each selected raw input gets a matched
+shadow. With preprocessing or a custom encoder, the report compares final model
+columns/components individually (`noise.settings["feature_stage"] == "model"`);
+it does not attribute PCA/PLS component importance back to raw variables. Shadows
+are created after preprocessing and do not affect the learned transforms.
+If a frozen model column is absent from a fold's design, the report raises
+rather than changing the model specification.
+
+`fit_importances` retains the raw real, matched-shadow, and strongest-shadow
+scores for each fold/repeat. It also includes normalized importance shares,
+signed margins over noise, and strict win indicators (ties do not count).
+Normalization divides by the sum of absolute grouped real and shadow scores
+within each fit; all-zero scores yield zero shares. This also supports signed
+measures such as CatBoost `LossFunctionChange`. Raw scores remain available
+for interpreting the selected measure.
+
+`fold_importances` averages repeats, and `summary` equally averages folds,
+reporting raw means, normalized means/margins, the fraction of fits beating the
+matched and strongest shadow, and the standard deviation of fold mean importance
+shares (`ddof=0`). `fit_details` stores training sizes and normalization totals;
+`settings` stores the chosen measure, groups, and frozen specification. No fitted
+models or training rows are retained.
+
+This is a training-importance noise diagnostic. Fold/seed win fractions are not
+p-values or evidence of held-out improvement. Correlated variables and native
+importance biases still affect the comparison. The strongest-shadow comparison
+is stricter and depends on the number and sizes of the feature groups. Results
+from different frameworks or importance measures should be assessed separately.
+Runtime is K × S augmented fits for K folds and S shadow repeats. Gain/split
+importance requires no repeated prediction passes; CatBoost `LossFunctionChange`
+does additional work on the training data. The original fitted model is unchanged.
+
+## Post-fit permutation importance
+
+Audit a fitted model's frozen variables and parameters on held-out CV folds:
+
+```python
+importance = fitted.permutation_importance_cv(
+    training,
+    cv=CVConfig(folds="auto", n_splits=5, seed=42),
+    n_repeats=5,
+    max_samples=None,  # optional positive integer validation-row cap per fold
+    seed=42,
+)
+print(importance.summary)
+print(importance.baseline_scores)
+importance.repeat_importances.write_csv("permutation_repeats.csv")
+```
+
+`auto` uses `ModelData.cv_fold` when present and otherwise generates folds.
+Use `folds="predefined"` to require existing assignments or `folds="random"`
+to generate them explicitly. Fold generation uses `CVConfig.seed`; the method's
+`seed` controls validation sampling and shuffles. Estimator parameters, including
+any estimator seed, come from the fitted model.
+
+Each fold fits one model with the original fitted parameters and feature
+selections; it does not rerun selection or tuning. Encoding and preprocessing
+are refitted on that fold's training rows. Each raw variable is shuffled before
+encoding, so categorical indicators move together. Exposure, weights, offsets,
+and targets stay aligned. Raw inputs discarded by the frozen selection remain
+in the report with zero importance. A frozen encoded column missing from a
+fold's training design raises an error rather than changing the selection.
+
+Importance is **shuffled deviance minus baseline deviance**, using the existing
+Poisson exposure/weight convention or weighted Gamma deviance. Positive values
+indicate worse predictions after shuffling; negative values are retained.
+`summary` reports `mean_importance`, `std_importance` across fold means,
+`mean_repeat_std` within folds, and `fraction_positive_folds`. Fold means receive
+equal weight. Standard deviations use `ddof=0`; these are stability measures,
+not confidence intervals. `fold_importances` and `repeat_importances` retain
+the underlying scores, while `settings` records the frozen specification.
+
+With K folds, P raw inputs, and R repeats, this costs K fits and K × (1 + P × R)
+prediction/scoring passes over validation folds. There is no refit per shuffle.
+To reduce runtime, cap validation rows with `max_samples`; baseline and shuffled
+scores always use the same sampled rows within a fold. Folds run sequentially,
+and results retain tables rather than fitted fold models or training data.
+Loaded pipelines work too: supply evaluation data explicitly.
+
+This measures predictive reliance, not causality or statistical significance.
+Correlated variables can mask one another's importance. If the variables or
+parameters were chosen using these same rows, this audits the frozen model
+specification; it is not independent validation of the earlier selection.
+
 ## Tune and cross-validate
 
 ```python

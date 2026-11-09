@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import polars as pl
 
@@ -19,6 +19,11 @@ from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_featu
 from ins_gbm.progress import PipelineCancelled, ProgressCallback, ProgressEvent
 from ins_gbm.selection.importance import FittedImportancePruner
 from ins_gbm.tuning.tuner import HyperparameterTuner
+
+if TYPE_CHECKING:
+    from ins_gbm.data.folds import CVConfig
+    from ins_gbm.evaluation.noise import NoiseScreeningResult
+    from ins_gbm.evaluation.permutation import PermutationImportanceResult
 
 FeatureStage = Literal["raw", "encoded", "model"]
 SelectionOutcome = tuple[
@@ -250,6 +255,57 @@ class FittedPipeline:
             offset=offset,
         )
         return self.predict(data, prediction_type=prediction_type)
+
+    def noise_screening_cv(
+        self,
+        data: ModelData,
+        *,
+        cv: CVConfig | None = None,
+        importance_type: str | None = None,
+        n_shadow_repeats: int = 3,
+        seed: int = 42,
+        show_progress_bar: bool = True,
+    ) -> NoiseScreeningResult:
+        """Compare native importance with matched noise on CV training splits.
+
+        Reuses this model's framework, fitted parameters, and selected features.
+        No selection or tuning runs. Defaults to LightGBM gain, XGBoost
+        total_gain, CatBoost PredictionValuesChange, or Random Forest impurity;
+        ``importance_type`` overrides the default. See
+        ``ins_gbm.evaluation.noise.noise_screening_cv`` for interpretation.
+        """
+        from ins_gbm.evaluation.noise import noise_screening_cv
+
+        return noise_screening_cv(
+            self, data, cv=cv, importance_type=importance_type,
+            n_shadow_repeats=n_shadow_repeats, seed=seed,
+            show_progress_bar=show_progress_bar,
+        )
+
+    def permutation_importance_cv(
+        self,
+        data: ModelData,
+        *,
+        cv: CVConfig | None = None,
+        n_repeats: int = 5,
+        max_samples: int | None = None,
+        seed: int = 42,
+        show_progress_bar: bool = True,
+    ) -> PermutationImportanceResult:
+        """Assess frozen variables/parameters by held-out permutation deviance.
+
+        Fits once per fold, refitting encoding and preprocessing on training rows
+        without tuning or feature selection. Shuffles raw variables before
+        encoding. Positive importance means held-out deviance increased.
+        ``max_samples`` optionally caps validation rows per fold. See
+        ``ins_gbm.evaluation.permutation.permutation_importance_cv`` for details.
+        """
+        from ins_gbm.evaluation.permutation import permutation_importance_cv
+
+        return permutation_importance_cv(
+            self, data, cv=cv, n_repeats=n_repeats, max_samples=max_samples,
+            seed=seed, show_progress_bar=show_progress_bar,
+        )
 
     def evaluate(self, holdout_data: ModelData):
         """Evaluate this fitted pipeline on separately supplied holdout data.

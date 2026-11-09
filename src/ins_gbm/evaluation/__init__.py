@@ -8,9 +8,13 @@ from ins_gbm.evaluation.metrics import (
 )
 
 from ins_gbm.evaluation.candidates import cross_validate_candidates
+from ins_gbm.evaluation.permutation import PermutationImportanceResult
+from ins_gbm.evaluation.noise import NoiseScreeningResult
 
 __all__ = [
     "METRIC_DIRECTIONS",
+    "PermutationImportanceResult",
+    "NoiseScreeningResult",
     "CVResult",
     "CrossValidationReport",
     "compare_cv_double_lift",

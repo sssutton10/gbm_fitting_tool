@@ -10,6 +10,8 @@ from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
 from ins_gbm.evaluation.candidates import cross_validate_candidates
 from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
+from ins_gbm.evaluation.permutation import PermutationImportanceResult
+from ins_gbm.evaluation.noise import NoiseScreeningResult
 from ins_gbm.models.catboost import CatBoostModel
 from ins_gbm.models.lightgbm import LightGBMModel
 from ins_gbm.models.random_forest import RandomForestModel
@@ -45,9 +47,11 @@ __all__ = [
     "ModelPipeline",
     "ModelRecipe",
     "OneHotEncoder",
+    "NoiseScreeningResult",
     "PCAReducer",
     "PLSReducer",
     "PipelineCancelled",
+    "PermutationImportanceResult",
     "PreprocessingStep",
     "ProgressCallback",
     "ProgressEvent",
