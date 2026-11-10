@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib>=3.8",
     "pyarrow>=14.0",
     "cloudpickle>=3.0",
+    "loky>=3.5",
 ]
 
 [project.optional-dependencies]

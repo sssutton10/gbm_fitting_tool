@@ -194,6 +194,74 @@ Always assess the completed ensemble on a separate holdout. OOF predictions
 used to fit weights or a stacker are training evidence for that combination,
 not an independent evaluation of the fitted ensemble.
 
+## Parallel OOF blending
+
+Direct OOF blending refits independent model/fold pairs in worker processes.
+The default is **four workers with two threads each**, intended for a machine
+with eight cores and 64 GB RAM:
+
+```python
+result = EnsemblePipeline(
+    [frequency_fit, another_frequency_fit], blend_mode="oof", metric="auto",
+    n_jobs=4, threads_per_worker=2, show_progress_bar=True,
+).run()
+```
+
+`BlendingEnsemble(mode="oof", ...)` accepts the same settings. Worker and thread
+counts must be positive integers. Workers are capped by available CPUs and the
+number of fold fits; threads per worker are capped to the available CPU budget.
+`n_jobs=1` runs in the parent process and preserves the models' configured thread
+settings. Other configurations use processes even when CPU limits allow only
+one worker. `result.configuration` records requested and effective counts;
+`effective_threads_per_worker=None` denotes serial execution without an override.
+
+Parallel workers override model thread settings on independent parameter copies
+for LightGBM, XGBoost, CatBoost, and Random Forest. Native numerical-library and
+Polars thread limits are set before worker imports. Retuning runs one tuning
+trial at a time per worker, with thread parameters excluded from its search
+space. Folds, features, seeds, loss definitions, and row alignment are preserved;
+the final weight solver runs after all predictions have been assembled.
+
+The parent displays a completed-fit progress bar. Enable INFO logging for
+`ins_gbm.ensemble.blending` to see separate OOF-generation and weight-solver
+times. Failures identify the model and fold and stop remaining workers. Custom
+components must support cloudpickle serialization and respect their own resource
+limits; use `n_jobs=1` if a component cannot be serialized.
+
+Each active worker can hold raw data, transformed fold matrices, and model
+buffers. The 64 GB baseline is not an enforced memory limit. Reduce `n_jobs` for
+large datasets or expensive transforms; four workers do not guarantee fourfold
+speedup. Fixed/validation blending, stacking, seed averaging, bagging, and
+**nested ensemble cross-validation remain sequential** and do not use these
+parallel settings.
+
+To compare CPU layouts on Linux, run:
+
+```bash
+./.venv/bin/python examples/benchmark_oof_blending.py --rows 100000 --trees 300
+```
+
+The benchmark compares serial execution using eight model threads, four workers
+with two threads each, and eight workers with one thread each. It reports total
+OOF-fitting time, separate generation/solver times, and peak aggregate process
+RSS. Base-model fitting is excluded from timing and included in the memory
+sample. Shared pages are counted for each process, giving a conservative memory
+estimate. Use a peak-memory target below 48 GB to leave approximately 16 GB for
+the OS and other applications; the implementation does not enforce that target.
+
+One local run with eight CPU cores, 250,000 rows, 16 numeric features, four
+LightGBM models, four folds, and 400 trees per fit produced:
+
+| Layout | Total blend fit | OOF generation | Weight solver | Peak aggregate RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Serial, 8 model threads | 7.28 s | 7.10 s | 0.15 s | 0.46 GiB |
+| 4 workers, 2 threads each | 6.36 s | 6.19 s | 0.14 s | 2.04 GiB |
+| 8 workers, 1 thread each | 6.31 s | 6.13 s | 0.15 s | 3.42 GiB |
+
+Learned weights matched exactly across these layouts. A smaller run (60,000
+rows, 180 trees) was faster serially: 1.43 s versus 1.70 s with four workers.
+These are single synthetic runs, not a guarantee for other data or hardware.
+
 ## Comparing candidates before opening the final holdout
 
 Use training-data outer CV to select between single models and ensembles. The

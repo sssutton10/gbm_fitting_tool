@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from contextlib import closing
+from dataclasses import dataclass, field
+from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -8,13 +11,14 @@ import polars as pl
 
 from ins_gbm.data.dtypes import FIT_DTYPE
 from ins_gbm.data.folds import CVConfig
-from ins_gbm.data.model_data import ModelData, slice_model_data
+from ins_gbm.data.model_data import ModelData
 from ins_gbm.ensemble._utils import (
-    _apply_pipeline_recipe_fold_transforms,
     _predict_from_pipeline,
     _resolve_ensemble_folds,
     _validate_ensemble_pipelines,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ins_gbm.pipeline import FittedPipeline
@@ -27,10 +31,17 @@ class FittedBlendingEnsemble:
     Args:
         weights (list[float]): Nonnegative blending or observation weights.
         fitted_pipelines (list['FittedPipeline']): Base pipelines with fitted models.
+        oof_configuration (dict): Requested and effective OOF worker settings.
     """
 
     weights: list[float]
     fitted_pipelines: list[FittedPipeline]
+    oof_configuration: dict = field(default_factory=dict)
+
+    def __setstate__(self, state):
+        """Keep older persisted blends usable after adding OOF settings."""
+        self.__dict__.update(state)
+        self.__dict__.setdefault("oof_configuration", {})
 
     def predict(self, data: ModelData) -> pl.Series:
         """Return the weighted-average prediction on *data*.
@@ -77,6 +88,13 @@ class BlendingEnsemble:
         Loss for optimized weights. Default is MSE; "auto" selects deviance
         for the fitted models' objective. Observation weights are respected;
         Poisson deviance uses exposure-weighted rates, as in evaluation.
+    n_jobs : int
+        Concurrent OOF fold processes. Default 4; 1 preserves serial model threading.
+    threads_per_worker : int
+        Threads per OOF process, capped to available CPUs. Default 2.
+    show_progress_bar : bool
+        Show completed OOF fold fits. Default True. These three settings apply
+        only to direct OOF blending, not nested ensemble cross-validation.
     """
 
     mode: Literal["fixed", "validation", "oof"] = "fixed"
@@ -87,6 +105,9 @@ class BlendingEnsemble:
     use_data_folds: bool | None = None
     cv: CVConfig | None = None
     metric: str = "mse"
+    n_jobs: int = 4
+    threads_per_worker: int = 2
+    show_progress_bar: bool = True
 
     def fit(
         self,
@@ -181,44 +202,44 @@ class BlendingEnsemble:
         )
         oof_preds = np.zeros((n, len(pipelines)), dtype=FIT_DTYPE)
 
-        for p_idx, (pipeline, pipeline_data) in enumerate(
-            zip(pipelines, training_data)
-        ):
-            for train_idx, val_idx in fold_splits:
-                fold_train = slice_model_data(pipeline_data, train_idx)
-                fold_val = slice_model_data(pipeline_data, val_idx)
-                if self.refit == "retune" and pipeline.recipe.tuning is not None:
-                    from ins_gbm.pipeline import ModelPipeline
+        from tqdm.auto import tqdm
 
-                    model_selected = getattr(pipeline, "model_selected_features", None)
-                    run_kwargs = (
-                        {"feature_names": model_selected, "feature_stage": "model"}
-                        if model_selected is not None
-                        else {
-                            "feature_names": pipeline.selected_features,
-                            "feature_stage": "encoded",
-                        }
-                        if pipeline.recipe.selection is None
-                        and pipeline.selected_features is not None
-                        else {}
-                    )
-                    fold_pipeline = ModelPipeline(fold_train, pipeline.recipe).run(
-                        **run_kwargs
-                    )
-                    predictions = fold_pipeline.predict(fold_val, "response")
-                else:
-                    current_train, current_val = _apply_pipeline_recipe_fold_transforms(
-                        pipeline, fold_train, fold_val
-                    )
-                    fitted_model = pipeline.recipe.model.fit(
-                        current_train, params=pipeline.fitted_model.params
-                    )
-                    predictions = fitted_model.predict(current_val, "response")
-                oof_preds[val_idx, p_idx] = predictions.to_numpy()
+        from ins_gbm.ensemble._oof import (
+            _FoldRecipe, _fit_fold, _parallel_folds, _worker_settings,
+        )
 
+        settings = _worker_settings(
+            self.n_jobs, self.threads_per_worker, len(pipelines) * len(fold_splits)
+        )
+        threads = settings["effective_threads_per_worker"]
+        tasks = (
+            (
+                _FoldRecipe.from_pipeline(pipeline), pipeline_data, p_idx, fold_idx,
+                train_idx, val_idx, self.refit, threads,
+            )
+            for p_idx, (pipeline, pipeline_data) in enumerate(zip(pipelines, training_data))
+            for fold_idx, (train_idx, val_idx) in enumerate(fold_splits)
+        )
+        started = perf_counter()
+        results = (
+            (_fit_fold(*task) for task in tasks)
+            if self.n_jobs == 1
+            else _parallel_folds(tasks, settings["effective_n_jobs"], threads)
+        )
+        with closing(results), tqdm(
+            total=len(pipelines) * len(fold_splits), desc="OOF blend fits",
+            unit="fit", disable=not self.show_progress_bar,
+        ) as progress:
+            for p_idx, _, val_idx, predictions in results:
+                oof_preds[val_idx, p_idx] = predictions
+                progress.update(1)
+        logger.info(
+            "OOF prediction generation completed in %.3f seconds", perf_counter() - started
+        )
         return FittedBlendingEnsemble(
             weights=self._learn_weights(oof_preds, ref_train, pipelines),
             fitted_pipelines=list(pipelines),
+            oof_configuration=settings,
         )
 
     def _learn_weights(self, preds, data, pipelines) -> list[float]:
@@ -232,13 +253,18 @@ class BlendingEnsemble:
             raise ValueError(
                 f"metric {metric!r} is incompatible with objective {objective!r}"
             )
-        return _optimize_weights(
+        started = perf_counter()
+        weights = _optimize_weights(
             preds,
             data.target.to_numpy(),
             metric=metric,
             sample_weight=data.weight.to_numpy() if data.weight is not None else None,
             exposure=data.exposure.to_numpy() if data.exposure is not None else None,
         ).tolist()
+        logger.info(
+            "Blend weight optimization completed in %.3f seconds", perf_counter() - started
+        )
+        return weights
 
 
 def _optimize_weights(

@@ -118,7 +118,9 @@ class XGBoostModel:
 
         n_estimators = p.pop("n_estimators", 100)
 
+        matrix_threads = p.get("nthread", p.get("n_jobs", -1))
         dtrain_kwargs = {
+            "nthread": matrix_threads,
             "label": y,
             "weight": sample_weight,
             "feature_names": list(data.feature_names),
@@ -160,6 +162,7 @@ class XGBoostModel:
             )
 
             dtest_kwargs = {
+                "nthread": matrix_threads,
                 "feature_names": feature_names,
                 "missing": _NUMERIC_FILL,
             }

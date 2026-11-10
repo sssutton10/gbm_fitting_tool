@@ -47,7 +47,7 @@ def test_oof_reuses_predefined_groups(folded_pipeline, monkeypatch, method, conf
     monkeypatch.setattr(LightGBMModel, "fit", record_fit)
     EnsemblePipeline(
         [pipeline], method=method, blend_mode="oof", cv_folds=2,
-        metric="auto", **config,
+        metric="auto", n_jobs=1, **config,
     ).run()
     assert seen == [
         data.features.filter(data.cv_fold != fold)["x"].to_list()
@@ -68,7 +68,7 @@ def test_random_folds_can_override_data_folds(folded_pipeline, monkeypatch, meth
     monkeypatch.setattr(LightGBMModel, "fit", record_fit)
     EnsemblePipeline(
         [pipeline], method=method, blend_mode="oof", cv_folds=2,
-        use_data_folds=False,
+        use_data_folds=False, n_jobs=1,
     ).run()
     assert seen == [6, 6]
 

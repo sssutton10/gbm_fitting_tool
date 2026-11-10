@@ -150,6 +150,13 @@ class EnsemblePipeline:
     metric : {"mse", "auto", "poisson_deviance", "gamma_deviance"}
         Loss for optimizing blend weights. "auto" selects deviance for the
         base models' distribution. Defaults to MSE. Used only for blending.
+    n_jobs : int
+        Concurrent direct OOF blending processes. Default 4; 1 keeps serial behavior.
+    threads_per_worker : int
+        Threads per OOF worker, capped to available CPUs. Default 2.
+    show_progress_bar : bool
+        Show direct OOF blend progress. Default True. Parallel settings do not
+        apply to stacking, other blend modes, or nested ensemble cross-validation.
     """
 
     fitted_pipelines: list[FittedPipeline]
@@ -168,6 +175,9 @@ class EnsemblePipeline:
     sample_fraction: float = 1.0
     bootstrap: bool = True
     meta_alpha: float = 1.0
+    n_jobs: int = 4
+    threads_per_worker: int = 2
+    show_progress_bar: bool = True
 
     def cross_validate(
         self, data: ModelData, *, cv: CVConfig | None = None,
@@ -232,6 +242,10 @@ class EnsemblePipeline:
                 "meta_learner": type(fitted_ensemble.meta_learner).__name__
                 if self.method == "stacking" else None,
                 "meta_alpha": self.meta_alpha,
+                **(
+                    fitted_ensemble.oof_configuration
+                    if self.method == "blending" and self.blend_mode == "oof" else {}
+                ),
             },
         )
 
@@ -248,6 +262,9 @@ class EnsemblePipeline:
             use_data_folds=self.use_data_folds,
             cv=self.cv,
             metric=self.metric,
+            n_jobs=self.n_jobs,
+            threads_per_worker=self.threads_per_worker,
+            show_progress_bar=self.show_progress_bar,
         )
         return blender.fit(self.fitted_pipelines, validation_data=self.validation_data)
 

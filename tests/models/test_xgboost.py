@@ -53,6 +53,23 @@ def test_xgb_poisson_fit_predict(poisson_parquet):
     assert (preds > 0).all()
 
 
+def test_xgb_data_matrices_respect_thread_limit(poisson_parquet, monkeypatch):
+    import xgboost as xgb
+
+    original = xgb.DMatrix
+    observed = []
+
+    def record(*args, **kwargs):
+        observed.append(kwargs.get("nthread"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(xgb, "DMatrix", record)
+    data = _poisson(poisson_parquet)
+    fitted = XGBoostModel().fit(data, params={"n_estimators": 3, "nthread": 2})
+    fitted.predict(data)
+    assert observed == [2, 2]
+
+
 def test_xgb_poisson_rate_prediction(poisson_parquet):
     """Verify xgb poisson rate prediction.
 
