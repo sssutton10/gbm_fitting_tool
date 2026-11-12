@@ -20,7 +20,7 @@ from ins_gbm.evaluation.metrics import (
 from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
 
 if TYPE_CHECKING:
-    from ins_gbm.ensemble.pipeline import EnsembleResult
+    from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
     from ins_gbm.pipeline import FittedPipeline
 
 
@@ -167,13 +167,160 @@ def _transform_fold(template: FittedPipeline, train: ModelData):
     return current, chain
 
 
-def _fit_fold(template: FittedPipeline, train: ModelData):
+def _fit_fold(template: FittedPipeline, train: ModelData, *, params=None):
     """Fit the frozen estimator after fold-local transformations."""
     current, chain = _transform_fold(template, train)
     model = deepcopy(template.recipe.model).fit(
-        current, params=deepcopy(template.fitted_model.params)
+        current, params=deepcopy(template.fitted_model.params if params is None else params)
     )
     return model, chain
+
+
+def ensemble_permutation_importance_cv(
+    candidate: EnsemblePipeline,
+    data: ModelData,
+    *,
+    cv: CVConfig | None = None,
+    n_repeats: int = 5,
+    max_samples: int | None = None,
+    seed: int = 42,
+    show_progress_bar: bool = True,
+) -> PermutationImportanceResult:
+    """Audit a frozen ensemble specification on outer held-out folds.
+
+    Only fixed-weight blending, seed averaging, and bagging are supported.
+    Frozen selections and fitted parameters are reused, without selection,
+    tuning, or weight optimization. This audits a chosen specification; prior
+    selection or tuning on these rows is not independently validated.
+    """
+    from ins_gbm.ensemble._utils import _validate_ensemble_pipelines
+    from ins_gbm.ensemble.blending import BlendingEnsemble, FittedBlendingEnsemble
+    from ins_gbm.ensemble.pipeline import EnsembleResult
+    from ins_gbm.ensemble.resampling import ResamplingEnsemble, _member_params
+
+    _validate_options(n_repeats, max_samples, seed)
+    resampling = candidate.method in {"seed_average", "bagging"}
+    if not resampling and not (
+        candidate.method == "blending" and candidate.blend_mode == "fixed"
+    ):
+        raise ValueError(
+            "CV permutation importance supports only fixed-weight blending, "
+            "seed_average, and bagging; optimized blending and stacking are unsupported"
+        )
+    templates = candidate.fitted_pipelines
+    _validate_ensemble_pipelines(templates, require_training=False)
+    if resampling and len(templates) != 1:
+        raise ValueError(f"{candidate.method} requires exactly one fitted template pipeline")
+    objective = templates[0].fitted_model.objective
+    if data.objective is not None and data.objective != objective:
+        raise ValueError("data objective conflicts with fitted objective")
+    features = list(dict.fromkeys(
+        name for member in templates for name in member.input_feature_names
+    ))
+    clean = replace(data, objective=objective).select_features(features).validate()
+    config = cv or CVConfig()
+    fold_ids, splits = resolve_folds(clean, config)
+    if resampling:
+        sampler = ResamplingEnsemble(
+            candidate.method, candidate.n_members, candidate.seed,
+            candidate.sample_fraction, candidate.bootstrap,
+        )
+        _, settings = sampler.prepare_samples(clean)
+        _member_params(templates[0].fitted_model.params,
+                       templates[0].fitted_model.framework, settings["member_seeds"][0])
+        weights = [1.0 / candidate.n_members] * candidate.n_members
+    else:
+        weights = BlendingEnsemble(weights=candidate.blend_weights)._fit_fixed(templates).weights
+        if not np.isfinite(weights).all() or np.any(np.asarray(weights) < 0):
+            raise ValueError("Fixed weights must be finite and nonnegative")
+
+    # Separate per-fold shuffle streams from folds and ensemble sampling/seeds.
+    fold_seeds = np.random.SeedSequence(seed).spawn(len(splits))
+    baseline_rows, repeat_frames, fold_settings = [], [], []
+    iterator = tqdm(zip(fold_ids, splits, fold_seeds), total=len(splits),
+                    desc="Ensemble permutation importance", unit="fold",
+                    disable=not show_progress_bar)
+    for fold, (train_idx, held_idx), shuffle_seed in iterator:
+        train = slice_model_data(clean, train_idx).validate(require_multiple_folds=False)
+        held = slice_model_data(clean, held_idx).validate(require_multiple_folds=False)
+        members = []
+        if resampling:
+            samples, settings = sampler.prepare_samples(train)
+            template = templates[0]
+            fits = (
+                (template, slice_model_data(train, indices), _member_params(
+                    template.fitted_model.params, template.fitted_model.framework, member_seed,
+                )) for member_seed, indices in samples
+            )
+        else:
+            settings = {"method": "blending", "blend_mode": "fixed"}
+            fits = ((template, train, template.fitted_model.params) for template in templates)
+        for number, (template, sample, params) in enumerate(fits, start=1):
+            try:
+                raw = sample.select_features(template.input_feature_names)
+                model, chain = _fit_fold(template, raw, params=params)
+                members.append(replace(
+                    template, fitted_model=model, encoder=chain.encoder,
+                    preprocessors=chain.preprocessors, raw_train_data=None,
+                    selected_features=chain.selected_features,
+                    model_selected_features=chain.model_selected_features,
+                    selection_results=None, tuning_history=None, input_schema=raw.schema,
+                ))
+            except Exception as exc:
+                raise RuntimeError(f"fold {fold}, member {number} failed: {exc}") from exc
+        fitted = EnsembleResult(FittedBlendingEnsemble(weights, members), members)
+        report = ensemble_permutation_importance(
+            fitted, held, n_repeats=n_repeats, max_samples=max_samples,
+            seed=int(shuffle_seed.generate_state(1)[0]), show_progress_bar=False,
+        )
+        baseline_rows.append({
+            "fold": fold, "n_train": train.n_rows, "n_held": held.n_rows,
+            "n_evaluated": report.settings["n_evaluated"],
+            "baseline_score": report.baseline_score,
+        })
+        repeat_frames.append(report.repeat_importances.with_columns(pl.lit(fold).alias("fold")))
+        fold_settings.append({
+            "fold": fold, **settings, "weights": list(weights),
+            "members": [deepcopy(member.fitted_model.params) for member in members],
+        })
+        # Release fitted members and fold-local matrices before the next fold.
+        del fitted, members, model, chain, raw, sample, fits, train, held, report
+
+    repeats = pl.concat(repeat_frames).select(
+        "fold", "feature", "repeat", "baseline_score", "permuted_score", "importance",
+    )
+    folds, summary = _summarize_cv(repeats)
+    predefined = config.folds == "predefined" or (
+        config.folds == "auto" and clean.cv_fold is not None
+    )
+    return PermutationImportanceResult(
+        summary=summary, fold_importances=folds, repeat_importances=repeats,
+        baseline_scores=pl.DataFrame(baseline_rows), settings={
+            "metric": f"{objective}_deviance", "objective": objective,
+            "n_repeats": n_repeats, "max_samples": max_samples, "seed": seed,
+            "cv": {"folds": "predefined" if predefined else "random",
+                   "n_splits": len(splits), "seed": None if predefined else config.seed},
+            "feature_names": features, "method": candidate.method,
+            "ensemble_seed": candidate.seed if resampling else None,
+            "fold_ensembles": fold_settings,
+            "selected_features": [deepcopy(p.selected_features) for p in templates],
+            "model_selected_features": [deepcopy(p.model_selected_features) for p in templates],
+        },
+    )
+
+
+def _summarize_cv(repeats):
+    folds = repeats.group_by(["fold", "feature"], maintain_order=True).agg(
+        pl.col("importance").mean().alias("mean_importance"),
+        pl.col("importance").std(ddof=0).alias("repeat_std"),
+    )
+    summary = folds.group_by("feature", maintain_order=True).agg(
+        pl.col("mean_importance").mean().alias("mean_importance"),
+        pl.col("mean_importance").std(ddof=0).alias("std_importance"),
+        pl.col("repeat_std").mean().alias("mean_repeat_std"),
+        (pl.col("mean_importance") > 0).mean().alias("fraction_positive_folds"),
+    ).sort("mean_importance", descending=True, maintain_order=True)
+    return folds, summary
 
 
 def _deviance(data: ModelData, predicted: pl.Series) -> float:
@@ -264,16 +411,7 @@ def permutation_importance_cv(
         del model, chain, train, held
 
     repeats = pl.DataFrame(repeat_rows)
-    folds = repeats.group_by(["fold", "feature"], maintain_order=True).agg(
-        pl.col("importance").mean().alias("mean_importance"),
-        pl.col("importance").std(ddof=0).alias("repeat_std"),
-    )
-    summary = folds.group_by("feature", maintain_order=True).agg(
-        pl.col("mean_importance").mean().alias("mean_importance"),
-        pl.col("mean_importance").std(ddof=0).alias("std_importance"),
-        pl.col("repeat_std").mean().alias("mean_repeat_std"),
-        (pl.col("mean_importance") > 0).mean().alias("fraction_positive_folds"),
-    ).sort("mean_importance", descending=True, maintain_order=True)
+    folds, summary = _summarize_cv(repeats)
     predefined = config.folds == "predefined" or (
         config.folds == "auto" and clean.cv_fold is not None
     )

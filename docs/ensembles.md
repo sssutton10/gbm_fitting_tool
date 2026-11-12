@@ -42,6 +42,72 @@ same reproducible sample for the baseline and every shuffle. Set
 This evaluates one fixed ensemble on a holdout. The individual pipeline's
 `permutation_importance_cv()` instead refits its frozen specification per fold.
 
+### CV permutation importance on training data
+
+Use the **ensemble configuration**, rather than its fitted result, to rebuild
+members on each training-data fold:
+
+```python
+from ins_gbm import CVConfig, EnsemblePipeline
+
+configuration = EnsemblePipeline(
+    [first_fit, second_fit], blend_weights=[0.6, 0.4],
+)
+importance = configuration.permutation_importance_cv(
+    training,
+    cv=CVConfig(folds="auto", n_splits=5, seed=42),
+    n_repeats=5, max_samples=None, seed=42,
+)
+print(importance.summary)
+print(importance.baseline_scores)
+importance.repeat_importances.write_csv("ensemble_cv_permutation_repeats.csv")
+
+# These configurations support the same method:
+seed_configuration = EnsemblePipeline(
+    [first_fit], method="seed_average", n_members=5, seed=42,
+)
+bag_configuration = EnsemblePipeline(
+    [first_fit], method="bagging", n_members=5, sample_fraction=0.8, seed=42,
+)
+```
+
+Supported strategies are fixed-weight blending, seed averaging, and bagging.
+Stacking and optimized (`"oof"`/`"validation"`) blending raise an error before
+fitting, avoiding nested model fitting for this diagnostic.
+
+Every outer fold refits encoders, preprocessing, and estimators using only its
+training rows. Bags sample only from those rows, fitting each member's transforms
+on that member's sample. Fitted model parameters and selected encoded/model
+feature subsets are frozen; selection and tuning never rerun, regardless of the
+configuration's `refit` setting. Seed averaging and bagging override model seed
+parameters using the ensemble's `seed`. A required frozen column missing from a
+fold or bag raises an error identifying the fold and member.
+
+All members receive the same held-out raw-feature shuffle before their own
+encoding. Targets, exposure, weights, and offsets stay aligned. Data is supplied
+explicitly; templates loaded without attached training rows work too. The final
+fitted models and input data are unchanged. This audits the chosen specification;
+prior selection, tuning, or weight choice on these rows is not independently
+validated.
+
+The result is the same `PermutationImportanceResult` used by individual-model
+CV: `summary`, `fold_importances`, `repeat_importances`, `baseline_scores`, and
+`settings`. The summary equally averages fold means; `std_importance` measures
+variation across folds, while `mean_repeat_std` measures within-fold shuffle
+variation. Settings include effective member parameters, weights, seeds, and
+sampling settings per fold. No fitted fold models or training rows are retained.
+
+`cv` controls outer folds independently of the ensemble configuration's inner
+CV settings. `auto` uses supplied `ModelData.cv_fold` assignments, otherwise
+random folds. `CVConfig.seed` controls random fold assignment, the configuration's
+`seed` controls ensemble members/samples, and the method's `seed` controls
+held-out sampling/shuffles. `max_samples` caps validation rows per fold, using
+the same rows for baseline and shuffles; it does not shrink training samples.
+
+With K folds and M members, the diagnostic fits K × M models. Increasing
+`n_repeats` adds prediction passes, without further fitting. Fits run sequentially;
+set `show_progress_bar=False` to suppress the fold progress bar.
+
 ## Rate targets by default
 
 For **Poisson frequency**, supply nonnegative observed **rates** as

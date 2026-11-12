@@ -1529,6 +1529,14 @@ adapting them to your own data.
 
 ### Post-fit Permutation Importance
 
+`EnsemblePipeline.permutation_importance_cv(data, cv=None, n_repeats=5,
+max_samples=None, seed=42, show_progress_bar=True)` supports fixed-weight blends,
+seed averages, and bags. It returns `PermutationImportanceResult`, refits member
+transforms and estimators inside each outer training fold (within each bag's
+sample), freezes parameters/selections, and shares raw shuffles on validation
+rows. No tuning or selection runs. Stacking and optimized blending are rejected
+before fitting. See [ensemble CV importance](docs/ensembles.md#cv-permutation-importance-on-training-data).
+
 Final ensembles expose `EnsembleResult.permutation_importance(holdout_data,
 n_repeats=5, max_samples=None, seed=42, show_progress_bar=True)`. This scores the
 fixed final combination on separate held-out data, without refitting members,

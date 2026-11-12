@@ -10,7 +10,9 @@ from ins_gbm.data.model_data import ModelData
 
 if TYPE_CHECKING:
     from ins_gbm.evaluation.cv_report import CVResult
-    from ins_gbm.evaluation.permutation import HoldoutPermutationImportanceResult
+    from ins_gbm.evaluation.permutation import (
+        HoldoutPermutationImportanceResult, PermutationImportanceResult,
+    )
     from ins_gbm.pipeline import FittedPipeline
 
 
@@ -232,6 +234,33 @@ class EnsemblePipeline:
             inner_cv=inner_cv, validation_fraction=validation_fraction,
             show_progress_bar=show_progress_bar,
         )["ensemble"]
+
+    def permutation_importance_cv(
+        self,
+        data: ModelData,
+        *,
+        cv: CVConfig | None = None,
+        n_repeats: int = 5,
+        max_samples: int | None = None,
+        seed: int = 42,
+        show_progress_bar: bool = True,
+    ) -> PermutationImportanceResult:
+        """Refit fixed blends, seed averages, or bags on training-data CV folds.
+
+        Reuse fitted member parameters and feature selections without tuning
+        or selection. Refit encoders, preprocessing, and estimators on each
+        fold's training rows (or each bag's sample). Shuffle held-out raw
+        variables once per repeat, shared across members before encoding.
+        ``cv`` controls outer folds; ``self.seed`` controls ensemble members;
+        ``seed`` controls validation sampling/shuffles. Optimized blending and
+        stacking are unsupported. No attached training data is required.
+        """
+        from ins_gbm.evaluation.permutation import ensemble_permutation_importance_cv
+
+        return ensemble_permutation_importance_cv(
+            self, data, cv=cv, n_repeats=n_repeats, max_samples=max_samples,
+            seed=seed, show_progress_bar=show_progress_bar,
+        )
 
     def run(self) -> EnsembleResult:
         """Fit the ensemble using the base pipelines' complete training data."""

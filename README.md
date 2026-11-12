@@ -408,6 +408,14 @@ categorical models. The method evaluates the fixed ensemble without refitting.
 See the [ensemble guide](docs/ensembles.md#permutation-importance-of-the-fitted-ensemble)
 for the report fields and sampling options.
 
+For training-data CV, call
+`ensemble_configuration.permutation_importance_cv(training, cv=CVConfig(...))`
+on an `EnsemblePipeline` configured for fixed-weight blending, seed averaging,
+or bagging. It refits members/transforms inside each training fold, reuses frozen
+parameters and feature selections without tuning, and shares held-out raw
+shuffles across members. Stacking and optimized blends are unsupported here.
+See [ensemble CV importance](docs/ensembles.md#cv-permutation-importance-on-training-data).
+
 Audit a fitted model's frozen variables and parameters on held-out CV folds:
 
 ```python
