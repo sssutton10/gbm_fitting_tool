@@ -82,6 +82,8 @@ At a high level, the tool does this:
 6. Evaluate an explicitly supplied holdout with the fitted artifacts.
 7. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
+8. Explain fitted pipelines or final ensembles with SHAP, PDP, ICE, and ALE,
+   using original feature data and an explicit SHAP reference population.
 
 The main package is:
 
@@ -91,8 +93,11 @@ src/ins_gbm/
 
 The package name is `ins_gbm`, not `gbm_fitting`.
 
-The root README is a quick-start guide. Deeper implementation details are in
-the source tree, tests, and this document.
+The root README is a quick-start guide. For model explanations, start with
+[the SHAP/PDP/ICE/ALE guide](docs/explanations.md) and run
+`./.venv/bin/python examples/explain_models.py --shap --native`. The
+[ensemble guide](docs/ensembles.md) covers final-ensemble explanations. Deeper
+implementation details are in the source tree, tests, and this document.
 
 ## Top-Level Repository Layout
 
@@ -105,7 +110,12 @@ GBM Fitting/
     PROJECT_STRUCTURE.md
     examples/
         example_usage.ipynb
+        example_usage.py
+        explain_models.py
+        model_search_template.md
     docs/
+        explanations.md
+        ensembles.md
         superpowers/
             specs/
             plans/
@@ -118,13 +128,17 @@ Important root files:
 
 - `pyproject.toml`: package metadata, dependencies, optional extras, pytest
   configuration.
-- `README.md`: install and test commands.
+- `README.md`: installation, fitting, and explanation quick starts.
 - `CLAUDE.md`: local development notes, including a warning that this package is
   named `ins_gbm` to avoid collisions with another package.
 - `uv.lock`: lockfile for the local environment.
-- `examples/example_usage.ipynb`: notebook-style usage example.
+- `examples/example_usage.ipynb`: runnable fitting and explanation walkthrough.
+- `examples/explain_models.py`: standalone synthetic SHAP/PDP/ICE/ALE example.
+- `docs/explanations.md`: method selection, API reference, units, PCA, and exports.
+- `docs/ensembles.md`: ensemble fitting, final predictions, and explanations.
 - `docs/superpowers/`: design specs and implementation plans. These are useful
-  for intent, but the source code is the authority for current behavior.
+  for historical intent; its [index](docs/superpowers/README.md) links to current
+  guides. Dated plans/specifications preserve their original content.
 
 ## Installation and Test Commands
 
@@ -145,8 +159,10 @@ Optional extras declared in `pyproject.toml`:
 - `all`: installs all optional modeling and explainability dependencies.
 - `dev`: installs pytest-related development dependencies.
 
-The `explain` extra currently installs SHAP for downstream use; this package
-does not currently expose a SHAP-specific API.
+The `explain` extra enables `ExplanationReport.shap()`. SHAP is imported only
+when requested; PDP, ICE, and ALE use core dependencies. `all` includes `explain`.
+Run `./.venv/bin/python examples/explain_models.py` for a core-dependency demo,
+or add `--shap --native` after installing SHAP and LightGBM.
 
 Common local pitfall: the path contains a space. Quote paths in shell commands
 when needed.
@@ -200,6 +216,11 @@ src/ins_gbm/
         comparison.py
         permutation.py
         noise.py
+    explanation/
+        __init__.py
+        adapter.py
+        report.py
+        results.py
     ensemble/
         __init__.py
         _utils.py
@@ -1107,6 +1128,7 @@ Important methods:
 - `predict(data, prediction_type="response")`
 - `predict_raw(features, exposure=None, weight=None, prediction_type="response")`
 - `evaluate(holdout_data)`
+- `explain(data, background=None, prediction_type="response", seed=42, ...)`
 - `permutation_importance_cv(data, cv=None, n_repeats=5, max_samples=None, seed=42,
   show_progress_bar=True)`
 - `noise_screening_cv(data, cv=None, importance_type=None, n_shadow_repeats=3,
@@ -1458,6 +1480,53 @@ reload it with `load_cv_result(...)`. The report stores metrics, aligned OOF
 predictions, fold assignments, and provenance, but no targets, weights, or
 features. A saved fitted model alone cannot reconstruct its CV predictions.
 
+### Post-fit SHAP, PDP, ICE, and ALE
+
+Implemented in `src/ins_gbm/explanation/`. Public types `ExplanationReport`,
+`ShapResult`, and `EffectResult` are exported by `ins_gbm`.
+
+```python
+# original_population/reference are original ModelData, before encoding/PCA.
+explanations = fitted.explain(original_population, background=original_reference)
+print(explanations.feature_names)
+# Substitute a name from feature_names for driver_age.
+explanations.pdp("driver_age").export("output/explanations/age")
+explanations.ice("driver_age", centered=True, max_samples=100).plot()
+explanations.ale("driver_age", bins=5).plot()
+values = explanations.shap(max_samples=20, max_background=20, n_permutations=2)
+values.export("output/explanations/shap")
+```
+
+The same calls work on `EnsembleResult`; no member-explanation aggregation API
+is needed. SHAP requires an explicit reference population and optional SHAP
+installation; other methods need neither. Outcome values are not scored.
+
+The adapter in `explanation/adapter.py` constructs a common feature space of
+whole raw categorical variables, unchanged numeric inputs, and processed reducer
+outputs. It reconstructs each member's fitted matrix while preserving native
+categorical preparation. PCA outputs retain their own importance, names, and
+lineage/loadings. An ensemble rejects incompatible fitted bases and raw/PCA
+mixtures rather than conflating unrelated components.
+
+`explanation/report.py` evaluates the final prediction function before converting
+to response/rate/link scales. Exposure and offset remain fixed per explained row.
+General permutation SHAP explains this function directly; eligible individual
+numeric models can use interventional Tree SHAP with affine context corrections.
+Every result checks reference plus contributions against its selected-scale
+prediction. Two-variable PDP shows a joint response surface; two-variable numeric
+ALE removes lower-order effects. Nominal categorical ALE is unsupported.
+
+`explanation/results.py` provides Polars tables, summaries, plots, and separate
+CSV/JSON/PNG/SVG exports. These are independent of model persistence and
+`EvaluationReport.export()`. Loaded artifacts need original scoring/reference
+data explicitly, without training attachment. Progress/cancellation uses the
+existing event types with the `explain` stage.
+
+See [the user guide](docs/explanations.md) for arguments, sample/weight defaults,
+result schemas, interpretation, and troubleshooting. Run
+`examples/explain_models.py` or notebook section 6's explanation examples before
+adapting them to your own data.
+
 ### Post-fit Permutation Importance
 
 Defined in `evaluation/permutation.py`, exposed through
@@ -1734,6 +1803,8 @@ Returns `EnsembleResult`:
 - `ensemble`: fitted blending or stacking ensemble.
 - `base_pipelines`: base fitted pipelines.
 
+`EnsembleResult.explain(data, background=reference)` creates final-ensemble
+SHAP/PDP/ICE/ALE diagnostics; see [the explanation guide](docs/explanations.md).
 `EnsembleResult.predict(data)` scores raw data. Call
 `EnsembleResult.evaluate(holdout_data)` to create an `EvaluationReport`; the
 method builds a proxy `FittedModel` so the standard report machinery can call
@@ -1833,8 +1904,10 @@ Pitfalls:
 
 - Standard `pickle` and `joblib` are not used because `FittedModel` contains
   local prediction and importance closures.
-- Prediction, evaluation, and feature importance do not require training data.
-  Reattached rows must be the original training dataset in its original order.
+- Prediction, evaluation, and feature importance do not require attached training data.
+  Explanations also work with explicitly supplied original scoring/reference data.
+  Reattached rows for training-dependent operations must be the original training
+  dataset in its original order.
 - A fitted UMAP reducer may retain training-derived matrices that its transform
   implementation needs even though `raw_train_data` itself is omitted.
 - Loading model pickles is safest in an environment with compatible package versions.
@@ -1891,8 +1964,10 @@ Pipeline-emitted stages are:
 - `preprocess`
 - `fit`
 
-The tuner emits `tuning` events when a progress callback is provided. The
-pipeline does not currently emit `split` or `evaluate` events.
+The tuner emits `tuning` events when a progress callback is provided. Explanation
+methods emit `explain` events when `progress_callback` is passed to `.explain()`,
+and honor `should_stop` through `PipelineCancelled`. The pipeline does not
+currently emit `split` or `evaluate` events.
 
 ## Common Usage Flows
 
@@ -2099,6 +2174,8 @@ Major areas:
   pruning, and staged importance selection.
 - `tests/evaluation/`: metrics, plots, reports, CV reports, comparison helpers,
   post-fit permutation importance, and native shadow-noise screening.
+- `tests/explanation/`: SHAP reconstruction, output scaling, PDP/ICE/ALE analytic
+  fixtures, mixed encodings, PCA compatibility, plotting/export, and saved loads.
 - `tests/ensemble/`: blending, stacking, and ensemble pipeline.
 - `tests/persistence/`: save/load behavior.
 - `tests/test_pipeline.py`: main pipeline behavior.
@@ -2151,7 +2228,11 @@ transformed = fitted.transform(features)
 ```
 
 For supervised preprocessors, require target and make sure every call site that
-uses the preprocessor passes target.
+uses the preprocessor passes target. To participate in processed-coordinate
+explanations, the fitted reducer must also expose `input_names`,
+`output_feature_names()`, and `component_mapping()` from every output to its
+fitted input columns. Fitted transform state defines component compatibility
+across ensemble members; output names alone do not.
 
 Important call sites:
 
@@ -2207,6 +2288,14 @@ Use `raw_train_data` for the shared raw reference.
 encoder, pass raw columns. For already transformed data, call
 `result.fitted_model.predict(transformed_data)` instead.
 
+### Passing Transformed Data to Explanations
+
+For explanations, likewise pass original `ModelData` to `.explain()` rather
+than a transformed matrix. Use `report.feature_names` to choose requests: a
+categorical feature is named as one raw variable, while a PCA group exposes
+processed component names such as `ages__pca_1`. See
+[coordinate handling](docs/explanations.md#coordinates-and-encodings).
+
 ### Omitting Exposure for Poisson
 
 Poisson `ModelData.validate()` allows `exposure=None`. The wrappers keep it
@@ -2257,9 +2346,11 @@ the link scale. Random Forest rejects offsets because it cannot honor that model
 ### Assuming Optional Dependencies Are Installed
 
 LightGBM, XGBoost, CatBoost, and UMAP are optional extras. Install the right
-extras before using wrappers or reducers that need them. SHAP is also declared
-as an optional dependency for downstream explainability work, but there is no
-package-level SHAP workflow at present.
+extras before using wrappers or reducers that need them. SHAP uses the `explain`
+extra (included in `all`). Call `fitted.explain(data, background=reference).shap()`
+for a fitted pipeline or ensemble; PDP/ICE/ALE do not require SHAP. See
+[the explanation guide](docs/explanations.md#troubleshooting) for installation,
+feature naming, reference-data, and PCA compatibility errors.
 
 ### Mixing NaN and Null Missing Values
 

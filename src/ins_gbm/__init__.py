@@ -7,6 +7,7 @@ from ins_gbm.data.loader import load_model_data
 from ins_gbm.data.model_data import ModelData
 from ins_gbm.data.schema import FeatureSchema
 from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
+from ins_gbm.explanation import ExplanationReport, EffectResult, ShapResult
 from ins_gbm.evaluation.candidates import cross_validate_candidates
 from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
@@ -38,6 +39,9 @@ __all__ = [
     "CrossValidationReport",
     "EnsemblePipeline",
     "EnsembleResult",
+    "ExplanationReport",
+    "EffectResult",
+    "ShapResult",
     "FeatureSchema",
     "FittedPipeline",
     "HyperparameterTuner",

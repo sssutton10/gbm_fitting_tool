@@ -158,3 +158,60 @@ targets with exposure, blend counts then divide by scoring exposure for rates.
 Do not blend link
 predictions. Model paths in the manifest are absolute; update them if moving
 artifacts. Load only trusted pickle files.
+
+## Explaining the locked model or blend
+
+Explanations are an explicit post-search step; `search` and `evaluate` do not
+automatically calculate or export them. Install the `explain` extra for SHAP;
+PDP, ICE, and ALE use core dependencies. See the
+[complete explanation guide](../docs/explanations.md) for methods and settings.
+
+The following code runs from a Python session at the repository root after a
+completed search. It uses the saved configuration's loader so original feature
+definitions and integer-category conversions match training. Development
+validation is used as the explanation population; final test remains reserved
+for the accepted, locked result.
+
+```python
+import json
+from pathlib import Path
+from ins_gbm import EnsemblePipeline, load_model
+from examples.model_search_template import load_data
+
+out = Path("output/model_search_001")  # the completed search's output_dir
+config = json.loads((out / "config.json").read_text())
+manifest = json.loads((out / "selection.json").read_text())
+reference = load_data(config, "train")
+population = load_data(config, "validation")
+
+# winner may be one model or a blend. Reuse the exact saved member order/weights.
+chosen = [
+    (member, weight)
+    for member, weight in zip(manifest["members"], manifest["winner"]["weights"], strict=True)
+    if weight > 0
+]
+pipelines = [load_model(member["path"]) for member, _ in chosen]
+locked = EnsemblePipeline(pipelines, blend_weights=[weight for _, weight in chosen]).run()
+report = locked.explain(population, background=reference, prediction_type="response")
+print(report.feature_names)  # includes only inputs used by the retained members
+
+values = report.shap(max_samples=20, max_background=20, n_permutations=2)
+values.export(out / "explanations" / "shap")
+# Replace with a numeric name printed above; selection may have removed driver_age.
+report.pdp("driver_age", grid_size=10, max_samples=1000).export(out / "explanations" / "age")
+```
+
+Choose `manifest["best_blend"]` instead of `manifest["winner"]` to explain the
+locked best blend. No weight optimization or model refit occurs. Keep enough
+memory available to load the retained members together; unlike the search's
+streamed scoring step, the explanation object holds them concurrently.
+
+The template uses one-hot encoding, but explanation features are original
+variables such as `territory`, including when only selected indicator levels
+remain. Ensemble explanations use the actual response combination before
+converting scales. With rate targets and no exposure, `response` is frequency;
+with exposure it is expected count. Use `rate` for a Poisson rate explanation or
+`link` for log final response. Gamma supports `response`/`link`, not `rate`.
+Start with a small SHAP budget on wide datasets and increase it after checking
+runtime and repeat variability. Existing holdout/permutation-importance reports
+are separate from explanation result exports.

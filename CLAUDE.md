@@ -26,6 +26,10 @@ uv sync --all-extras --dev
 
 # Run a test module
 ./.venv/bin/python -m pytest tests/test_pipeline.py -v
+
+# Run explanation tests and the user walkthrough
+./.venv/bin/python -m pytest tests/explanation -q
+./.venv/bin/python examples/explain_models.py --shap --native
 ```
 
 ## Architecture
@@ -40,6 +44,7 @@ src/ins_gbm/
   models/         — base Protocol + LightGBM, XGBoost, CatBoost, RandomForest wrappers
   tuning/         — HyperparameterTuner (Optuna + MedianPruner)
   evaluation/     — metrics, plots, EvaluationReport
+  explanation/    — shared coordinates, SHAP/PDP/ICE/ALE, plots and exports
   pipeline.py     — ModelRecipe, ModelPipeline, FittedPipeline
   ensemble/       — BlendingEnsemble, StackingEnsemble, EnsemblePipeline
   persistence/    — ReproducibilityMetadata, save_pipeline, load_pipeline
@@ -57,6 +62,32 @@ src/ins_gbm/
 - Load the complete candidate feature pool once, then call `recipe.fit(data, feature_names=[...])` for each iteration. Fitted pipelines remember the subset for prediction and evaluation.
 - A `PreprocessingStep` fits only its `feature_names`, replaces those inputs with outputs prefixed by its unique `name`, and passes other columns through. Steps run sequentially, so later steps may target outputs of earlier ones.
 - Targeted names refer to the feature frame at that point in the chain (normally after encoding and selection). Keep step names unique; missing, duplicate, and colliding feature names are rejected.
+
+## Post-fit Explanations
+
+- User guide: [docs/explanations.md](docs/explanations.md); runnable examples:
+  [examples/explain_models.py](examples/explain_models.py) and
+  [examples/example_usage.ipynb](examples/example_usage.ipynb).
+- `FittedPipeline.explain(original_data, background=reference, prediction_type="response")`
+  and `EnsembleResult.explain(...)` return a lazy `ExplanationReport` with
+  `.shap()`, `.pdp()`, `.ice()`, and `.ale()`. Inspect `.feature_names` and
+  `.feature_metadata`; SHAP needs an explicit original-data background.
+- Keep categories as whole raw-variable players across one-hot/native members.
+  Attribute PCA/PLS/UMAP outputs to processed coordinates. Never redistribute
+  component importance to original variables or align components by name alone.
+  Component-level ensembles require compatible fitted transformations; raw/PCA
+  mixtures and different fitted bases raise.
+- Evaluate the actual final ensemble combination before converting scales.
+  `link` means log final response, including applicable exposure/offset.
+  Keep row exposure and offset fixed during interventions/masking. Native tree
+  SHAP is allowed only when its feature game, reference, and scale agree;
+  ensembles use model-agnostic permutation SHAP. This SHAP engine is separate
+  from the existing deviance-based permutation-importance diagnostic.
+- Return `ShapResult`/`EffectResult` with Polars tables and independent exports.
+  Model `.save()` and `EvaluationReport.export()` do not include explanations.
+  SHAP imports lazily from the optional `explain` extra; PDP/ICE/ALE use core deps.
+- Relevant checks live in `tests/explanation/`, including reconstruction,
+  response/rate/link scaling, encoding, fitted PCA compatibility, and saved loads.
 
 ## Missing Value Convention
 

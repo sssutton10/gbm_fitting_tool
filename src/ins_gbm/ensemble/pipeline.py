@@ -44,6 +44,12 @@ class EnsembleResult:
         """
         return self.ensemble.predict(data)
 
+    def explain(self, data: ModelData, **kwargs):
+        """Explain final predictions, requiring compatible fitted component bases."""
+        from ins_gbm.explanation import ExplanationReport
+
+        return ExplanationReport(self, data, **kwargs)
+
     def evaluate(self, holdout_data: ModelData):
         """Evaluate the fitted ensemble on separately supplied holdout data.
 

@@ -2,6 +2,12 @@
 
 Polars-native Python tools for insurance frequency and severity GBM modeling.
 
+Start with the [runnable notebook](examples/example_usage.ipynb). For model
+explanations, use the [SHAP/PDP/ICE/ALE guide](docs/explanations.md) or run the
+[self-contained diagnostics example](examples/explain_models.py). The
+[ensemble guide](docs/ensembles.md) covers combining and explaining models;
+[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) is the detailed API/architecture map.
+
 ## Install and test
 
 ```bash
@@ -285,6 +291,46 @@ recipe retains their inputs until preprocessing is complete. Scores aggregate
 by output name; independently fitted PCA/PLS components can represent different
 directions across folds. This screen does not align components or attribute
 their importance back to raw inputs.
+
+## Post-fit explanations
+
+Use the same interface on a fitted pipeline or a final `EnsembleResult`. Pass
+original `ModelData`; the tool applies the fitted encodings internally.
+
+```python
+explanations = fitted.explain(holdout, background=training, prediction_type="response")
+print(explanations.feature_names)  # choose names from here, including PCA components
+
+# Replace driver_age/territory with names from your model.
+explanations.pdp("driver_age").export("output/explanations/age_pdp")
+explanations.pdp(["driver_age", "territory"]).export("output/explanations/joint_pdp")
+explanations.ice("driver_age", centered=True, max_samples=100).plot()
+explanations.ale("driver_age", bins=10).plot()
+shap_values = explanations.shap(max_samples=100, max_background=50)
+print(shap_values.summary())
+shap_values.export("output/explanations/shap")
+```
+
+SHAP needs the `explain` extra (included in `all`); PDP, ICE, and ALE need only
+core dependencies. To try every method on generated data:
+
+```bash
+.venv/bin/python examples/explain_models.py --shap
+# Add a native-categorical LightGBM member to the one-hot-encoded ensemble:
+.venv/bin/python examples/explain_models.py --shap --native
+```
+
+`response` explains Poisson rates without exposure, expected counts with exposure,
+or Gamma severity. `rate` is Poisson-only; `link` means log final response.
+Ensemble scaling happens after combining member predictions. One-hot and native
+categories share their original feature name. PCA effects belong to processed
+scores such as `ages__pca_1`; ensemble members must have compatible fitted PCA
+bases. An explicit SHAP background defines the comparison population.
+
+See the [complete guide](docs/explanations.md) for interpretation, sampling,
+weighting, saved models, output schemas, and troubleshooting. Keep the final
+holdout reserved until model choices are locked; explanation-driven revisions
+are another model-selection step.
 
 ## Post-fit native importance versus noise
 

@@ -1,8 +1,11 @@
-# Ensembles: fitting, rates, counts, and persistence
+# Ensembles: fitting, explaining, rates, counts, and persistence
 
 `EnsemblePipeline` supports fixed/optimized blending, distribution-aware
 stacking, seed averaging, and bagging. All methods return `EnsembleResult`
-with `predict(data)`, `evaluate(holdout_data)`, and `save(directory)`.
+with `predict(data)`, `evaluate(holdout_data)`, `explain(data, ...)`, and
+`save(directory)`. See the [explanation guide](explanations.md) for complete
+SHAP/PDP/ICE/ALE settings and the [runnable example](../examples/explain_models.py)
+for a synthetic portfolio.
 
 ## Rate targets by default
 
@@ -427,6 +430,66 @@ fold models, raw training features, or the fitting caches. Comparing different
 feature sets is supported when evaluation rows, objective, weights, exposure,
 and outer folds align.
 
+## Explaining final ensemble predictions
+
+Use the same `.explain()` interface as an individual fitted pipeline. Pass
+original scoring `ModelData`; each member applies its own fitted representation.
+For example, with original `train` and `scoring_data` containing `driver_age`,
+`vehicle_age`, and categorical `territory`:
+
+```python
+from ins_gbm import EnsemblePipeline, LightGBMModel, ModelRecipe, OneHotEncoder, RandomForestModel
+
+native = ModelRecipe(model=LightGBMModel()).fit(train)
+one_hot = ModelRecipe(model=RandomForestModel(), encoder=OneHotEncoder()).fit(train)
+combined = EnsemblePipeline([native, one_hot], blend_weights=[0.6, 0.4]).run()
+
+report = combined.explain(scoring_data, background=train, prediction_type="response")
+print(report.feature_names)  # original territory, not territory__north/etc.
+report.pdp("territory").export("output/ensemble_explanations/territory")
+report.pdp(["driver_age", "territory"], grid_size=10).plot()
+report.ice("driver_age", centered=True, max_samples=100).plot()
+report.ale("driver_age", bins=5).plot()
+values = report.shap(max_samples=20, max_background=20, n_permutations=2)
+values.export("output/ensemble_explanations/shap")
+```
+
+Install `lightgbm` and `explain` extras for this example, or run
+`.venv/bin/python examples/explain_models.py --shap --native` after installing
+all extras. The general SHAP engine evaluates the final ensemble function;
+all PDP, ICE, and ALE calculations likewise use final combined predictions.
+No member-level explanation extraction is needed.
+
+| Scale | Final quantity explained |
+| --- | --- |
+| `response` | Poisson rates without exposure, expected counts with exposure, or Gamma severity |
+| `rate` | Poisson final response divided by scoring exposure; invalid for Gamma |
+| `link` | Log final response, including applicable exposure/offset |
+
+Blend/seed-average/bagging predictions are combined on the existing response
+scale. Stackers apply their actual fitted meta-model, including normalization,
+offset restoration, and clipping. Conversion to `rate` or `link` follows that
+combination. In particular, log member attributions are not averaged to explain
+an arithmetic response blend. Exposure and offset remain fixed per explained
+row, and SHAP reference values may differ between rows because of that context.
+
+### PCA compatibility
+
+PCA importance and effects are for processed components such as
+`ages__pca_1`. Members using the same component family must share compatible
+fitted input order, upstream transformations, scaler, loadings, and output
+ordering/names. Different subsets of a shared basis are allowed. Matching names
+or `PCAReducer(n_components=...)` settings do not establish compatibility.
+A member using the original inputs alongside another member's PCA replacement
+is also incompatible with the common component explanation space.
+
+Bagging and seed averaging refit transforms, so their PCA bases may differ and
+`.explain()` can raise even though ensemble prediction works. Explain an
+individual `result.base_pipelines[i]` with the same single-model interface in
+that case. Do not rename components or combine their importance as if PC1 meant
+the same fitted quantity across members. PLS/UMAP outputs follow the same
+conservative fitted-state rule.
+
 ## Saving and loading
 
 ```python
@@ -437,12 +500,17 @@ bagged.save("output/frequency_bagged")
 loaded = load_ensemble("output/frequency_bagged")
 predicted_rates = loaded.predict(scoring_data)
 report = loaded.evaluate(holdout)
+# Original feature data is supplied explicitly; training attachment is unnecessary.
+explanations = loaded.explain(scoring_data, background=train)
 ```
 
 All ensemble methods save `ensemble.pkl` and `metadata.json`, including the
 objective, configuration, member metadata, model seeds, and resolved stacking
 learner. Artifacts omit members' raw training rows and stacking OOF arrays;
 a loaded stacker's `oof_predictions` is `None`. The original in-memory result
-keeps its training rows and OOF predictions. Loaded results support prediction
-and holdout evaluation, but training-dependent workflows require the original
-training data. Use trusted pickle artifacts in compatible package environments.
+keeps its training rows and OOF predictions. Loaded results support prediction,
+holdout evaluation, and explanations with explicit scoring/reference data.
+Explanation result exports are separate from `.save()`; see
+[output files](explanations.md#outputs-and-progress). Training-dependent workflows
+require the original training data. Use trusted pickle artifacts in compatible
+package environments.

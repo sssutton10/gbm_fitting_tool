@@ -3,6 +3,9 @@
 Run from the repository root after installing the LightGBM extra:
     python examples/example_usage.py --output output/example
 Add --cross-validate to save CV reports and compare a new candidate.
+
+For SHAP, PDP, ICE, ALE, ensembles, and PCA component explanations, run
+examples/explain_models.py and see docs/explanations.md.
 """
 
 from __future__ import annotations

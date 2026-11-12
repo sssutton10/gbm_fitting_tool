@@ -256,6 +256,16 @@ class FittedPipeline:
         )
         return self.predict(data, prediction_type=prediction_type)
 
+    def explain(self, data: ModelData, **kwargs):
+        """Create lazy SHAP/PDP/ICE/ALE diagnostics from original input data.
+
+        Supply ``background=ModelData`` for SHAP. Fitted reducer outputs remain
+        explanation coordinates; encodings are handled internally.
+        """
+        from ins_gbm.explanation import ExplanationReport
+
+        return ExplanationReport(self, data, **kwargs)
+
     def noise_screening_cv(
         self,
         data: ModelData,
