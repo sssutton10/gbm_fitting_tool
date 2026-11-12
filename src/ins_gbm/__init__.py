@@ -11,7 +11,10 @@ from ins_gbm.explanation import ExplanationReport, EffectResult, ShapResult
 from ins_gbm.evaluation.candidates import cross_validate_candidates
 from ins_gbm.evaluation.comparison import compare_cv_double_lift, compare_reports
 from ins_gbm.evaluation.cv_report import CrossValidationReport, CVResult
-from ins_gbm.evaluation.permutation import PermutationImportanceResult
+from ins_gbm.evaluation.permutation import (
+    HoldoutPermutationImportanceResult,
+    PermutationImportanceResult,
+)
 from ins_gbm.evaluation.noise import NoiseScreeningResult
 from ins_gbm.models.catboost import CatBoostModel
 from ins_gbm.models.lightgbm import LightGBMModel
@@ -45,6 +48,7 @@ __all__ = [
     "FeatureSchema",
     "FittedPipeline",
     "HyperparameterTuner",
+    "HoldoutPermutationImportanceResult",
     "ImportanceSelectionStage",
     "LightGBMModel",
     "ModelData",

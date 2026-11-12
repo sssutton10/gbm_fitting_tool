@@ -1,4 +1,4 @@
-"""Held-out permutation importance for a frozen fitted specification."""
+"""Raw-feature permutation importance for fixed models and ensembles."""
 
 from __future__ import annotations
 
@@ -20,7 +20,100 @@ from ins_gbm.evaluation.metrics import (
 from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
 
 if TYPE_CHECKING:
+    from ins_gbm.ensemble.pipeline import EnsembleResult
     from ins_gbm.pipeline import FittedPipeline
+
+
+@dataclass
+class HoldoutPermutationImportanceResult:
+    """Final-ensemble deviance increases on one held-out sample.
+
+    ``std_importance`` is shuffle variability (ddof=0), not a confidence
+    interval. Positive importance means shuffling worsened predictions.
+    No models or evaluation rows are retained.
+    """
+
+    summary: pl.DataFrame
+    repeat_importances: pl.DataFrame
+    baseline_score: float
+    settings: dict[str, Any]
+
+
+def ensemble_permutation_importance(
+    fitted: EnsembleResult,
+    data: ModelData,
+    *,
+    n_repeats: int = 5,
+    max_samples: int | None = None,
+    seed: int = 42,
+    show_progress_bar: bool = True,
+) -> HoldoutPermutationImportanceResult:
+    """Shuffle raw inputs once and score the complete, fixed ensemble.
+
+    Supply separate held-out data. No member, encoder, preprocessor, blend
+    weight, or stacker is refitted. Every member sees the same raw shuffle
+    through its own fitted transform chain, including one-hot encoding.
+    ``max_samples`` caps evaluation rows; baseline and shuffles use the same
+    sample. Targets, exposure, weights, and offsets stay aligned.
+    """
+    from ins_gbm.ensemble._utils import _validate_ensemble_pipelines
+
+    _validate_options(n_repeats, max_samples, seed)
+    _validate_ensemble_pipelines(fitted.base_pipelines, require_training=False)
+    objective = fitted.base_pipelines[0].fitted_model.objective
+    if data.objective is not None and data.objective != objective:
+        raise ValueError("data objective conflicts with fitted objective")
+    # Preserve first-seen order across members with different raw input subsets.
+    features = list(dict.fromkeys(
+        name for member in fitted.base_pipelines for name in member.input_feature_names
+    ))
+    if not features:
+        raise ValueError("Permutation importance requires at least one raw feature")
+    clean = replace(data, objective=objective).select_features(features)
+    clean.validate(require_multiple_folds=False)
+    n_held = clean.n_rows
+    sample_seed, shuffle_seed = np.random.SeedSequence(seed).spawn(2)
+    sample_rng = np.random.default_rng(sample_seed)
+    shuffle_rng = np.random.default_rng(shuffle_seed)
+    if max_samples is not None and n_held > max_samples:
+        indices = np.sort(sample_rng.choice(n_held, max_samples, replace=False))
+        clean = slice_model_data(clean, indices).validate(require_multiple_folds=False)
+    baseline = _deviance(clean, fitted.predict(clean))
+    rows = []
+    for feature in tqdm(features, desc="Ensemble permutation importance",
+                        unit="feature", disable=not show_progress_bar):
+        for repeat in range(n_repeats):
+            shuffled = clean.features[feature].gather(shuffle_rng.permutation(clean.n_rows))
+            permuted = clean.with_features(clean.features.with_columns(shuffled))
+            score = _deviance(permuted, fitted.predict(permuted))
+            rows.append({
+                "feature": feature, "repeat": repeat, "baseline_score": baseline,
+                "permuted_score": score, "importance": score - baseline,
+            })
+    repeats = pl.DataFrame(rows)
+    summary = repeats.group_by("feature", maintain_order=True).agg(
+        pl.col("importance").mean().alias("mean_importance"),
+        pl.col("importance").std(ddof=0).alias("std_importance"),
+    ).sort("mean_importance", descending=True, maintain_order=True)
+    return HoldoutPermutationImportanceResult(
+        summary=summary, repeat_importances=repeats, baseline_score=baseline,
+        settings={
+            "evaluation": "holdout", "metric": f"{objective}_deviance",
+            "objective": objective, "n_repeats": n_repeats,
+            "max_samples": max_samples, "seed": seed, "n_held": n_held,
+            "n_evaluated": clean.n_rows, "feature_names": features,
+        },
+    )
+
+
+def _validate_options(n_repeats, max_samples, seed):
+    for name, value in (("n_repeats", n_repeats), ("max_samples", max_samples)):
+        if value is None and name == "max_samples":
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("seed must be a nonnegative integer")
 
 
 @dataclass
@@ -125,13 +218,7 @@ def permutation_importance_cv(
     This audits a fixed specification, not the independence of any prior
     feature selection or tuning performed on these evaluation rows.
     """
-    for name, value in (("n_repeats", n_repeats), ("max_samples", max_samples)):
-        if value is None and name == "max_samples":
-            continue
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"{name} must be a positive integer")
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
-        raise ValueError("seed must be a nonnegative integer")
+    _validate_options(n_repeats, max_samples, seed)
     objective = fitted.fitted_model.objective
     if data.objective is not None and data.objective != objective:
         raise ValueError("data objective conflicts with fitted objective")

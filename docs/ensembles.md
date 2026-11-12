@@ -2,10 +2,45 @@
 
 `EnsemblePipeline` supports fixed/optimized blending, distribution-aware
 stacking, seed averaging, and bagging. All methods return `EnsembleResult`
-with `predict(data)`, `evaluate(holdout_data)`, `explain(data, ...)`, and
+with `predict(data)`, `evaluate(holdout_data)`, `permutation_importance(holdout_data)`, `explain(data, ...)`, and
 `save(directory)`. See the [explanation guide](explanations.md) for complete
 SHAP/PDP/ICE/ALE settings and the [runnable example](../examples/explain_models.py)
 for a synthetic portfolio.
+
+## Permutation importance of the fitted ensemble
+
+```python
+importance = result.permutation_importance(
+    holdout_data, n_repeats=5, max_samples=None, seed=42,
+)
+print(importance.summary)
+print(importance.baseline_score)
+importance.repeat_importances.write_csv("ensemble_permutation_repeats.csv")
+```
+
+Supply separate held-out data. This measures the increase in Poisson or Gamma
+deviance for the final ensemble prediction, retaining the fitted members,
+encoders, preprocessing, blend weights, and stacker without refitting. It works
+with blending, stacking, seed averaging, bagging, and loaded ensembles without
+attached training data.
+
+Each raw feature is shuffled **once per repeat, before any member's encoding**.
+All members receive that same shuffled input through their own fitted transform
+chains. Ensembles can mix one-hot and native categorical models; dummy columns
+for a category move together. The report covers the union of members' raw input
+features, including unused inputs with zero importance. Targets, exposure,
+observation weights, offsets, and other row metadata stay aligned.
+
+`HoldoutPermutationImportanceResult` contains `summary`, `repeat_importances`,
+`baseline_score`, and `settings`. The summary reports `mean_importance` and
+`std_importance` across shuffles (population standard deviation, not a confidence
+interval). Positive values mean worse predictions after shuffling; negative
+values are retained. `max_samples` optionally caps evaluation rows, using the
+same reproducible sample for the baseline and every shuffle. Set
+`show_progress_bar=False` to suppress progress output.
+
+This evaluates one fixed ensemble on a holdout. The individual pipeline's
+`permutation_importance_cv()` instead refits its frozen specification per fold.
 
 ## Rate targets by default
 

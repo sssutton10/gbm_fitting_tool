@@ -401,6 +401,13 @@ does additional work on the training data. The original fitted model is unchange
 
 ## Post-fit permutation importance
 
+For a fitted ensemble, use `ensemble_result.permutation_importance(holdout_data,
+n_repeats=5)`. Each raw feature shuffle is shared by all members before their
+own fitted encoding and preprocessing, including mixed one-hot and native
+categorical models. The method evaluates the fixed ensemble without refitting.
+See the [ensemble guide](docs/ensembles.md#permutation-importance-of-the-fitted-ensemble)
+for the report fields and sampling options.
+
 Audit a fitted model's frozen variables and parameters on held-out CV folds:
 
 ```python

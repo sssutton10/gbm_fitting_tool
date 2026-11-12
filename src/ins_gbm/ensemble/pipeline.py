@@ -10,6 +10,7 @@ from ins_gbm.data.model_data import ModelData
 
 if TYPE_CHECKING:
     from ins_gbm.evaluation.cv_report import CVResult
+    from ins_gbm.evaluation.permutation import HoldoutPermutationImportanceResult
     from ins_gbm.pipeline import FittedPipeline
 
 
@@ -49,6 +50,30 @@ class EnsembleResult:
         from ins_gbm.explanation import ExplanationReport
 
         return ExplanationReport(self, data, **kwargs)
+
+    def permutation_importance(
+        self,
+        holdout_data: ModelData,
+        *,
+        n_repeats: int = 5,
+        max_samples: int | None = None,
+        seed: int = 42,
+        show_progress_bar: bool = True,
+    ) -> HoldoutPermutationImportanceResult:
+        """Measure final-ensemble deviance increases after raw-feature shuffles.
+
+        Supply separate held-out data. Each shuffle is shared across members
+        before their fitted encoding and preprocessing. Nothing is refitted.
+        Positive importance means worse predictions; standard deviations
+        describe variation across shuffles. Sampling uses the same rows for
+        the baseline and every repeat, without changing the supplied data.
+        """
+        from ins_gbm.evaluation.permutation import ensemble_permutation_importance
+
+        return ensemble_permutation_importance(
+            self, holdout_data, n_repeats=n_repeats, max_samples=max_samples,
+            seed=seed, show_progress_bar=show_progress_bar,
+        )
 
     def evaluate(self, holdout_data: ModelData):
         """Evaluate the fitted ensemble on separately supplied holdout data.

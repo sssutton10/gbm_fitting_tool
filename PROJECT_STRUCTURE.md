@@ -1529,6 +1529,16 @@ adapting them to your own data.
 
 ### Post-fit Permutation Importance
 
+Final ensembles expose `EnsembleResult.permutation_importance(holdout_data,
+n_repeats=5, max_samples=None, seed=42, show_progress_bar=True)`. This scores the
+fixed final combination on separate held-out data, without refitting members,
+transforms, weights, or the meta-model. Each raw feature is shuffled once per
+repeat and shared across members before their individual fitted transforms.
+Mixed native and one-hot categorical members are supported. The exported
+`HoldoutPermutationImportanceResult` contains `summary` (mean and population
+standard deviation across repeats), `repeat_importances`, `baseline_score`,
+and `settings`. See [the ensemble guide](docs/ensembles.md#permutation-importance-of-the-fitted-ensemble).
+
 Defined in `evaluation/permutation.py`, exposed through
 `FittedPipeline.permutation_importance_cv()`. The result type
 `PermutationImportanceResult` is exported at package level.
