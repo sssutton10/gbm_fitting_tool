@@ -28,6 +28,26 @@ def _metadata(directory, settings):
     )
 
 
+def _validate_xlim(xlim):
+    """Normalize optional numeric plot bounds for storage and Matplotlib."""
+    if xlim is None:
+        return None
+    try:
+        if isinstance(xlim, (str, bytes)):
+            raise ValueError
+        bounds = list(xlim)
+        if len(bounds) != 2:
+            raise ValueError
+        bounds = [None if v is None else float(v) for v in bounds]
+        if any(v is not None and not np.isfinite(v) for v in bounds):
+            raise ValueError
+        if all(v is not None for v in bounds) and bounds[0] >= bounds[1]:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("xlim must be (lower, upper) with finite increasing bounds or None") from exc
+    return bounds
+
+
 @dataclass
 class EffectResult:
     """PDP/ICE predictions or centered ALE effects, plus empirical support.
@@ -48,7 +68,7 @@ class EffectResult:
     support: pl.DataFrame
     settings: dict
 
-    def plot(self, output_path=None):
+    def plot(self, output_path=None, *, xlim=None):
         """Plot stored effects with observed support, without recalculating them.
 
         Parameters
@@ -56,6 +76,14 @@ class EffectResult:
         output_path : str or pathlib.Path, optional
             File to save the figure to; its suffix selects the image format.
             None returns the figure without saving. Parent directory must exist.
+        xlim : pair of float or None, optional
+            Displayed variable-axis bounds for a one-feature numeric plot, e.g.
+            (0, 2) or (None, 2) to cap only the upper end. None uses the bounds
+            stored by ``ale(xlim=...)``, or automatic limits if absent. Overrides
+            affect this figure only; calculations, binning, centering, support,
+            and stored tables stay unchanged. Use (None, None) for automatic
+            limits even when the result has stored bounds. Not supported for
+            categorical plots or two-feature heatmaps.
 
         Returns
         -------
@@ -68,6 +96,10 @@ class EffectResult:
 
         features = self.settings["features"]
         kind = self.settings["method"]
+        limits = _validate_xlim(self.settings.get("xlim") if xlim is None else xlim)
+        if limits is not None and (len(features) != 1 or
+                                  self.settings["feature_metadata"][features[0]]["kind"] != "numeric"):
+            raise ValueError("xlim requires a one-feature numeric plot")
         value_column = "effect" if kind == "ale" else "prediction"
         fig, (ax, density) = plt.subplots(2, 1, figsize=(8, 6), height_ratios=[4, 1])
         if len(features) == 2:
@@ -105,6 +137,8 @@ class EffectResult:
             if not numeric:
                 ax.set_xticks(x, [_label(v) for v in values], rotation=45, ha="right")
             ax.set_ylabel(self.settings["units"] + (" (centered difference)" if kind == "ale" or self.settings.get("centered") else ""))
+        if limits is not None:
+            ax.set_xlim(*limits)
         ax.set_xlabel(features[0])
         ax.set_title(f"{kind.upper()} — {self.settings['prediction_type']}")
         if "count" in self.support.columns:

@@ -326,7 +326,7 @@ PDP/ICE predictions still use all selected rows as the reference population.
 | `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None` |
 | `report.pdp(features, ...)` | One/two feature names; `grids=None`, `grid_size=20`, `percentiles=(.05, .95)`, `weights=None`, `max_samples=None` |
 | `report.ice(feature, ...)` | One name; `grid=None`, `grid_size=20`, `percentiles=(.05, .95)`, `centered=False`, `reference=None`, `display_rows=100`, `weights=None`, `max_samples=None` |
-| `report.ale(features, ...)` | One/two numeric names; `bins=None` (20 or 10 per axis), `edges=None`, `weights=None`, `max_samples=None` |
+| `report.ale(features, ...)` | One/two numeric names; `bins=None` (20 or 10 per axis), `edges=None`, `weights=None`, `max_samples=None`, `xlim=None` |
 
 Use mappings for `grids` and `edges`, such as `{"driver_age": [18, 30, 50, 80]}`.
 Explicit ALE edges must cover all selected nonmissing values. Without an ICE
@@ -334,6 +334,25 @@ Explicit ALE edges must cover all selected nonmissing values. Without an ICE
 All supplied weight arrays align to the original explanation population, before
 `max_samples` sampling. A zero-weight SHAP segment has undefined summary values
 (nulls). A sampled population needs positive total averaging weight.
+
+For a one-variable ALE with a long right tail, zoom the variable axis:
+
+```python
+loss_ratio = report.ale("prior_loss_ratio", xlim=(0, 2))
+loss_ratio.plot()
+loss_ratio.export("output/loss_ratio_ale")  # Figures retain these limits.
+loss_ratio.plot(xlim=(None, 1))  # Override this figure only; no recalculation.
+loss_ratio.plot(xlim=(None, None))  # Show the full axis again.
+```
+
+Either bound can be `None` to leave that end automatic. Limits must increase
+and be finite when specified. They affect only the main effect plot; the
+support panel and exported tables retain all calculated bins and rows. This
+option does not change ALE averaging or centering, and is not supported for
+two-feature heatmaps or categorical plots. Zooming cannot recover detail lost
+to coarse bins: for a variable concentrated at zero, supply explicit `edges`
+with finer boundaries near zero and a final boundary covering the maximum.
+Each bin must still contain observations with positive total weight.
 
 ## Outputs and progress
 

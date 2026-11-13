@@ -112,6 +112,66 @@ def test_missing_constant_and_sparse_ale():
         pipeline.explain(data).ale("x", edges={"x": [2, 1]})
 
 
+def test_ale_axis_limits_zoom_without_changing_effects(tmp_path):
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data = population().with_features(population().features.with_columns(
+        pl.Series("x", [0.] * 9 + [.05, .1, .2, .5, 1., 2., 100.])))
+    report = analytic(data, lambda f: 1 + f["x"].to_numpy()).explain(data)
+    edges = {"x": [0, .1, .5, 2, 100]}
+    full = report.ale("x", edges=edges)
+    zoomed = report.ale("x", edges=edges, xlim=(0, 2))
+    assert zoomed.table.equals(full.table)
+    assert zoomed.support.equals(full.support)
+    assert zoomed.settings["edges"] == full.settings["edges"]
+    assert zoomed.settings["row_indices"] == full.settings["row_indices"]
+    assert zoomed.table["value"].max() > 2
+    fig = zoomed.plot()
+    np.testing.assert_allclose(fig.axes[0].get_xlim(), (0, 2))
+    assert len(fig.axes[0].lines[0].get_xdata()) == full.table.height
+    plt.close(fig)
+    fig = zoomed.plot(xlim=(None, 1))
+    assert fig.axes[0].get_xlim()[1] == 1
+    plt.close(fig)
+    fig = zoomed.plot(xlim=(None, None))
+    assert fig.axes[0].get_xlim()[1] > 2
+    plt.close(fig)
+    assert zoomed.settings["xlim"] == [0., 2.]
+    zoomed.export(tmp_path / "zoomed")
+    settings = json.loads((tmp_path / "zoomed" / "settings.json").read_text())
+    assert settings["xlim"] == [0., 2.]
+    assert (tmp_path / "zoomed" / "effect.png").is_file()
+    assert (tmp_path / "zoomed" / "effect.svg").is_file()
+
+
+@pytest.mark.parametrize("xlim", [2, [0], [0, 1, 2], (2, 0), (1, 1),
+                                  (0, np.inf), (np.nan, 1), ("bad", 1)])
+def test_ale_invalid_axis_limits(xlim):
+    data = population()
+    report = analytic(data, lambda f: 1 + f["x"].to_numpy()).explain(data)
+    with pytest.raises(ValueError, match="xlim"):
+        report.ale("x", xlim=xlim)
+    with pytest.raises(ValueError, match="xlim"):
+        report.ale("x", bins=2).plot(xlim=xlim)
+
+
+def test_axis_limits_reject_heatmaps_and_categories():
+    data = population()
+    report = analytic(data, lambda f: 1 + f["x"].to_numpy()).explain(data)
+    with pytest.raises(ValueError, match="one-feature numeric"):
+        report.ale(["x", "z"], bins=2, xlim=(0, 2))
+    with pytest.raises(ValueError, match="one-feature numeric"):
+        report.ale(["x", "z"], bins=2).plot(xlim=(0, 2))
+    categorical = data.with_features(data.features.with_columns(
+        pl.Series("region", ["A", "B"] * 8)))
+    result = fit(categorical, encoder=OneHotEncoder()).explain(categorical).pdp("region")
+    with pytest.raises(ValueError, match="one-feature numeric"):
+        result.plot(xlim=(0, 2))
+
+
 def test_mixed_native_one_hot_and_selected_levels():
     data = population()
     data = data.with_features(data.features.with_columns(pl.Series("region", ["A", "B"] * 8)))

@@ -11,7 +11,7 @@ from ins_gbm.preprocessing.encoder import _NUMERIC_FILL
 from ins_gbm.progress import PipelineCancelled, ProgressEvent
 
 from .adapter import PredictionAdapter
-from .results import EffectResult, ShapResult
+from .results import EffectResult, ShapResult, _validate_xlim
 
 
 def _positive_integer(value, name):
@@ -321,7 +321,7 @@ class ExplanationReport:
         """
         return self._pdp_ice(feature, method="ice", grids={feature: grid} if grid is not None else None, **kwargs)
 
-    def ale(self, features, *, bins=None, edges=None, weights=None, max_samples=None):
+    def ale(self, features, *, bins=None, edges=None, weights=None, max_samples=None, xlim=None):
         """Calculate numeric accumulated local effects within observed bins.
 
         Parameters
@@ -344,6 +344,14 @@ class ExplanationReport:
             Uniform row cap sampled without replacement using the report seed.
             None starts with all rows. Missing/nonfinite values and the numeric
             missing sentinel in requested features are excluded after sampling.
+        xlim : pair of float or None, optional
+            Displayed variable-axis bounds for one-feature ALE, e.g. (0, 2) or
+            (None, 2) to cap only the upper end. Each bound must be finite or
+            None (automatic). None uses automatic limits. Bounds are retained
+            for ``plot()`` and exported figures; they do not change bins, rows,
+            effects, centering, or support. Two-feature ALE does not support xlim.
+            This zoom cannot add detail absent from the calculated bins; supply
+            explicit edges if more resolution near zero is needed.
 
         Returns
         -------
@@ -353,6 +361,9 @@ class ExplanationReport:
             ValueError. Exposure and offsets stay fixed. No result is cached.
         """
         names = self._features(features)
+        xlim = _validate_xlim(xlim)
+        if xlim is not None and len(names) != 1:
+            raise ValueError("xlim requires a one-feature numeric plot")
         if set(edges or {}) - set(names):
             raise ValueError("Edge keys must name the requested diagnostic features")
         if any(self.adapter.metadata[n]["kind"] != "numeric" for n in names):
@@ -426,7 +437,7 @@ class ExplanationReport:
         settings = self._settings("ale", indices, w, features=names, edges=dict(zip(names, [a.tolist() for a in axes])),
                                   excluded_missing_rows=excluded, centered=True,
                                   centering="Weighted mean of bin-center effects is zero",
-                                  order=len(names))
+                                  order=len(names), xlim=xlim)
         return EffectResult(pl.DataFrame(records), pl.DataFrame(support), settings)
 
     def shap(self, **kwargs):
