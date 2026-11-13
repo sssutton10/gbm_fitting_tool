@@ -260,7 +260,8 @@ class FittedPipeline:
         """Create lazy SHAP/PDP/ICE/ALE diagnostics from original input data.
 
         Supply ``background=ModelData`` for SHAP. Fitted reducer outputs remain
-        explanation coordinates; encodings are handled internally.
+        explanation coordinates by default; use feature_space="raw" to explain
+        original features through the fitted transforms. Encodings are internal.
         """
         from ins_gbm.explanation import ExplanationReport
 

@@ -89,24 +89,53 @@ when only some indicator levels survived selection. Changes and SHAP masking
 never create independent, invalid one-hot combinations. Previously unseen values
 follow the fitted encoder/backend's existing behavior.
 
-Fitted reducer outputs are separate continuous features. For a targeted PCA
-step called `ages`, explain `ages__pca_1`, `ages__pca_2`, etc. Importance belongs
-to these processed component scores and is never spread over their original
-inputs. `report.feature_metadata` and each result's `settings["feature_metadata"]`
-include component lineage and, for PCA, loadings, scaler state, and explained
-variance. Interventions vary component scores while other diagnostic coordinates
-are held fixed. They do not imply a unique change in the source variables.
+`feature_space="auto"` (the default) explains original raw features for an
+ensemble and processed components for a single fitted pipeline. Set
+`feature_space="raw"` or `feature_space="processed"` explicitly to use either
+interpretation. The choice applies to SHAP, PDP, ICE, and ALE and is recorded
+as `settings["feature_space"]` on results.
 
-An ensemble requires compatible component coordinates. Ordered source inputs,
-upstream fitted transformations, scaler, fitted loadings, and component/output
-ordering must agree. Members can select different components of the same basis.
-An absent group is allowed; a member using the original inputs alongside another
-member's PCA representation is rejected. Equal component names are insufficient.
-Independently refitted PCA in bagging/seed averaging will usually be incompatible.
-Use a shared fitted basis or explain the member pipelines directly in that case.
-PLS/UMAP outputs follow the same conservative fitted-state compatibility rule.
-Custom reducers need `input_names`, `output_feature_names()`, and
+In raw space, every perturbation passes through each member's existing fitted
+encoding, selection, scaling, and reducers before the ensemble combines its
+predictions. Nothing is refitted. A feature used directly in one member and
+through PCA in another has one attribution covering both paths. Members may
+have different fitted PCA bases, including identically named components.
+Only raw sources of final model features are attributed. Categorical variables
+remain whole, including when only selected one-hot levels enter a model.
+
+Raw SHAP uses the general permutation explainer; `engine="tree"` is ineligible.
+It can cost more because each evaluation replays fitted preprocessing. Raw
+attributions are calculated from the complete prediction function, not allocated
+from component SHAP values using loadings. Predictions and output scales stay
+the same; baselines and attributions can differ from processed-space explanations.
+Background masking can still produce unusual combinations of correlated raw
+features. Contributions describe model behavior, not causal effects, and do not
+separate direct effects from effects mediated by PCA.
+
+In processed space, fitted reducer outputs are separate continuous features.
+For a targeted PCA step called `ages`, explain `ages__pca_1`, `ages__pca_2`, etc.
+Importance belongs to these scores and is never spread over their original
+inputs. `report.feature_metadata` and result settings include component lineage
+and, for PCA, loadings, scaler state, and explained variance. Interventions vary
+component scores without implying a unique change in the source variables.
+
+Processed-space ensembles still require compatible fitted component coordinates:
+input ordering, upstream transforms, scaler, loadings, and outputs must agree.
+Members can select different components of one shared basis. Raw/component
+source overlap and independently fitted incompatible bases raise an error.
+PLS/UMAP follow the same rule. Custom reducers need lineage metadata via
 `component_mapping()`; custom encoders currently raise an explicit error.
+
+```python
+# Handles different PCA bases and raw/PCA overlap across ensemble members.
+report = ensemble.explain(scoring_data, background=training_reference)
+print(report.feature_names)  # original variable names
+values = report.shap(max_samples=20, max_background=20, n_permutations=2)
+
+# Optional: explain a single pipeline in original variables too.
+raw_report = pca_fit.explain(scoring_data, background=training_reference,
+                             feature_space="raw")
+```
 
 ### Example: explain PCA scores
 
@@ -132,8 +161,8 @@ print(pca_values.summary())
 
 The two original age columns have been replaced by component coordinates in
 this example. A request for their raw names raises an unknown-feature error.
-Matching PCA step configurations across ensemble members is insufficient:
-the fitted states must agree. See [ensemble explanations](ensembles.md#explaining-final-ensemble-predictions)
+For explicit `feature_space="processed"` ensemble explanations, matching PCA
+step configurations is insufficient: the fitted states must agree. See [ensemble explanations](ensembles.md#explaining-final-ensemble-predictions)
 for compatibility and scale rules.
 
 ## Output scales

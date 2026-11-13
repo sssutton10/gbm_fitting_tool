@@ -36,14 +36,17 @@ class ExplanationReport:
     background : ModelData, optional
         Explicit SHAP reference population, sampled uniformly, independently
         of population averaging weights.
+    feature_space : {'auto', 'raw', 'processed'}
+        Auto uses raw inputs for ensembles and processed components for single
+        models. Raw interventions replay each member's fitted transforms.
     prediction_type : {'response', 'rate', 'link'}
         ``link`` is log final response, not log rate.
     """
 
     def __init__(self, fitted, data, *, background=None, prediction_type="response", seed=42,
-                 progress_callback=None, should_stop=None, batch_size=1024):
+                 progress_callback=None, should_stop=None, batch_size=1024, feature_space="auto"):
         data.validate_for_prediction()
-        self.adapter = PredictionAdapter(fitted, data, prediction_type)
+        self.adapter = PredictionAdapter(fitted, data, prediction_type, feature_space)
         self.data = data
         self.frame = self.adapter.frame
         self.background = background
@@ -105,11 +108,13 @@ class ExplanationReport:
         if scale == "link":
             units = f"log {units}"
         return {"method": method, "prediction_type": scale, "objective": objective,
-                "batch_size": self.batch_size,
+                "batch_size": self.batch_size, "feature_space": self.adapter.feature_space,
                 "units": units, "seed": self.seed, "row_indices": indices.tolist(),
                 "averaging_weights": weights.tolist(), "feature_metadata": self.adapter.metadata,
                 "context": "Exposure and offsets fixed per explained row; not attributed",
-                "interpretation": "Model behavior, not causal effects. PDP/ICE can extrapolate under feature dependence; SHAP depends on the reference population. Component effects vary processed scores, not source variables.",
+                "interpretation": "Model behavior, not causal effects. PDP/ICE can extrapolate under feature dependence; SHAP depends on the reference population. " + (
+                    "Raw feature effects include all paths through fitted preprocessing." if self.adapter.feature_space == "raw" else
+                    "Component effects vary processed scores, not source variables."),
                 **kwargs}
 
     def _features(self, features, limit=2):
@@ -394,6 +399,8 @@ class ExplanationReport:
     def _tree(self, shap, frame, background, indices):
         if self.adapter.ensemble is not None:
             raise ValueError("Final ensemble predictions require the general explainer")
+        if self.adapter.feature_space == "raw":
+            raise ValueError("Raw-feature explanations require the general explainer")
         member = self.adapter.members[0]
         fitted = member.pipeline.fitted_model
         if any(meta["kind"] != "numeric" for meta in self.adapter.metadata.values()):

@@ -48,7 +48,7 @@ class EnsembleResult:
         return self.ensemble.predict(data)
 
     def explain(self, data: ModelData, **kwargs):
-        """Explain final predictions, requiring compatible fitted component bases."""
+        """Explain final predictions in raw features, replaying fitted transforms."""
         from ins_gbm.explanation import ExplanationReport
 
         return ExplanationReport(self, data, **kwargs)

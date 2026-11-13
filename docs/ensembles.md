@@ -583,22 +583,27 @@ combination. In particular, log member attributions are not averaged to explain
 an arithmetic response blend. Exposure and offset remain fixed per explained
 row, and SHAP reference values may differ between rows because of that context.
 
-### PCA compatibility
+### PCA and original features
 
-PCA importance and effects are for processed components such as
-`ages__pca_1`. Members using the same component family must share compatible
-fitted input order, upstream transformations, scaler, loadings, and output
-ordering/names. Different subsets of a shared basis are allowed. Matching names
-or `PCAReducer(n_components=...)` settings do not establish compatibility.
-A member using the original inputs alongside another member's PCA replacement
-is also incompatible with the common component explanation space.
+Ensemble `.explain()` defaults to raw-feature explanations. Every SHAP mask or
+effect intervention passes through each member's fitted preprocessing before
+combination. No transforms or models are refitted. A variable used through PCA
+in one member and directly in another receives one attribution covering both
+paths. Different fitted PCA bases, including bagged or seed-averaged bases, are
+supported. SHAP uses the general permutation engine.
 
-Bagging and seed averaging refit transforms, so their PCA bases may differ and
-`.explain()` can raise even though ensemble prediction works. Explain an
-individual `result.base_pipelines[i]` with the same single-model interface in
-that case. Do not rename components or combine their importance as if PC1 meant
-the same fitted quantity across members. PLS/UMAP outputs follow the same
-conservative fitted-state rule.
+Use `feature_space="processed"` to explain component scores instead. In that
+mode, members must share compatible fitted input order, upstream transforms,
+scaler, loadings, and output names/order. Different subsets of a shared basis
+are allowed. Raw/component overlap and incompatible fitted bases raise an error;
+matching component names or PCA configuration is insufficient. PLS/UMAP follow
+the same conservative processed-space rule.
+
+Raw contributions describe model behavior relative to the reference population,
+including all preprocessing paths; they do not isolate causal or direct effects.
+Correlated raw-feature masking can still produce unusual input combinations.
+See [explanation coordinates](explanations.md#coordinates-and-encodings) for
+explicit raw/processed selection and the unchanged single-model default.
 
 ## Saving and loading
 

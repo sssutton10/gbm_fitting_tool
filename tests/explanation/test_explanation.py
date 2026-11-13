@@ -147,7 +147,7 @@ def test_pca_coordinates_compatibility_and_saved_models(tmp_path):
     selected = ModelRecipe(model=LightGBMModel(), preprocessing=preprocessing, params={
         "n_estimators": 3, "num_threads": 1, "min_data_in_leaf": 1}).fit(
             data, feature_names=["ages__pca_1"], feature_stage="model")
-    assert blend([pipeline, selected]).explain(data).feature_names == ["ages__pca_1", "ages__pca_2"]
+    assert blend([pipeline, selected]).explain(data, feature_space="processed").feature_names == ["ages__pca_1", "ages__pca_2"]
     shared.save(str(tmp_path / "ensemble"))
     from ins_gbm import load_ensemble
     restored = load_ensemble(str(tmp_path / "ensemble"))
@@ -155,9 +155,9 @@ def test_pca_coordinates_compatibility_and_saved_models(tmp_path):
     np.testing.assert_allclose(restored_report.adapter.predict(restored_report.frame, np.arange(16)), shared.predict(data), rtol=1e-6)
     other = fit(data.with_features(data.features.with_columns((pl.col("x") * 2).alias("x"))), preprocessing=preprocessing)
     with pytest.raises(ValueError, match="Incompatible"):
-        blend([pipeline, other]).explain(data)
+        blend([pipeline, other]).explain(data, feature_space="processed")
     with pytest.raises(ValueError, match="raw/component"):
-        blend([pipeline, fit(data)]).explain(data)
+        blend([pipeline, fit(data)]).explain(data, feature_space="processed")
 
 
 def exact_shap(report, row, background):
@@ -408,3 +408,101 @@ def test_progress_is_reported_and_unknown_grid_keys_fail():
         report.pdp("x", grids={"typo": [1, 2]})
     with pytest.raises(ValueError, match="Edge keys"):
         report.ale("x", edges={"typo": [1, 2]})
+
+
+@pytest.mark.parametrize("scale", ["response", "rate", "link"])
+@pytest.mark.parametrize("stacking", [False, True])
+def test_raw_pca_ensemble_shap_and_interventions(scale, stacking, tmp_path, monkeypatch):
+    pytest.importorskip("shap")
+    from sklearn.linear_model import PoissonRegressor
+    from ins_gbm import load_ensemble
+
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.),
+                   exposure=pl.Series(np.linspace(.4, 2, 16)),
+                   offset=pl.Series(np.linspace(-.2, .2, 16)))
+    preprocessing = [PreprocessingStep("ages", PCAReducer(1), ["x", "z"])]
+    first = fit(data, preprocessing=preprocessing)
+    shifted = data.with_features(data.features.with_columns((pl.col("x") * 2).alias("x")))
+    second = fit(shifted, preprocessing=preprocessing)
+    pipelines = [first, second, fit(data)]
+    if stacking:
+        base = np.column_stack([p.predict(data) for p in pipelines])
+        normalized = base / (data.exposure.to_numpy() * np.exp(data.offset.to_numpy()))[:, None]
+        meta = PoissonRegressor(alpha=.1).fit(np.log(normalized), data.target.to_numpy())
+        ensemble = EnsembleResult(FittedStackingEnsemble(meta, pipelines, None, True), pipelines)
+    else:
+        ensemble = blend(pipelines)
+    report = ensemble.explain(data, background=data, prediction_type=scale, batch_size=7)
+    assert report.feature_names == ["x", "z"]
+    assert all(meta["stage"] == "raw" for meta in report.feature_metadata.values())
+
+    def expected(changed):
+        values = ensemble.predict(changed).to_numpy()
+        return np.log(values) if scale == "link" else values / data.exposure.to_numpy() if scale == "rate" else values
+
+    np.testing.assert_allclose(report._predict(report.frame, np.arange(16)), expected(data), rtol=2e-6, atol=2e-6)
+    for value in [.5, 2.5]:
+        changed = data.with_features(data.features.with_columns(pl.lit(value).alias("x")))
+        ice = report.ice("x", grid=[value])
+        np.testing.assert_allclose(ice.table["prediction"], expected(changed), rtol=2e-6, atol=2e-6)
+    assert report.ale("x", bins=2).table.height == 2
+    # Explanation may transform, but must never refit a reducer or scaler.
+    def no_fit(*args, **kwargs):
+        raise AssertionError("Explanation attempted to refit preprocessing")
+    for pipeline in pipelines[:2]:
+        reducer = pipeline.preprocessors[0].fitted_preprocessor
+        monkeypatch.setattr(reducer.pca, "fit", no_fit)
+        monkeypatch.setattr(reducer.scaler, "fit", no_fit)
+    result = report.shap(n_permutations=1, max_samples=2)
+    assert result.settings["feature_space"] == "raw"
+    assert result.settings["engine"] == "permutation"
+    for row, source in enumerate(result.settings["row_indices"]):
+        values = result.contributions.filter(pl.col("row") == row)["contribution"]
+        np.testing.assert_allclose(values, exact_shap(report, source, report.frame), atol=2e-6)
+    np.testing.assert_allclose(result.predictions["residual"], 0, atol=2e-6)
+    ensemble.save(str(tmp_path / "mixed"))
+    restored = load_ensemble(str(tmp_path / "mixed"))
+    loaded = restored.explain(data, prediction_type=scale)
+    assert loaded.feature_names == ["x", "z"]
+    np.testing.assert_allclose(loaded._predict(loaded.frame, np.arange(16)), expected(data), rtol=2e-6, atol=2e-6)
+
+
+def test_explicit_raw_single_model_and_unused_inputs():
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.))
+    pipeline = ModelRecipe(model=LightGBMModel(), params={
+        "n_estimators": 3, "num_threads": 1, "min_data_in_leaf": 1}).fit(
+            data, feature_names=["x"], feature_stage="model")
+    report = pipeline.explain(data, feature_space="raw")
+    assert report.feature_names == ["x"]
+    np.testing.assert_allclose(report._predict(report.frame, np.arange(16)), pipeline.predict(data), rtol=1e-6)
+    with pytest.raises(ValueError, match="feature_space"):
+        pipeline.explain(data, feature_space="invalid")
+    pca = fit(data, preprocessing=[PreprocessingStep("ages", PCAReducer(1), ["x", "z"])])
+    assert pca.explain(data).feature_names == ["ages__pca_1"]
+    raw = pca.explain(data, background=data, feature_space="raw")
+    assert raw.feature_names == ["x", "z"]
+    np.testing.assert_allclose(raw._predict(raw.frame, np.arange(16)), pca.predict(data), rtol=1e-6)
+    pytest.importorskip("shap")
+    with pytest.raises(ValueError, match="general explainer"):
+        raw.shap(engine="tree")
+
+
+def test_raw_pca_ensemble_categories_and_selected_one_hot():
+    pytest.importorskip("shap")
+    data = population().with_features(population().features.with_columns(
+        pl.Series("region", ["A", "B"] * 8)))
+    data = replace(data, target=pl.Series(np.arange(16) + 1.), schema=None)
+    pca = fit(data, encoder=OneHotEncoder(), preprocessing=[
+        PreprocessingStep("ages", PCAReducer(1), ["x", "z"])])
+    selected = ModelRecipe(model=LightGBMModel(), encoder=OneHotEncoder(), params={
+        "n_estimators": 3, "num_threads": 1, "min_data_in_leaf": 1}).fit(
+            data, feature_names=["x", "region__A"], feature_stage="encoded")
+    ensemble = blend([pca, selected, fit(data)])
+    report = ensemble.explain(data, background=data)
+    assert report.feature_names == ["x", "z", "region"]
+    for row in report.pdp("region", grids={"region": ["A", "B", "unseen", None]}).table.iter_rows(named=True):
+        changed = data.with_features(data.features.with_columns(pl.lit(row["value"], dtype=pl.String).alias("region")))
+        np.testing.assert_allclose(row["prediction"], ensemble.predict(changed).mean(), rtol=2e-6, atol=2e-6)
+    result = report.shap(max_samples=2, n_permutations=2)
+    assert set(result.summary()["feature"]) == {"x", "z", "region"}
+    np.testing.assert_allclose(result.predictions["residual"], 0, atol=2e-6)

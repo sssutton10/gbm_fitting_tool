@@ -23,9 +23,9 @@ class Member:
 
 
 class PredictionAdapter:
-    """Keep components processed and categories whole across heterogeneous models."""
+    """Explain raw inputs or compatible processed scores, keeping categories whole."""
 
-    def __init__(self, fitted, data, prediction_type):
+    def __init__(self, fitted, data, prediction_type, feature_space="auto"):
         self.fitted = fitted
         self.data = data
         self.ensemble = getattr(fitted, "ensemble", None)
@@ -33,10 +33,17 @@ class PredictionAdapter:
         self.objective = pipelines[0].fitted_model.objective
         validate_prediction_type(prediction_type, self.objective)
         self.prediction_type = prediction_type
+        if feature_space not in {"auto", "raw", "processed"}:
+            raise ValueError("feature_space must be auto, raw, or processed")
+        default_space = "raw" if self.ensemble is not None else "processed"
+        self.feature_space = default_space if feature_space == "auto" else feature_space
         self.members = []
         self.metadata = {}
         self._definitions = {}
         self._raw_uses = set()
+        if self.feature_space == "raw":
+            self._initialize_raw(pipelines)
+            return
         for index, pipeline in enumerate(pipelines):
             prepared = pipeline._prepare_data(data)
             encoder = pipeline.encoder
@@ -124,7 +131,31 @@ class PredictionAdapter:
             raise ValueError("No diagnostic features available")
         self.frame = self.transform(data)
 
+    def _initialize_raw(self, pipelines):
+        # Share the final-column lineage used by raw permutation importance.
+        from ins_gbm.evaluation.permutation import _model_raw_features
+
+        for pipeline in pipelines:
+            pipeline._prepare_data(self.data)
+            if pipeline.encoder is not None and not isinstance(pipeline.encoder, FittedOneHotEncoder):
+                raise ValueError("Explanation requires the built-in encoder or no encoder")
+            schema = pipeline._input_schema()
+            explicit = getattr(pipeline.recipe.model, "categorical_features", "auto")
+            for name in _model_raw_features(pipeline):
+                categorical = ((schema is not None and name in schema.categorical) or
+                               (explicit != "auto" and name in explicit) or
+                               (pipeline.encoder is not None and name in pipeline.encoder.levels))
+                categorical = categorical or self.metadata.get(name, {}).get("kind") == "categorical"
+                self.metadata[name] = {"kind": "categorical" if categorical else "numeric", "stage": "raw"}
+            self.members.append(Member(pipeline, {}, {}))
+        self.names = list(self.metadata)
+        if not self.names:
+            raise ValueError("No diagnostic features available")
+        self.frame = self.transform(self.data)
+
     def transform(self, data):
+        if self.feature_space == "raw":
+            return data.features.select(self.names)
         columns = {}
         for member in self.members:
             prepared = member.pipeline._prepare_data(data).features
@@ -146,21 +177,28 @@ class PredictionAdapter:
                           weight=None if data.weight is None else data.weight[indices],
                           cv_fold=None, comparisons=None, schema=None)
         predictions = []
-        for member in self.members:
-            columns = []
-            for model_name, (name, level) in member.columns.items():
-                values = frame[name]
-                if level is not None:
-                    values = (values.cast(pl.String).fill_null(_MISSING_LEVEL) == level).cast(pl.Float32)
-                elif self.metadata[name]["stage"] == "raw" and member.pipeline.encoder is not None:
-                    values = values.fill_null(_NUMERIC_FILL)
-                dtype = member.schema[model_name]
-                if self.metadata[name]["kind"] == "numeric":
-                    dtype = pl.Float32
-                columns.append(values.cast(dtype).rename(model_name))
-            prepared = context.with_features(pl.DataFrame(columns))
+        if self.feature_space == "raw":
+            # Keep required but unused pipeline inputs, then apply interventions.
+            raw = data.features[indices].with_columns(frame.get_columns())
+            context = context.with_features(raw)
             scale = "response" if self.ensemble is not None else self.prediction_type
-            predictions.append(member.pipeline.fitted_model.predict(prepared, scale).to_numpy())
+            predictions = [member.pipeline.predict(context, scale).to_numpy() for member in self.members]
+        else:
+            for member in self.members:
+                columns = []
+                for model_name, (name, level) in member.columns.items():
+                    values = frame[name]
+                    if level is not None:
+                        values = (values.cast(pl.String).fill_null(_MISSING_LEVEL) == level).cast(pl.Float32)
+                    elif self.metadata[name]["stage"] == "raw" and member.pipeline.encoder is not None:
+                        values = values.fill_null(_NUMERIC_FILL)
+                    dtype = member.schema[model_name]
+                    if self.metadata[name]["kind"] == "numeric":
+                        dtype = pl.Float32
+                    columns.append(values.cast(dtype).rename(model_name))
+                prepared = context.with_features(pl.DataFrame(columns))
+                scale = "response" if self.ensemble is not None else self.prediction_type
+                predictions.append(member.pipeline.fitted_model.predict(prepared, scale).to_numpy())
         matrix = np.column_stack(predictions)
         if self.ensemble is None:
             # Preserve wrapper-specific clipping/conversion exactly for single models.
