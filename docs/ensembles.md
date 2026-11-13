@@ -27,8 +27,11 @@ attached training data.
 Each raw feature is shuffled **once per repeat, before any member's encoding**.
 All members receive that same shuffled input through their own fitted transform
 chains. Ensembles can mix one-hot and native categorical models; dummy columns
-for a category move together. The report covers the union of members' raw input
-features, including unused inputs with zero importance. Targets, exposure,
+for a category move together. The report covers only raw variables feeding
+the final model columns, taking the union across members. Variables discarded
+by selection are excluded. A category is included if any of its one-hot columns
+is retained; selected preprocessing components include their contributing raw
+variables. A retained model input can still have zero importance. Targets, exposure,
 observation weights, offsets, and other row metadata stay aligned.
 
 `HoldoutPermutationImportanceResult` contains `summary`, `repeat_importances`,
@@ -38,6 +41,10 @@ interval). Positive values mean worse predictions after shuffling; negative
 values are retained. `max_samples` optionally caps evaluation rows, using the
 same reproducible sample for the baseline and every shuffle. Set
 `show_progress_bar=False` to suppress progress output.
+
+Custom fitted encoders and preprocessors need `component_mapping()` metadata
+mapping output columns to their input columns so final model inputs can be
+traced back to raw variables. Built-in encoders and reducers are supported.
 
 This evaluates one fixed ensemble on a holdout. The individual pipeline's
 `permutation_importance_cv()` instead refits its frozen specification per fold.
@@ -84,7 +91,9 @@ parameters using the ensemble's `seed`. A required frozen column missing from a
 fold or bag raises an error identifying the fold and member.
 
 All members receive the same held-out raw-feature shuffle before their own
-encoding. Targets, exposure, weights, and offsets stay aligned. Data is supplied
+encoding. Only raw variables feeding the final models' columns are tested,
+using the same mapping and union across members as holdout importance.
+Targets, exposure, weights, and offsets stay aligned. Data is supplied
 explicitly; templates loaded without attached training rows work too. The final
 fitted models and input data are unchanged. This audits the chosen specification;
 prior selection, tuning, or weight choice on these rows is not independently

@@ -66,6 +66,7 @@ class EnsembleResult:
 
         Supply separate held-out data. Each shuffle is shared across members
         before their fitted encoding and preprocessing. Nothing is refitted.
+        Only raw sources of final model columns are tested, unioned across members.
         Positive importance means worse predictions; standard deviations
         describe variation across shuffles. Sampling uses the same rows for
         the baseline and every repeat, without changing the supplied data.
@@ -251,6 +252,7 @@ class EnsemblePipeline:
         or selection. Refit encoders, preprocessing, and estimators on each
         fold's training rows (or each bag's sample). Shuffle held-out raw
         variables once per repeat, shared across members before encoding.
+        Only raw sources of final model columns are tested, unioned across members.
         ``cv`` controls outer folds; ``self.seed`` controls ensemble members;
         ``seed`` controls validation sampling/shuffles. Optimized blending and
         stacking are unsupported. No attached training data is required.

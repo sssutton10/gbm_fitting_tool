@@ -213,8 +213,9 @@ def test_encoded_and_model_selections_and_fold_local_transforms(monkeypatch):
     assert encoder_rows == [40] * 3
     assert prep_rows == [(40, ["signal", "category__a"], 40)] * 3
     assert "category" in result.summary["feature"]
-    assert result.repeat_importances.height == 9
-    assert result.fold_importances["repeat_std"].to_list() == [0.0] * 9
+    assert result.settings["feature_names"] == ["signal", "category"]
+    assert result.repeat_importances.height == 6
+    assert result.fold_importances["repeat_std"].to_list() == [0.0] * 6
 
 
 def test_missing_frozen_encoded_level_is_explicit():
@@ -248,3 +249,57 @@ def test_zero_weight_validation_sample_has_clear_error():
     fitted = ModelRecipe(model=FixedModel()).fit(data)
     with pytest.raises(ValueError, match="weight must have a positive total"):
         fitted.permutation_importance_cv(data, show_progress_bar=False)
+
+
+@pytest.mark.parametrize('stage', ['encoded', 'model'])
+def test_only_selected_raw_sources_are_shuffled(stage, monkeypatch):
+    data = make_data()
+    data = replace(data, features=data.features.with_columns(
+        pl.Series('category', ['a', 'b'] * 30),
+    ), feature_names=['signal', 'unused', 'category'], schema=None)
+    fitted = ModelRecipe(FixedModel(column='category__a'), encoder=OneHotEncoder()).fit(
+        data, feature_names=['category__a'], feature_stage=stage,
+    )
+    original_fit = FixedModel.fit
+    predictions = []
+
+    def record(self, train, params=None):
+        model = original_fit(self, train, params)
+        original_predict = model.predict_fn
+
+        def predict(held, prediction_type):
+            predictions.append(held)
+            return original_predict(held, prediction_type)
+
+        model.predict_fn = predict
+        return model
+
+    monkeypatch.setattr(FixedModel, 'fit', record)
+    result = fitted.permutation_importance_cv(data, n_repeats=2, show_progress_bar=False)
+    assert result.settings['feature_names'] == ['category']
+    assert result.summary['feature'].to_list() == ['category']
+    assert result.repeat_importances.height == 6
+    assert len(predictions) == 9  # baseline + two shuffles per fold
+    assert all(held.feature_names == ['category__a'] for held in predictions)
+
+
+@pytest.mark.parametrize(('selected', 'expected'), [
+    (['category__a'], ['category']),
+    (['group__pca_1'], ['signal', 'unused']),
+])
+def test_targeted_preprocessing_traces_only_retained_outputs(selected, expected):
+    from ins_gbm import LightGBMModel, PreprocessingStep
+
+    data = make_data().with_features(make_data().features.with_columns(
+        pl.Series('category', ['a', 'b'] * 30),
+    ))
+    data = replace(data, schema=None)
+    fitted = ModelRecipe(
+        LightGBMModel(), encoder=OneHotEncoder(),
+        preprocessing=[PreprocessingStep('group', PCAReducer(1), ['signal', 'unused'])],
+        params={'n_estimators': 3, 'num_threads': 1, 'verbosity': -1},
+    ).fit(data, feature_names=selected, feature_stage='model')
+    result = fitted.permutation_importance_cv(data, n_repeats=1, show_progress_bar=False)
+    assert result.settings['feature_names'] == expected
+    assert set(result.summary['feature']) == set(expected)
+    assert result.repeat_importances.height == 3 * len(expected)

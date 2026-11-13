@@ -1572,8 +1572,10 @@ Targets, exposure, weights, offsets, and fold assignments remain aligned.
 
 Positive importance means shuffled deviance exceeded baseline deviance;
 negative values are retained. Scoring uses the existing exposure/weight-aware
-Poisson or weighted Gamma deviance. Inputs discarded by the frozen selection
-can remain in this raw-input report with zero importance. Missing frozen
+Poisson or weighted Gamma deviance. Only raw variables feeding final model
+columns are tested; discarded inputs are excluded. One-hot indicators map to
+their original variable; selected preprocessing components map to their raw
+contributors. Ensembles use the union across members. Missing frozen
 selected columns raise instead of silently changing the specification.
 
 `PermutationImportanceResult` contains:

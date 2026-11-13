@@ -441,8 +441,11 @@ Each fold fits one model with the original fitted parameters and feature
 selections; it does not rerun selection or tuning. Encoding and preprocessing
 are refitted on that fold's training rows. Each raw variable is shuffled before
 encoding, so categorical indicators move together. Exposure, weights, offsets,
-and targets stay aligned. Raw inputs discarded by the frozen selection remain
-in the report with zero importance. A frozen encoded column missing from a
+and targets stay aligned. Only raw variables feeding final model columns are
+tested; variables discarded by selection are excluded. For ensembles this uses
+the union across members. One-hot columns map to their original variable, and
+retained preprocessing components map to their contributing raw variables.
+A frozen encoded column missing from a
 fold's training design raises an error rather than changing the selection.
 
 Importance is **shuffled deviance minus baseline deviance**, using the existing

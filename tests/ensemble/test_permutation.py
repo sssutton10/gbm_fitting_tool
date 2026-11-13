@@ -120,6 +120,7 @@ def test_shared_raw_shuffle_and_final_predictions(objective, method, monkeypatch
 def test_sampling_reproducibility_summary_and_different_member_inputs():
     data, ensemble = fixture('poisson', 'blending')
     ensemble.base_pipelines[0].input_feature_names = ['category']
+    ensemble.base_pipelines[0].fitted_model.feature_names = ['category']
     options = dict(max_samples=12, n_repeats=4, seed=7, show_progress_bar=False)
     first = ensemble.permutation_importance(data, **options)
     second = ensemble.permutation_importance(data, **options)
@@ -336,6 +337,7 @@ def test_cv_sampling_summary_and_different_member_inputs():
     data, ensemble = fixture('poisson', 'blending')
     data = replace(data, cv_fold=None)
     ensemble.base_pipelines[0].input_feature_names = ['category']
+    ensemble.base_pipelines[0].fitted_model.feature_names = ['category']
     candidate = EnsemblePipeline(ensemble.base_pipelines, blend_weights=[.3, .7])
     options = dict(cv=CVConfig(folds='random', n_splits=4, seed=13),
                    n_repeats=3, max_samples=6, seed=14, show_progress_bar=False)
@@ -376,6 +378,7 @@ def test_cv_frozen_encoded_selection_missing_in_fold(monkeypatch):
     # Each training fold lacks one of the originally fitted categorical levels.
     data = replace(data, cv_fold=pl.Series(np.tile([10, 20], 20)))
     ensemble.base_pipelines[1].selected_features = ['category__a', 'category__b']
+    ensemble.base_pipelines[1].fitted_model.feature_names = ['category__a', 'category__b']
     candidate = EnsemblePipeline(ensemble.base_pipelines, blend_weights=[.3, .7])
     with pytest.raises(RuntimeError, match='fold 10, member 2.*Frozen selected features missing'):
         candidate.permutation_importance_cv(data, show_progress_bar=False)
@@ -412,3 +415,54 @@ def test_cv_preprocessing_refitted_with_frozen_feature_stages(monkeypatch):
     assert result.settings['model_selected_features'] == [['pca_1']]
     assert template.selected_features == ['unused', 'category__b']
     assert template.model_selected_features == ['pca_1']
+
+
+@pytest.mark.parametrize('cv', [False, True])
+def test_only_union_of_final_model_sources_is_shuffled(cv, monkeypatch):
+    from ins_gbm import EnsemblePipeline, LightGBMModel
+
+    data, _ = fixture('poisson', 'blending')
+    data = replace(data, cv_fold=pl.Series([10] * 20 + [20] * 20),
+                   features=data.features.with_columns(pl.lit(123.).alias('dropped')),
+                   feature_names=['category', 'unused', 'dropped'], schema=None)
+    params = {'n_estimators': 3, 'min_data_in_leaf': 1, 'num_threads': 1, 'verbosity': -1}
+    encoded = ModelRecipe(LightGBMModel(), encoder=OneHotEncoder(), params=params).fit(
+        data, feature_names=['category__b'], feature_stage='encoded',
+    )
+    native = ModelRecipe(LightGBMModel(), params=params).fit(
+        data, feature_names=['unused'], feature_stage='model',
+    )
+    candidate = EnsemblePipeline([encoded, native], blend_weights=[.6, .4])
+    original_predict = EnsembleResult.predict
+    seen = []
+
+    def capture(self, raw):
+        seen.append(raw.features.clone())
+        return original_predict(self, raw)
+
+    monkeypatch.setattr(EnsembleResult, 'predict', capture)
+    if cv:
+        result = candidate.permutation_importance_cv(data, n_repeats=2, show_progress_bar=False)
+    else:
+        result = candidate.run().permutation_importance(data, n_repeats=2, show_progress_bar=False)
+    assert result.settings['feature_names'] == ['category', 'unused']
+    assert set(result.summary['feature']) == {'category', 'unused'}
+    assert len(seen) == (2 if cv else 1) * 5
+    assert all(frame['dropped'].to_list() == [123.] * frame.height for frame in seen)
+
+
+@pytest.mark.parametrize('method', ['seed_average', 'bagging'])
+def test_cv_resampled_models_exclude_discarded_features(method):
+    from ins_gbm import EnsemblePipeline, LightGBMModel
+
+    data, _ = fixture('poisson', 'blending')
+    data = replace(data, cv_fold=pl.Series([10] * 20 + [20] * 20))
+    template = ModelRecipe(LightGBMModel(), encoder=OneHotEncoder(), params={
+        'n_estimators': 3, 'min_data_in_leaf': 1, 'num_threads': 1, 'verbosity': -1,
+    }).fit(data, feature_names=['category__a'], feature_stage='encoded')
+    result = EnsemblePipeline([template], method=method, n_members=2).permutation_importance_cv(
+        data, n_repeats=1, show_progress_bar=False,
+    )
+    assert result.settings['feature_names'] == ['category']
+    assert result.summary['feature'].to_list() == ['category']
+    assert result.repeat_importances.height == 2

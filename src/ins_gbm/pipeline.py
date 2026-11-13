@@ -306,7 +306,8 @@ class FittedPipeline:
 
         Fits once per fold, refitting encoding and preprocessing on training rows
         without tuning or feature selection. Shuffles raw variables before
-        encoding. Positive importance means held-out deviance increased.
+        encoding, testing only raw sources of final model columns. Positive
+        importance means held-out deviance increased.
         ``max_samples`` optionally caps validation rows per fold. See
         ``ins_gbm.evaluation.permutation.permutation_importance_cv`` for details.
         """

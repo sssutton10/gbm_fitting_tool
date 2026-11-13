@@ -18,6 +18,8 @@ from ins_gbm.evaluation.metrics import (
     poisson_deviance,
 )
 from ins_gbm.preprocessing.chain import FittedTransformChain, select_model_features
+from ins_gbm.preprocessing.encoder import FittedOneHotEncoder
+from ins_gbm.preprocessing.steps import FittedPreprocessingStep
 
 if TYPE_CHECKING:
     from ins_gbm.ensemble.pipeline import EnsemblePipeline, EnsembleResult
@@ -37,6 +39,65 @@ class HoldoutPermutationImportanceResult:
     repeat_importances: pl.DataFrame
     baseline_score: float
     settings: dict[str, Any]
+
+
+def _model_raw_features(pipeline: FittedPipeline) -> list[str]:
+    """Trace final design columns to raw inputs, including selected components."""
+    lineage = {name: {name} for name in pipeline.input_feature_names}
+    encoder = pipeline.encoder
+    if isinstance(encoder, FittedOneHotEncoder):
+        encoded = {name: lineage[name] for name in (
+            encoder.numeric_cols + encoder.ordinal_cols + encoder.passthrough_cols
+        )}
+        for raw, levels in encoder.levels.items():
+            for level in levels:
+                encoded[f"{raw}__{level}"] = {raw}
+        lineage = encoded
+    elif encoder is not None:
+        if not hasattr(encoder, "component_mapping"):
+            raise ValueError("Permutation importance requires component_mapping for custom encoders")
+        lineage = _map_origins(encoder.component_mapping(), lineage)
+    if pipeline.selected_features is not None:
+        lineage = {name: lineage[name] for name in pipeline.selected_features}
+    for step in pipeline.preprocessors:
+        if isinstance(step, FittedPreprocessingStep):
+            reducer = step.fitted_preprocessor
+            if not hasattr(reducer, "component_mapping"):
+                raise ValueError("Permutation importance requires component_mapping for custom preprocessing")
+            mapping = reducer.component_mapping()
+            mapped = _map_origins({
+                output: mapping[original]
+                for output, original in zip(step.output_names, reducer.output_feature_names())
+            }, lineage)
+            lineage = {name: origins for name, origins in lineage.items()
+                       if name not in step.input_names}
+            lineage.update(mapped)
+        else:
+            if not hasattr(step, "component_mapping"):
+                raise ValueError("Permutation importance requires component_mapping for custom preprocessing")
+            lineage = _map_origins(step.component_mapping(), lineage)
+    try:
+        used = set().union(*(lineage[name] for name in pipeline.fitted_model.feature_names))
+    except KeyError as exc:
+        raise ValueError(f"Cannot trace final model feature {exc.args[0]!r} to raw inputs") from exc
+    return [name for name in pipeline.input_feature_names if name in used]
+
+
+def _map_origins(mapping, lineage):
+    try:
+        return {output: set().union(*(lineage[name] for name in inputs))
+                for output, inputs in mapping.items()}
+    except KeyError as exc:
+        raise ValueError(f"Invalid feature lineage for input {exc.args[0]!r}") from exc
+
+
+def _ensemble_raw_features(pipelines):
+    features = list(dict.fromkeys(
+        name for pipeline in pipelines for name in _model_raw_features(pipeline)
+    ))
+    if not features:
+        raise ValueError("Permutation importance requires at least one raw model feature")
+    return features
 
 
 def ensemble_permutation_importance(
@@ -64,12 +125,11 @@ def ensemble_permutation_importance(
     if data.objective is not None and data.objective != objective:
         raise ValueError("data objective conflicts with fitted objective")
     # Preserve first-seen order across members with different raw input subsets.
-    features = list(dict.fromkeys(
+    input_features = list(dict.fromkeys(
         name for member in fitted.base_pipelines for name in member.input_feature_names
     ))
-    if not features:
-        raise ValueError("Permutation importance requires at least one raw feature")
-    clean = replace(data, objective=objective).select_features(features)
+    features = _ensemble_raw_features(fitted.base_pipelines)
+    clean = replace(data, objective=objective).select_features(input_features)
     clean.validate(require_multiple_folds=False)
     n_held = clean.n_rows
     sample_seed, shuffle_seed = np.random.SeedSequence(seed).spawn(2)
@@ -214,10 +274,11 @@ def ensemble_permutation_importance_cv(
     objective = templates[0].fitted_model.objective
     if data.objective is not None and data.objective != objective:
         raise ValueError("data objective conflicts with fitted objective")
-    features = list(dict.fromkeys(
+    input_features = list(dict.fromkeys(
         name for member in templates for name in member.input_feature_names
     ))
-    clean = replace(data, objective=objective).select_features(features).validate()
+    features = _ensemble_raw_features(templates)
+    clean = replace(data, objective=objective).select_features(input_features).validate()
     config = cv or CVConfig()
     fold_ids, splits = resolve_folds(clean, config)
     if resampling:
@@ -351,8 +412,8 @@ def permutation_importance_cv(
     """Refit a frozen specification per fold and shuffle held-out raw inputs.
 
     No selection or tuning is run. Encoding and preprocessing are refitted
-    using only training rows. Raw inputs are reported even when an earlier
-    selection makes them unused (their importance will be zero). A frozen
+    using only training rows. Only raw inputs feeding final model columns
+    are shuffled and reported. A frozen
     encoded column absent from a training fold raises rather than silently
     changing the specification.
 
@@ -370,6 +431,9 @@ def permutation_importance_cv(
     if data.objective is not None and data.objective != objective:
         raise ValueError("data objective conflicts with fitted objective")
     clean = replace(data, objective=objective).select_features(fitted.input_feature_names)
+    features = _model_raw_features(fitted)
+    if not features:
+        raise ValueError("Permutation importance requires at least one raw model feature")
     clean.validate()
     config = cv or CVConfig()
     fold_ids, splits = resolve_folds(clean, config)
@@ -395,7 +459,7 @@ def permutation_importance_cv(
             "fold": fold, "n_train": train.n_rows, "n_held": n_held,
             "n_evaluated": held.n_rows, "baseline_score": baseline,
         })
-        for feature in clean.feature_names:
+        for feature in features:
             for repeat in range(n_repeats):
                 shuffled = held.features[feature].gather(
                     shuffle_rng.permutation(held.n_rows)
@@ -423,7 +487,7 @@ def permutation_importance_cv(
             "n_repeats": n_repeats, "max_samples": max_samples, "seed": seed,
             "cv": {"folds": "predefined" if predefined else "random",
                    "n_splits": len(splits), "seed": None if predefined else config.seed},
-            "feature_names": list(clean.feature_names),
+            "feature_names": features,
             "selected_features": deepcopy(fitted.selected_features),
             "model_selected_features": deepcopy(fitted.model_selected_features),
             "model_params": deepcopy(fitted.fitted_model.params),
