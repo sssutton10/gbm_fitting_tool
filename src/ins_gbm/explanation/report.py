@@ -1,6 +1,8 @@
 """Lazy SHAP, partial dependence, ICE, and accumulated local effects."""
 
 from itertools import product
+from inspect import signature
+from collections.abc import Mapping
 
 import numpy as np
 import polars as pl
@@ -32,19 +34,45 @@ class ExplanationReport:
     fitted : FittedPipeline or EnsembleResult
         Fitted prediction object.
     data : ModelData
-        Population to explain. Exposure/offset remain fixed for each row.
+        Original population to explain, before fitted encoding/preprocessing.
+        Exposure/offset remain fixed for each row; targets are not consulted.
     background : ModelData, optional
         Explicit SHAP reference population, sampled uniformly, independently
-        of population averaging weights.
-    feature_space : {'auto', 'raw', 'processed'}
+        of population averaging weights. Required only for SHAP; may equal data.
+    feature_space : {'auto', 'raw', 'processed'}, default='auto'
         Auto uses raw inputs for ensembles and processed components for single
         models. Raw interventions replay each member's fitted transforms.
-    prediction_type : {'response', 'rate', 'link'}
-        ``link`` is log final response, not log rate.
+    prediction_type : {'response', 'rate', 'link'}, default='response'
+        Response includes exposure where applicable; Poisson rate removes it.
+        Link is log final response, not log rate. Gamma does not support rate.
+    seed : int, default=42
+        Random seed for reproducible row/background sampling, permutation SHAP,
+        and selection of displayed ICE curves.
+    progress_callback : callable, optional
+        Called with a ``ProgressEvent`` at method and prediction-batch boundaries.
+    should_stop : callable, optional
+        Zero-argument function checked at progress boundaries. Returning true
+        raises ``PipelineCancelled``.
+    batch_size : int, default=1024
+        Maximum rows per adapter prediction call. Larger batches reduce call
+        overhead but use more memory; this does not limit explanation rows.
+    shap_kwargs : mapping, optional
+        Options for ``shap()``. If supplied (even an empty mapping), compute SHAP
+        during construction and retain these options as defaults for later
+        calls. None leaves SHAP lazy. Requires ``background``.
+
+    Notes
+    -----
+    Only the most recent SHAP result is cached, in memory. Keep data, background,
+    and report configuration unchanged when reusing a report. PDP, ICE, and ALE
+    are calculated separately and do not use SHAP contributions.
     """
 
     def __init__(self, fitted, data, *, background=None, prediction_type="response", seed=42,
-                 progress_callback=None, should_stop=None, batch_size=1024, feature_space="auto"):
+                 progress_callback=None, should_stop=None, batch_size=1024, feature_space="auto",
+                 shap_kwargs=None):
+        if shap_kwargs is not None and not isinstance(shap_kwargs, Mapping):
+            raise TypeError("shap_kwargs must be a mapping of SHAP options or None")
         data.validate_for_prediction()
         self.adapter = PredictionAdapter(fitted, data, prediction_type, feature_space)
         self.data = data
@@ -54,6 +82,10 @@ class ExplanationReport:
         self.progress_callback = progress_callback
         self.should_stop = should_stop
         self.batch_size = _positive_integer(batch_size, "batch_size")
+        self._shap_defaults = dict(shap_kwargs or {})
+        self._shap_cache = None
+        if shap_kwargs is not None:
+            self.shap()
 
     @property
     def feature_names(self):
@@ -210,15 +242,116 @@ class ExplanationReport:
         return EffectResult(pl.DataFrame(records), pl.DataFrame(supports), settings)
 
     def pdp(self, features, **kwargs):
-        """One- or two-feature mean predictions; optional grids={feature: values}."""
+        """Calculate a partial dependence curve or two-feature surface.
+
+        Parameters
+        ----------
+        features : str or sequence of str
+            One or two distinct names from ``feature_names``. Each grid cell
+            replaces these features for every selected row before averaging.
+        grids : mapping, optional
+            Feature name to explicit grid values. Unspecified numeric axes use
+            quantiles; categorical axes use all observed levels (at most 30
+            unless an explicit grid is supplied). Numeric grids exclude missing
+            values and the library missing-value sentinel.
+        grid_size : int, default=20
+            Number of quantiles per automatic numeric axis before deduplication.
+            Two automatic axes can require grid_size squared population passes.
+        percentiles : tuple of float, default=(0.05, 0.95)
+            Lower/upper quantile bounds for automatic numeric grids, in [0, 1].
+        weights : array-like or 'uniform', optional
+            Nonnegative averaging weights aligned to the full input population,
+            before sampling. None uses ``data.weight``, or equal weights when
+            absent. 'uniform' explicitly selects equal weights.
+        max_samples : int, optional
+            Uniform sample cap for averaging rows, without replacement, using
+            the report seed. None uses all rows. Grids use the selected rows.
+        centered : bool, default=False
+            Shared ICE option; has no effect on PDP predictions.
+        reference : scalar, optional
+            Shared ICE option; has no effect on PDP predictions.
+        display_rows : int, default=100
+            Shared ICE plotting option; has no effect on the PDP calculation.
+
+        Returns
+        -------
+        EffectResult
+            Weighted mean predictions in ``table``, observed grid-cell counts
+            and weights in ``support``, and calculation details in ``settings``.
+            Exposure and offsets remain fixed per row. No result is cached.
+        """
         return self._pdp_ice(features, method="pdp", **kwargs)
 
     def ice(self, feature, *, grid=None, **kwargs):
-        """Per-row predictions, optionally centered at a grid reference value."""
+        """Calculate individual conditional expectation curves for selected rows.
+
+        Parameters
+        ----------
+        feature : str
+            Name from ``feature_names`` to replace along each row's curve.
+        grid : sequence, optional
+            Explicit values to evaluate. None uses numeric quantiles or all
+            observed categories (at most 30 without an explicit grid).
+        grid_size : int, default=20
+            Quantile count for an automatic numeric grid, before deduplication.
+        percentiles : tuple of float, default=(0.05, 0.95)
+            Lower/upper quantile bounds in [0, 1] for an automatic numeric grid.
+        weights : array-like or 'uniform', optional
+            Nonnegative weights aligned to all input rows before sampling.
+            None uses ``data.weight`` or equal weights if absent; 'uniform'
+            forces equal weights. Stored with curves; does not alter predictions.
+        max_samples : int, optional
+            Uniform sample cap, without replacement, using the report seed.
+            None computes curves for every row. Automatic grids use this sample.
+        centered : bool, default=False
+            Subtract each row's prediction at the reference grid value.
+        reference : scalar, optional
+            Grid value used for centering. None chooses the middle numeric grid
+            entry or first categorical entry. Explicit values must be in grid.
+        display_rows : int, default=100
+            Maximum curves shown by ``plot()``, sampled using the report seed.
+            All calculated curves remain in the result table.
+
+        Returns
+        -------
+        EffectResult
+            Per-row predictions (or centered differences), support, and settings.
+            ``row`` indexes the selected sample; ``source_row`` indexes the full
+            input population. Exposure and offsets stay fixed. No result is cached.
+        """
         return self._pdp_ice(feature, method="ice", grids={feature: grid} if grid is not None else None, **kwargs)
 
     def ale(self, features, *, bins=None, edges=None, weights=None, max_samples=None):
-        """Numeric first-order or main-effect-adjusted second-order ALE."""
+        """Calculate numeric accumulated local effects within observed bins.
+
+        Parameters
+        ----------
+        features : str or sequence of str
+            One or two distinct numeric names from ``feature_names``. Two names
+            produce second-order effects adjusted for first-order main effects.
+        bins : int, optional
+            Quantile bin count per automatic axis, before duplicate edges are
+            removed. Defaults to 20 for one feature or 10 for two features.
+            Reduce this if cells are empty or have zero total weight.
+        edges : mapping, optional
+            Feature name to explicit finite, strictly increasing bin boundaries
+            covering all selected nonmissing values. Unspecified axes use bins.
+        weights : array-like or 'uniform', optional
+            Nonnegative weights aligned to the full input population before
+            sampling. Used for local averaging and centering. None uses
+            ``data.weight`` or equal weights if absent; 'uniform' forces equality.
+        max_samples : int, optional
+            Uniform row cap sampled without replacement using the report seed.
+            None starts with all rows. Missing/nonfinite values and the numeric
+            missing sentinel in requested features are excluded after sampling.
+
+        Returns
+        -------
+        EffectResult
+            Centered effects in ``table``, bin counts/weights in ``support``, and
+            settings including excluded rows. Empty or zero-weight cells raise
+            ValueError. Exposure and offsets stay fixed. No result is cached.
+        """
         names = self._features(features)
         if set(edges or {}) - set(names):
             raise ValueError("Edge keys must name the requested diagnostic features")
@@ -296,7 +429,65 @@ class ExplanationReport:
                                   order=len(names))
         return EffectResult(pl.DataFrame(records), pl.DataFrame(support), settings)
 
-    def shap(self, *, engine="auto", max_background=100, max_samples=None, n_permutations=20,
+    def shap(self, **kwargs):
+        """Calculate SHAP once and reuse the most recent matching result.
+
+        Options supplied through ``explain(shap_kwargs=...)`` are defaults for
+        subsequent calls. Explicit options override them. The report's data,
+        background, and configuration must remain unchanged while it is reused.
+
+        Parameters
+        ----------
+        engine : {'auto', 'tree', 'permutation'}, default='auto'
+            'auto' tries native tree SHAP and falls back to permutation SHAP
+            when ineligible. 'tree' requires a supported single model, processed
+            numeric coordinates, and a compatible prediction scale; otherwise
+            raises ValueError. 'permutation' explains the complete prediction
+            function and supports raw features and ensembles.
+        max_background : int, default=100
+            Maximum uniformly sampled background rows, without replacement.
+            Background sampling ignores averaging weights. A representative
+            original ``ModelData`` must be supplied to ``explain(background=...)``.
+        max_samples : int, optional
+            Uniform cap on explained rows, sampled without replacement using the
+            report seed. None explains all rows, which can be expensive. Each
+            selected row receives contributions for every report feature.
+        n_permutations : int, default=20
+            Permutation cycles per explained row and repeat. More cycles improve
+            approximation at greater prediction cost. Ignored by tree SHAP.
+        n_repeats : int, default=1
+            Independent seeded permutation runs, retained separately for stability
+            summaries. Tree SHAP repeats reuse the same deterministic values.
+        weights : array-like or 'uniform', optional
+            Nonnegative summary weights aligned to the full input population,
+            before sampling. None uses ``data.weight`` or equal weights if absent;
+            'uniform' forces equal weights. Does not change individual
+            contributions or the background reference distribution.
+
+        Returns
+        -------
+        ShapResult
+            Signed contributions for all features, checked predictions/baselines,
+            explained samples, settings, and summary/plot/export helpers. Reuses
+            the most recent result when effective options match; changed options
+            recalculate it. Results use the report's ``prediction_type`` scale.
+        """
+        options = {**self._shap_defaults, **kwargs}
+        bound = signature(self._compute_shap).bind(**options)
+        bound.apply_defaults()
+        key_options = dict(bound.arguments)
+        weights = key_options.pop("weights")
+        if weights is not None and not isinstance(weights, str):
+            values = np.asarray(weights, dtype=float)
+            weights = (values.shape, values.tobytes())
+        key = (tuple(key_options.items()), weights)
+        if self._shap_cache is not None and self._shap_cache[0] == key:
+            return self._shap_cache[1]
+        result = self._compute_shap(**options)
+        self._shap_cache = (key, result)
+        return result
+
+    def _compute_shap(self, *, engine="auto", max_background=100, max_samples=None, n_permutations=20,
              n_repeats=1, weights=None):
         """SHAP on the selected final prediction scale, with a deliberate background."""
         if self.background is None:

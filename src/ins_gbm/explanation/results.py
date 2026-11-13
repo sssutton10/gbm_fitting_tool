@@ -30,13 +30,40 @@ def _metadata(directory, settings):
 
 @dataclass
 class EffectResult:
-    """PDP/ICE predictions or centered ALE effects, plus empirical support."""
+    """PDP/ICE predictions or centered ALE effects, plus empirical support.
+
+    Parameters
+    ----------
+    table : polars.DataFrame
+        Grid coordinates and predictions/effects; ICE also includes sample-row
+        and original-population row indices.
+    support : polars.DataFrame
+        Observed grid/bin row counts, weights, and unsupported-cell indicators.
+    settings : dict
+        Calculation method, feature metadata, prediction units, sampling,
+        averaging weights, and plotting options produced by the report.
+    """
 
     table: pl.DataFrame
     support: pl.DataFrame
     settings: dict
 
     def plot(self, output_path=None):
+        """Plot stored effects with observed support, without recalculating them.
+
+        Parameters
+        ----------
+        output_path : str or pathlib.Path, optional
+            File to save the figure to; its suffix selects the image format.
+            None returns the figure without saving. Parent directory must exist.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Curve, ICE profiles, or two-feature heatmap with support counts.
+            ICE displays at most settings['display_rows'] seeded sample curves;
+            this does not remove calculated rows from ``table``.
+        """
         import matplotlib.pyplot as plt
 
         features = self.settings["features"]
@@ -94,6 +121,19 @@ class EffectResult:
         return _save(fig, output_path)
 
     def export(self, directory):
+        """Write effect tables, settings, and figures from this stored result.
+
+        Parameters
+        ----------
+        directory : str or pathlib.Path
+            Destination directory, created with parents if needed. Writes
+            effects.csv, support.csv, settings.json, effect.png, and effect.svg.
+            Existing files with these names are overwritten.
+
+        Returns
+        -------
+        None
+        """
         import matplotlib.pyplot as plt
 
         _metadata(directory, self.settings)
@@ -105,7 +145,27 @@ class EffectResult:
 
 @dataclass
 class ShapResult:
-    """Long-form signed contributions and independently checked predictions."""
+    """Long-form signed contributions and independently checked predictions.
+
+    Parameters
+    ----------
+    contributions : polars.DataFrame
+        Signed contribution for each repeat, sample-row index, and feature.
+    predictions : polars.DataFrame
+        Per-repeat/per-row baseline, prediction, reconstruction residual, and
+        source_row index in the original explanation population.
+    samples : polars.DataFrame
+        Explained feature values in sampled-row order, without repeat duplication.
+    settings : dict
+        Prediction scale/units, feature metadata, engine, and sampling settings.
+    weights : numpy.ndarray
+        Nonnegative averaging weights aligned to samples, used for summaries.
+
+    Notes
+    -----
+    Summary, plotting, and export methods reuse these tables without recalculating
+    SHAP. Keep a cached result unchanged when sharing it through a report.
+    """
 
     contributions: pl.DataFrame
     predictions: pl.DataFrame
@@ -132,7 +192,24 @@ class ShapResult:
         ).agg(pl.col("contribution").sum())
 
     def summary(self, groups=None):
-        """Average absolute contributions after signed, per-row display grouping."""
+        """Summarize weighted feature importance across rows and repeats.
+
+        Parameters
+        ----------
+        groups : mapping of str to sequence of str, optional
+            Display-group name to feature names. Contributions are summed with
+            their signs within each row/repeat before taking absolute values.
+            Features must exist and belong to at most one group; group names must
+            not collide with ungrouped features. Other features remain separate.
+            None summarizes individual features. Does not recalculate SHAP.
+
+        Returns
+        -------
+        polars.DataFrame
+            Sorted by descending mean_abs_contribution. Includes weighted signed
+            mean_contribution and repeat_std, the population standard deviation
+            of each repeat's weighted mean absolute contribution.
+        """
         frame = self._grouped(groups)
         records = []
         for name in frame["feature"].unique(maintain_order=True):
@@ -148,7 +225,24 @@ class ShapResult:
         return pl.DataFrame(records).sort("mean_abs_contribution", descending=True)
 
     def segment_summary(self, segments):
-        """Summarize by externally supplied segment labels aligned to explained rows."""
+        """Summarize stored SHAP contributions within population segments.
+
+        Parameters
+        ----------
+        segments : sequence
+            One label per explained sample, in ``samples`` order, rather than
+            one per original input row or per repeat. Labels are cast to strings
+            and reused across repeats. Use predictions['source_row'] from a
+            single repeat, ordered by row, to map original-population labels
+            to the selected samples.
+
+        Returns
+        -------
+        polars.DataFrame
+            Per-segment/per-feature weighted mean absolute contribution, weighted
+            signed mean contribution, and unique sample count. Averages include
+            all repeats; means are null for segments with zero total weight.
+        """
         if len(segments) != self.samples.height:
             raise ValueError("Segments must align with explained samples")
         labels = pl.Series("segment", segments).cast(pl.String).to_list()
@@ -167,6 +261,25 @@ class ShapResult:
         )
 
     def plot_importance(self, top_n=20, groups=None, output_path=None):
+        """Plot a horizontal bar chart of weighted mean absolute SHAP values.
+
+        Parameters
+        ----------
+        top_n : int, default=20
+            Number of highest-importance features or display groups to show.
+        groups : mapping of str to sequence of str, optional
+            Display-group name to nonoverlapping existing feature names. Signed
+            contributions are summed per row/repeat before computing importance;
+            ungrouped features remain separate. See ``summary()``.
+        output_path : str or pathlib.Path, optional
+            Image file to save; suffix selects format. Parent must exist.
+            None returns the figure without saving.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Importance chart built from stored contributions and summary weights.
+        """
         import matplotlib.pyplot as plt
 
         table = self.summary(groups).head(top_n).reverse()
@@ -176,6 +289,24 @@ class ShapResult:
         return _save(fig, output_path)
 
     def plot_beeswarm(self, top_n=20, output_path=None):
+        """Plot per-row SHAP contributions colored by feature values.
+
+        Parameters
+        ----------
+        top_n : int, default=20
+            Number of features to show, ranked by weighted mean absolute SHAP.
+            Each dot uses a row's contribution averaged across repeats; points
+            are not sampled or sized by averaging weights.
+        output_path : str or pathlib.Path, optional
+            Image file to save; suffix selects format. Parent must exist.
+            None returns the figure without saving.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Beeswarm of stored contributions. Numeric values determine color;
+            categories use display codes rather than a numerical effect scale.
+        """
         import matplotlib.pyplot as plt
 
         names = self.summary().head(top_n)["feature"].to_list()[::-1]
@@ -205,6 +336,29 @@ class ShapResult:
         return _save(fig, output_path)
 
     def plot_waterfall(self, row=0, repeat=0, top_n=20, output_path=None):
+        """Show how signed contributions connect one baseline to its prediction.
+
+        Parameters
+        ----------
+        row : int, default=0
+            Zero-based index within ``samples``, not the original input row
+            number. The corresponding prediction records its ``source_row``.
+        repeat : int, default=0
+            Zero-based SHAP repeat to display. Unknown row/repeat pairs raise
+            ValueError; contributions are not averaged across repeats here.
+        top_n : int or None, default=20
+            Number of largest absolute contributions shown individually. Any
+            remaining features form an additional signed-sum 'Other' bar.
+            None shows all features; a truncation limit must be positive.
+        output_path : str or pathlib.Path, optional
+            Image file to save; suffix selects format. Parent must exist.
+            None returns the figure without saving.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Waterfall with baseline and final prediction on the stored scale.
+        """
         import matplotlib.pyplot as plt
 
         table = self.contributions.filter((pl.col("row") == row) & (pl.col("repeat") == repeat))
@@ -231,6 +385,27 @@ class ShapResult:
         return _save(fig, output_path)
 
     def plot_dependence(self, feature, color_by=None, output_path=None):
+        """Plot a feature's observed values against its stored SHAP contributions.
+
+        Parameters
+        ----------
+        feature : str
+            Explained feature name present in ``samples`` and ``contributions``.
+            Each sample's contribution is averaged across repeats. This plots
+            SHAP values; it does not calculate a partial dependence curve.
+        color_by : str, optional
+            Feature in ``samples`` used to color points. Numeric values are used
+            directly; categorical values use display codes. None uses one color.
+        output_path : str or pathlib.Path, optional
+            Image file to save; suffix selects format. Parent must exist.
+            None returns the figure without saving.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Scatter plot on the stored prediction scale, with categorical axis
+            labels and a color bar where applicable.
+        """
         import matplotlib.pyplot as plt
 
         values = self.contributions.filter(pl.col("feature") == feature).group_by("row").agg(
@@ -260,6 +435,21 @@ class ShapResult:
         return _save(fig, output_path)
 
     def export(self, directory):
+        """Write stored SHAP tables, settings, and summary figures to disk.
+
+        Parameters
+        ----------
+        directory : str or pathlib.Path
+            Destination directory, created with parents if needed. Writes
+            contributions.csv, predictions.csv, samples.csv, importance.csv,
+            settings.json, and importance/beeswarm figures in PNG and SVG.
+            Existing files with these names are overwritten. Does not recalculate
+            SHAP; figures and importance use the stored contributions.
+
+        Returns
+        -------
+        None
+        """
         import matplotlib.pyplot as plt
 
         _metadata(directory, self.settings)

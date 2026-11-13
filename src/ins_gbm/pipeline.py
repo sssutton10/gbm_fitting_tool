@@ -257,11 +257,51 @@ class FittedPipeline:
         return self.predict(data, prediction_type=prediction_type)
 
     def explain(self, data: ModelData, **kwargs):
-        """Create lazy SHAP/PDP/ICE/ALE diagnostics from original input data.
+        """Create an explanation report for this fitted pipeline.
 
-        Supply ``background=ModelData`` for SHAP. Fitted reducer outputs remain
-        explanation coordinates by default; use feature_space="raw" to explain
-        original features through the fitted transforms. Encodings are internal.
+        Parameters
+        ----------
+        data : ModelData
+            Original population to explain, including exposure/offset if used for
+            scoring. Do not pass encoded matrices or ``fitted.train_data``.
+            Targets are not used to calculate explanations.
+        background : ModelData, optional
+            Original reference population for SHAP; required only when SHAP is
+            calculated. May equal data. PDP, ICE, and ALE do not use it.
+        prediction_type : {'response', 'rate', 'link'}, default='response'
+            Prediction scale to explain. Response includes row exposure where
+            applicable; rate removes it for Poisson models. Link is log final
+            response, including exposure/offset, not log rate. Gamma supports
+            response and link only. Exposure/offset stay fixed per explained row.
+        seed : int, default=42
+            Seed for reproducible explanation/background sampling, permutation
+            SHAP, and displayed ICE curve selection.
+        batch_size : int, default=1024
+            Maximum rows per adapter prediction call. Larger values reduce call
+            overhead at higher memory cost; does not cap explained rows.
+        feature_space : {'auto', 'raw', 'processed'}, default='auto'
+            Auto uses processed coordinates for a single pipeline, including
+            fitted reducer scores. Raw varies original inputs and replays fitted
+            preprocessing. Processed varies fitted coordinates directly.
+            ``report.feature_names`` lists the names accepted by each method.
+        progress_callback : callable, optional
+            Receives ``ProgressEvent`` objects at method/prediction boundaries.
+        should_stop : callable, optional
+            Zero-argument callback checked at progress boundaries; returning true
+            raises ``PipelineCancelled``.
+        shap_kwargs : mapping, optional
+            Options forwarded to ``report.shap()``: engine, max_background,
+            max_samples, n_permutations, n_repeats, and weights. A supplied mapping
+            computes SHAP immediately and sets defaults for future SHAP calls.
+            An empty mapping uses SHAP defaults, including all data rows. None
+            keeps construction lazy. Background is required for eager SHAP.
+
+        Returns
+        -------
+        ExplanationReport
+            Provides SHAP, PDP, ICE, and ALE methods without refitting. Only the
+            most recent SHAP result is cached in memory. Keep data, background,
+            and report configuration unchanged while reusing the report.
         """
         from ins_gbm.explanation import ExplanationReport
 

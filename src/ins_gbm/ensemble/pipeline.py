@@ -48,7 +48,53 @@ class EnsembleResult:
         return self.ensemble.predict(data)
 
     def explain(self, data: ModelData, **kwargs):
-        """Explain final predictions in raw features, replaying fitted transforms."""
+        """Create an explanation report for the final ensemble prediction.
+
+        Parameters
+        ----------
+        data : ModelData
+            Original population to explain, with scoring exposure/offset where
+            applicable. Do not supply encoded or member-transformed matrices.
+            Targets are not used to calculate explanations.
+        background : ModelData, optional
+            Original reference population required for SHAP. May equal data;
+            PDP, ICE, and ALE do not use it.
+        prediction_type : {'response', 'rate', 'link'}, default='response'
+            Scale of the combined prediction. Response includes row exposure
+            where applicable; Poisson rate divides it out. Link is log final
+            response, not log rate. Gamma supports response and link only.
+            Exposure/offset stay fixed per explained row.
+        seed : int, default=42
+            Seed for reproducible row/background sampling, permutation SHAP,
+            and selection of displayed ICE curves.
+        batch_size : int, default=1024
+            Maximum rows per adapter prediction call. Larger values reduce call
+            overhead at higher memory cost; does not cap explained rows.
+        feature_space : {'auto', 'raw', 'processed'}, default='auto'
+            Auto uses raw features for ensembles. Raw interventions replay each
+            member's fitted preprocessing before combining predictions. Processed
+            requires compatible fitted component coordinates across members and
+            raises ValueError for incompatible bases or raw/component overlap.
+            ``report.feature_names`` lists accepted names.
+        progress_callback : callable, optional
+            Receives ``ProgressEvent`` objects at method/prediction boundaries.
+        should_stop : callable, optional
+            Zero-argument callback checked at progress boundaries; returning true
+            raises ``PipelineCancelled``.
+        shap_kwargs : mapping, optional
+            Options forwarded to ``report.shap()``: engine, max_background,
+            max_samples, n_permutations, n_repeats, and weights. A supplied mapping
+            computes SHAP immediately and sets defaults for future SHAP calls.
+            An empty mapping uses SHAP defaults, including all data rows. None
+            keeps construction lazy. Background is required for eager SHAP.
+
+        Returns
+        -------
+        ExplanationReport
+            SHAP, PDP, ICE, and ALE for the final combined prediction. Only the
+            most recent SHAP result is cached in memory. Keep data, background,
+            and report configuration unchanged while reusing the report.
+        """
         from ins_gbm.explanation import ExplanationReport
 
         return ExplanationReport(self, data, **kwargs)

@@ -77,8 +77,30 @@ or manually computed PCA scores to `.explain()`.
 
 The deliberately small SHAP budget is a first-run check. Increase explanation
 rows, reference rows, and permutations after checking runtime and repeat stability.
-All four methods return result objects; calculations happen when the method is
-called, not when `.explain()` constructs the report. Print `.table` for effects,
+All four methods return result objects; by default calculations happen when the
+method is called. To calculate SHAP during `.explain()` and reuse it afterward:
+
+```python
+report = fitted.explain(
+    scoring_data,
+    background=training_reference,
+    shap_kwargs={"max_samples": 100, "max_background": 20, "n_permutations": 2},
+)
+importance = report.shap()  # Already calculated, for all report features.
+importance.plot_dependence("driver_age")
+importance.plot_dependence("vehicle_age")
+```
+
+`shap_kwargs=None` preserves lazy construction; an empty mapping eagerly computes
+SHAP with its normal defaults, including all explanation rows. Supplied options
+become defaults for later `report.shap(...)` calls. Explicit arguments override
+them. The report caches only the most recent SHAP result and reuses it when the
+effective options match, including averaging weights. Changed options recalculate
+SHAP. Treat report data, background, configuration, and cached results as immutable;
+create a new report when they change. Results are retained in memory only.
+PDP, ICE, and ALE do not use SHAP and are still calculated separately on every call.
+
+Print `.table` for effects,
 `.contributions`/`.predictions` for SHAP, and `.settings` to audit the calculation.
 
 ## Coordinates and encodings
@@ -300,7 +322,7 @@ PDP/ICE predictions still use all selected rows as the reference population.
 
 | Call | Main arguments and defaults |
 | --- | --- |
-| `fitted.explain(data, ...)` | `background=None`, `prediction_type="response"`, `seed=42`, `batch_size=1024`, `progress_callback=None`, `should_stop=None` |
+| `fitted.explain(data, ...)` | `background=None`, `prediction_type="response"`, `seed=42`, `batch_size=1024`, `progress_callback=None`, `should_stop=None`, `shap_kwargs=None` |
 | `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None` |
 | `report.pdp(features, ...)` | One/two feature names; `grids=None`, `grid_size=20`, `percentiles=(.05, .95)`, `weights=None`, `max_samples=None` |
 | `report.ice(feature, ...)` | One name; `grid=None`, `grid_size=20`, `percentiles=(.05, .95)`, `centered=False`, `reference=None`, `display_rows=100`, `weights=None`, `max_samples=None` |

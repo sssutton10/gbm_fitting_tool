@@ -211,6 +211,47 @@ def test_native_lightgbm_and_random_forest_shap():
         report.shap(engine="tree")
 
 
+@pytest.mark.parametrize("ensemble", [False, True])
+def test_eager_shap_reuses_results_and_respects_overrides(ensemble):
+    pytest.importorskip("shap")
+    data = population()
+    pipeline = analytic(data, lambda f: 1 + f["x"].to_numpy() + f["z"].to_numpy())
+    model = blend([pipeline, pipeline]) if ensemble else pipeline
+    events = []
+    report = model.explain(data, background=data, progress_callback=events.append,
+                           shap_kwargs={"max_samples": 2, "max_background": 3,
+                                        "n_permutations": 1})
+    assert any(event.message == "shap" for event in events)
+    events.clear()
+    result = report.shap()
+    assert report.shap(max_samples=2) is result
+    assert not events
+    assert result.predictions.height == 2
+    np.testing.assert_allclose(result.predictions["residual"], 0, atol=1e-6)
+    changed = report.shap(max_samples=3)
+    assert changed is not result
+    assert changed.predictions.height == 3
+    assert events
+    assert report.shap(max_samples=3) is changed
+
+
+def test_lazy_shap_cache_and_eager_validation():
+    pytest.importorskip("shap")
+    data = population()
+    pipeline = analytic(data, lambda f: 1 + f["x"].to_numpy())
+    report = pipeline.explain(data, background=data)
+    assert report._shap_cache is None
+    result = report.shap(max_samples=2, n_permutations=1, weights=np.ones(16))
+    assert report.shap(max_samples=2, n_permutations=1, weights=[1.] * 16) is result
+    assert report.shap(max_samples=2, n_permutations=1, weights=np.arange(1, 17)) is not result
+    with pytest.raises(ValueError, match="background"):
+        pipeline.explain(data, shap_kwargs={})
+    with pytest.raises(TypeError, match="shap_kwargs"):
+        pipeline.explain(data, shap_kwargs=True)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        pipeline.explain(data, background=data, shap_kwargs={"typo": 1})
+
+
 def test_categorical_and_pca_shap():
     pytest.importorskip("shap")
     data = population().with_features(population().features.with_columns(pl.Series("region", ["A", "B"] * 8)))
