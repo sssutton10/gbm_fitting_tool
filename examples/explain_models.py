@@ -86,6 +86,20 @@ def main():
     if args.shap:
         pca_report.shap(max_samples=12, max_background=20, n_permutations=2).export(args.output / "pca" / "shap")
 
+    if args.shap and args.native:
+        # Explicitly different target: weighted native member log scores,
+        # not final response-blend SHAP. Native categories and PCA may coexist.
+        boosted_pca = ModelRecipe(
+            model=LightGBMModel(), encoder=OneHotEncoder(),
+            params={"n_estimators": 20, "num_threads": 1, "verbosity": -1},
+            preprocessing=[PreprocessingStep("ages", PCAReducer(1), ["driver_age", "vehicle_age"])],
+        ).fit(training)
+        boosted_blend = EnsemblePipeline([second, boosted_pca], blend_weights=[.6, .4]).run()
+        raw = boosted_blend.explain(population).weighted_member_shap(max_samples=12)
+        print("Weighted member raw-score diagnostic:", raw.summary())
+        print("Limitations:", raw.settings["limitations"])
+        raw.export(args.output / "weighted_member_raw")
+
     # Compact saved pipelines need explicit explanation/reference data, not a refit.
     fitted.save(str(args.output / "saved_model"))
     restored = load_model(str(args.output / "saved_model"))

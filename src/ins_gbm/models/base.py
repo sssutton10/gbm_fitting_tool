@@ -86,6 +86,8 @@ class FittedModel:
         predict_fn (Callable[['ModelData', PredictionType], pl.Series]): Callable that produces predictions on a requested scale.
         importance_fn (Callable[..., pl.DataFrame]): Callable that returns fitted feature importance.
         transform_chain (Optional[Any]): Optional fitted transformations applied before prediction. Optional.
+        native_input_fn (Optional[Callable]): Fitted native tree-input conversion,
+            including training category maps, for raw-score diagnostics. Optional.
     """
 
     model: Any
@@ -96,6 +98,9 @@ class FittedModel:
     predict_fn: Callable[[ModelData, PredictionType], pl.Series]
     importance_fn: Callable[..., pl.DataFrame]
     transform_chain: Any | None = None
+    # Optional fitted conversion to the native tree input (notably LightGBM's
+    # training-only categorical code map). Kept in compact saved artifacts.
+    native_input_fn: Callable[[ModelData], Any] | None = None
 
     def predict(
         self,

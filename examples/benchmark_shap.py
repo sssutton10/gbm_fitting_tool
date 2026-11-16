@@ -59,13 +59,19 @@ def run(args):
 
         member.fitted_model.predict = counted_predict
     started = perf_counter()
-    result = report.shap(engine="permutation", optimize=args.mode == "optimized",
-                         max_samples=args.samples, max_background=args.background,
-                         n_permutations=args.cycles)
+    if args.mode == "weighted":
+        result = report.weighted_member_shap(max_samples=args.samples)
+        # Native model calls bypass the ordinary prediction-counter wrapper.
+        work["actual_member_rows"] = None
+    else:
+        result = report.shap(engine="permutation", optimize=args.mode == "optimized",
+                             max_samples=args.samples, max_background=args.background,
+                             n_permutations=args.cycles)
     elapsed = perf_counter() - started
-    stats = result.settings["cache_statistics"]
+    stats = result.settings.get("cache_statistics", {})
     result.contributions.write_parquet(args.output / f"{args.mode}.parquet")
     return dict(mode=args.mode, seconds=elapsed,
+                explanation_target=result.settings.get("explanation_target", "final_prediction"),
                 peak_process_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
                 **work, **stats)
 
@@ -79,7 +85,9 @@ def main():
     parser.add_argument("--cycles", type=int, default=2)
     parser.add_argument("--trees", type=int, default=300)
     parser.add_argument("--output", type=Path, default=Path("output/shap_benchmark"))
-    parser.add_argument("--mode", choices=["original", "optimized"], help=argparse.SUPPRESS)
+    parser.add_argument("--include-weighted", action="store_true",
+                        help="Also time the different weighted member raw-score target; no SHAP parity comparison")
+    parser.add_argument("--mode", choices=["original", "optimized", "weighted"], help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.features < 4 or min(args.rows, args.samples, args.background, args.cycles, args.trees) < 1:
         parser.error("features must be at least 4; all row counts and cycles must be positive")
@@ -88,7 +96,7 @@ def main():
         print(json.dumps(run(args)))
         return
     results = []
-    for mode in ["original", "optimized"]:
+    for mode in ["original", "optimized"] + (["weighted"] if args.include_weighted else []):
         process = subprocess.run([sys.executable, __file__, *sys.argv[1:], "--mode", mode],
                                  check=True, capture_output=True, text=True)
         result = json.loads(process.stdout.strip().splitlines()[-1])

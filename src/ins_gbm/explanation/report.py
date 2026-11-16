@@ -39,7 +39,8 @@ class ExplanationReport:
         Exposure/offset remain fixed for each row; targets are not consulted.
     background : ModelData, optional
         Explicit SHAP reference population, sampled uniformly, independently
-        of population averaging weights. Required only for SHAP; may equal data.
+        of population averaging weights. Required for shap()/member_shap(); may
+        equal data. The weighted_member_shap() diagnostic does not use it.
     feature_space : {'auto', 'raw', 'processed'}, default='auto'
         Auto uses raw inputs for ensembles and processed components for single
         models. Raw interventions replay each member's fitted transforms.
@@ -572,6 +573,34 @@ class ExplanationReport:
                                    member_framework=member.pipeline.fitted_model.framework)
             results[index] = result
         return results
+
+    def weighted_member_shap(self, *, max_samples=1000, weights=None, group_one_hot=True):
+        """Fast weighted native raw-score diagnostic for a fixed boosted blend.
+
+        Uses model-specific tree-path-dependent Tree SHAP, without an explicit
+        background. Sums signed contributions and baselines using the fitted
+        blend weights; absent coordinates contribute zero. ``weights`` controls
+        population summary averaging, not model weights. ``max_samples`` caps
+        explained records (default 1000; None selects all). ``group_one_hot``
+        sums surviving original-variable indicators for display; False retains
+        member-qualified indicator coordinates.
+
+        This explicitly explains the weighted sum of member log scores with
+        scoring exposure/offset removed, not the final arithmetic response blend
+        or its logarithm. Different model-specific path references and indicator
+        grouping do not define a common raw-feature SHAP game. PCA/other fitted
+        component coordinates stay member-qualified, including identical names
+        across different fitted bases; no redistribution to raw sources occurs.
+
+        Supports LightGBM, XGBoost and CatBoost Poisson/Gamma fixed blends.
+        Mixed raw scales, stacking and custom ensemble combinations raise.
+        Parent prediction_type/feature_space/background and shap_kwargs do not
+        change this diagnostic. Returns a labeled ShapResult with normal summary,
+        plots, segment summaries, and export. No permutation fallback is used.
+        """
+        from .weighted import weighted_member_shap
+        return weighted_member_shap(self, max_samples=max_samples, weights=weights,
+                                    group_one_hot=group_one_hot)
 
     def _compute_shap(self, *, engine="auto", max_background=100, max_samples=None, n_permutations=20,
              n_repeats=1, weights=None, optimize="auto", cache_max_rows=10000):

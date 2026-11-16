@@ -57,8 +57,8 @@ class EnsembleResult:
             applicable. Do not supply encoded or member-transformed matrices.
             Targets are not used to calculate explanations.
         background : ModelData, optional
-            Original reference population required for SHAP. May equal data;
-            PDP, ICE, and ALE do not use it.
+            Original reference population required for shap()/member_shap().
+            May equal data; PDP, ICE, ALE, and weighted_member_shap() do not use it.
         prediction_type : {'response', 'rate', 'link'}, default='response'
             Scale of the combined prediction. Response includes row exposure
             where applicable; Poisson rate divides it out. Link is log final

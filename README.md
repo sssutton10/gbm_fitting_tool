@@ -324,8 +324,29 @@ core dependencies. To try every method on generated data:
 or Gamma severity. `rate` is Poisson-only; `link` means log final response.
 Ensemble scaling happens after combining member predictions. One-hot and native
 categories share their original feature name. PCA effects belong to processed
-scores such as `ages__pca_1`; ensemble members must have compatible fitted PCA
-bases. An explicit SHAP background defines the comparison population.
+scores such as `ages__pca_1` in processed space. Ensembles default to raw space
+and support different PCA bases and PCA/direct-input overlap; only processed
+ensemble coordinates require compatible fitted bases. An explicit SHAP background
+defines the comparison population for final-ensemble explanations.
+
+For a faster, explicitly different diagnostic on a fixed LightGBM/XGBoost/CatBoost
+blend, use:
+
+```python
+raw_diagnostic = ensemble.explain(training).weighted_member_shap(max_samples=1000)
+print(raw_diagnostic.summary())
+print(raw_diagnostic.settings["limitations"])
+raw_diagnostic.export("output/explanations/weighted_member_raw")
+```
+
+This weights signed native member **log-score** contributions, inserts zero for
+absent coordinates, and sums one-hot indicators for display. It explains a
+weighted log-score diagnostic, **not the final response blend or its logarithm**.
+PCA components stay member-qualified rather than being redistributed to raw
+features. It uses model-specific tree-path references without a supplied
+background, excludes scoring exposure/offset, and never falls back to permutation.
+Random Forest/mixed native scales and stackers are unsupported. Use `.shap()`
+for the actual final prediction; `.member_shap()` returns separate member results.
 
 See the [complete guide](docs/explanations.md) for interpretation, sampling,
 weighting, saved models, output schemas, and troubleshooting. Keep the final

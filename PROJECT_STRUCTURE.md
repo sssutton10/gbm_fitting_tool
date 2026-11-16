@@ -83,7 +83,8 @@ At a high level, the tool does this:
 7. Optionally export reports, persist the fitted pipeline, or combine fitted
    pipelines with blending or stacking.
 8. Explain fitted pipelines or final ensembles with SHAP, PDP, ICE, and ALE,
-   using original feature data and an explicit SHAP reference population.
+   using original feature data and an explicit reference for final-prediction
+   SHAP. Weighted member raw-score diagnostics use model-specific tree paths.
 
 The main package is:
 
@@ -159,7 +160,8 @@ Optional extras declared in `pyproject.toml`:
 - `all`: installs all optional modeling and explainability dependencies.
 - `dev`: installs pytest-related development dependencies.
 
-The `explain` extra enables `ExplanationReport.shap()`. SHAP is imported only
+The `explain` extra enables `ExplanationReport.shap()`, `member_shap()`, and
+`weighted_member_shap()`. SHAP is imported only
 when requested; PDP, ICE, and ALE use core dependencies. `all` includes `explain`.
 Run `./.venv/bin/python examples/explain_models.py` for a core-dependency demo,
 or add `--shap --native` after installing SHAP and LightGBM.
@@ -219,8 +221,10 @@ src/ins_gbm/
     explanation/
         __init__.py
         adapter.py
+        cached.py
         report.py
         results.py
+        weighted.py
     ensemble/
         __init__.py
         _utils.py
@@ -1497,24 +1501,41 @@ values = explanations.shap(max_samples=20, max_background=20, n_permutations=2)
 values.export("output/explanations/shap")
 ```
 
-The same calls work on `EnsembleResult`; no member-explanation aggregation API
-is needed. SHAP requires an explicit reference population and optional SHAP
-installation; other methods need neither. Outcome values are not scored.
+The same calls work on `EnsembleResult`. Final-prediction `.shap()` requires an
+explicit reference population and optional SHAP installation; PDP/ICE/ALE need
+neither. Outcome values are not scored. `member_shap()` returns separate member
+results. `weighted_member_shap()` is an explicit fast fixed boosted-blend
+diagnostic using model-specific tree-path references without a background.
 
 The adapter in `explanation/adapter.py` constructs a common feature space of
 whole raw categorical variables, unchanged numeric inputs, and processed reducer
 outputs. It reconstructs each member's fitted matrix while preserving native
 categorical preparation. PCA outputs retain their own importance, names, and
-lineage/loadings. An ensemble rejects incompatible fitted bases and raw/PCA
-mixtures rather than conflating unrelated components.
+lineage/loadings. Ensembles default to raw coordinates and support incompatible
+fitted bases and PCA/direct-input overlap by replaying each fitted chain.
+Only processed-space ensembles reject incompatible bases/raw-component overlap.
 
 `explanation/report.py` evaluates the final prediction function before converting
 to response/rate/link scales. Exposure and offset remain fixed per explained row.
 General permutation SHAP explains this function directly; eligible individual
-numeric models can use interventional Tree SHAP with affine context corrections.
+numeric models and fixed numeric Random Forest blends can use interventional
+Tree SHAP with affine context corrections. `cached.py` implements bounded
+row-local encoding/PCA/PLS/member caches, selected against ordinary inference
+by an automatic pilot. `inspect_shap()` previews structural eligibility/work.
 Every result checks reference plus contributions against its selected-scale
 prediction. Two-variable PDP shows a joint response surface; two-variable numeric
 ALE removes lower-order effects. Nominal categorical ALE is unsupported.
+
+`weighted.py` combines signed native LightGBM/XGBoost/CatBoost log-score SHAP
+values and baselines using fixed blend weights, with zero for absent coordinates.
+One-hot columns are display-grouped; components stay member-qualified even when
+names match across different fitted bases. Its target is the weighted sum of
+member log scores with scoring exposure/offset excluded, not the response blend
+or its logarithm. Per-model tree-path references do not define a common-background
+raw-feature ensemble game. These limitations are stored in settings and visible
+in plot labels. Native failures raise without permutation fallback. Newly saved
+LightGBM models retain their fitted native category input conversion in
+`FittedModel.native_input_fn`; legacy numeric artifacts have a numeric fallback.
 
 `explanation/results.py` provides Polars tables, summaries, plots, and separate
 CSV/JSON/PNG/SVG exports. These are independent of model persistence and

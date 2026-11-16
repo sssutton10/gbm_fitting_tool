@@ -25,7 +25,7 @@ class Member:
 class PredictionAdapter:
     """Explain raw inputs or compatible processed scores, keeping categories whole."""
 
-    def __init__(self, fitted, data, prediction_type, feature_space="auto"):
+    def __init__(self, fitted, data, prediction_type, feature_space="auto", *, _prepared=None):
         self.fitted = fitted
         self.data = data
         self.ensemble = getattr(fitted, "ensemble", None)
@@ -37,6 +37,8 @@ class PredictionAdapter:
             raise ValueError("feature_space must be auto, raw, or processed")
         default_space = "raw" if self.ensemble is not None else "processed"
         self.feature_space = default_space if feature_space == "auto" else feature_space
+        if _prepared is not None and (self.ensemble is not None or self.feature_space != "processed"):
+            raise ValueError("Precomputed diagnostic metadata requires a single processed pipeline")
         self.members = []
         self.metadata = {}
         self._definitions = {}
@@ -45,7 +47,7 @@ class PredictionAdapter:
             self._initialize_raw(pipelines)
             return
         for index, pipeline in enumerate(pipelines):
-            prepared = pipeline._prepare_data(data)
+            prepared = _prepared if _prepared is not None else pipeline._prepare_data(data)
             encoder = pipeline.encoder
             if encoder is not None and not isinstance(encoder, FittedOneHotEncoder):
                 raise ValueError("Explanation requires the built-in encoder or no encoder")
@@ -129,7 +131,9 @@ class PredictionAdapter:
         self.names = list(self.metadata)
         if not self.names:
             raise ValueError("No diagnostic features available")
-        self.frame = self.transform(data)
+        # Native diagnostics only need coordinate metadata: reuse their already
+        # prepared matrix without transforming all selected rows again.
+        self.frame = None if _prepared is not None else self.transform(data)
 
     def _initialize_raw(self, pipelines):
         # Share the final-column lineage used by raw permutation importance.

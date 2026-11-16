@@ -207,6 +207,10 @@ class ShapResult:
     settings: dict
     weights: np.ndarray = field(repr=False)
 
+    def _label_plot(self, ax):
+        if self.settings.get("display_label"):
+            ax.set_title(self.settings["display_label"])
+
     def _grouped(self, groups=None):
         frame = self.contributions
         if not groups:
@@ -320,6 +324,7 @@ class ShapResult:
         fig, ax = plt.subplots(figsize=(8, max(4, table.height * .3)))
         ax.barh(table["feature"], table["mean_abs_contribution"])
         ax.set_xlabel(f"Mean absolute SHAP contribution ({self.settings['units']})")
+        self._label_plot(ax)
         return _save(fig, output_path)
 
     def plot_beeswarm(self, top_n=20, output_path=None):
@@ -367,6 +372,7 @@ class ShapResult:
         ax.set_yticks(range(len(names)), names)
         ax.axvline(0, color="gray", linewidth=.7)
         ax.set_xlabel(f"SHAP contribution ({self.settings['units']}); color = feature value/level")
+        self._label_plot(ax)
         return _save(fig, output_path)
 
     def plot_waterfall(self, row=0, repeat=0, top_n=20, output_path=None):
@@ -413,8 +419,9 @@ class ShapResult:
         ax.barh(labels, values, left=starts, color=np.where(values >= 0, "tomato", "steelblue"))
         ax.axvline(base, color="gray", linestyle="--", label=f"Reference {base:.5g}")
         final = pred["prediction"][0]
-        ax.axvline(final, color="black", label=f"Prediction {final:.5g}")
+        ax.axvline(final, color="black", label=f"{self.settings.get('score_label', 'Prediction')} {final:.5g}")
         ax.set_xlabel(self.settings["units"])
+        self._label_plot(ax)
         ax.legend()
         return _save(fig, output_path)
 
@@ -466,6 +473,7 @@ class ShapResult:
             ax.set_xticks(range(len(labels)), labels, rotation=45, ha="right")
         ax.set_xlabel(feature)
         ax.set_ylabel(f"SHAP contribution ({self.settings['units']})")
+        self._label_plot(ax)
         return _save(fig, output_path)
 
     def export(self, directory):

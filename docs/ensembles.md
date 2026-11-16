@@ -609,6 +609,21 @@ predictions. `report.member_shap(engine="tree", prediction_type="link", ...)`
 provides separate member diagnostics where supported, retaining each member's
 processed component coordinates. These do not explain the final blend.
 
+For an aggregated fast diagnostic of a fixed boosted blend, explicitly select
+`report.weighted_member_shap(max_samples=1000)`. It aligns and weights **signed**
+member log-score contributions, fills absent coordinates with zero, sums one-hot
+indicators for display, and keeps components as `member[0]::ages__pca_1`, etc.
+Different feature subsets, native/one-hot categories, different fitted bases,
+and PCA/direct-input overlap are supported. The target is the weighted sum of
+context-free member log scores, not the arithmetic response blend or its log.
+It uses each member's tree-path reference; no explicit background is used and
+there is no permutation fallback. Scoring exposure/offset are excluded. Fixed
+weights do not measure row-specific response-scale influence, and indicator
+grouping is not a recomputed original-category SHAP game. Only fixed
+LightGBM/XGBoost/CatBoost Poisson/Gamma blends are supported; stackers and Random
+Forest/mixed raw scales raise. See [weighted member diagnostics](explanations.md#weighted-member-raw-score-diagnostic)
+for options, interpretation, and export labels.
+
 Use `feature_space="processed"` to explain component scores instead. In that
 mode, members must share compatible fitted input order, upstream transforms,
 scaler, loadings, and output names/order. Different subsets of a shared basis

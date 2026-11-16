@@ -89,6 +89,13 @@ src/ins_gbm/
   `inspect_shap()` previews eligibility; `member_shap()` keeps member scales and
   component coordinates separate from final ensemble attributions. This engine is separate
   from the existing deviance-based permutation-importance diagnostic.
+- `weighted_member_shap()` is an explicit fixed boosted-blend diagnostic, not
+  final-prediction SHAP. It weights signed native log-score values/baselines,
+  sums one-hot columns for display, and retains member-qualified components.
+  Tree-path references are model-specific; scoring exposure/offset are removed.
+  Require supported LightGBM/XGBoost/CatBoost members; no permutation fallback.
+  Use fitted native category maps, never infer them from explanation rows.
+  Record limitations in exports and label plots as raw-score diagnostics.
 - Return `ShapResult`/`EffectResult` with Polars tables and independent exports.
   Model `.save()` and `EvaluationReport.export()` do not include explanations.
   SHAP imports lazily from the optional `explain` extra; PDP/ICE/ALE use core deps.

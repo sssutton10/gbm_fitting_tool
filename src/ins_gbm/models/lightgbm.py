@@ -303,4 +303,6 @@ class LightGBMModel:
             predict_fn=_predict,
             importance_fn=_importance,
             transform_chain=transform_result.chain,
+            native_input_fn=lambda prepared: _categorical_matrix(
+                prepared.features, feature_names, category_codes),
         )

@@ -266,8 +266,9 @@ class FittedPipeline:
             scoring. Do not pass encoded matrices or ``fitted.train_data``.
             Targets are not used to calculate explanations.
         background : ModelData, optional
-            Original reference population for SHAP; required only when SHAP is
-            calculated. May equal data. PDP, ICE, and ALE do not use it.
+            Original reference population for shap()/member_shap(). May equal
+            data. PDP, ICE, ALE, and the ensemble weighted_member_shap()
+            diagnostic do not use it.
         prediction_type : {'response', 'rate', 'link'}, default='response'
             Prediction scale to explain. Response includes row exposure where
             applicable; rate removes it for Poisson models. Link is log final

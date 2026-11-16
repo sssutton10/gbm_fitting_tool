@@ -360,6 +360,94 @@ before masking/caching shortcuts. Ensembles also evaluate their members. Start
 small on wide datasets. `batch_size` limits prediction-call size; it does not
 cap the number of rows calculated or retained in result tables.
 
+## Weighted member raw-score diagnostic
+
+For a fixed-weight Poisson/Gamma blend of LightGBM, XGBoost and/or CatBoost,
+`weighted_member_shap()` provides an explicit fast alternative interpretation:
+
+```python
+report = ensemble.explain(scoring_data)  # original ModelData; no background needed
+diagnostic = report.weighted_member_shap(max_samples=1000, group_one_hot=True)
+print(diagnostic.summary())
+print(diagnostic.settings["limitations"])
+diagnostic.plot_waterfall(row=0)
+diagnostic.plot_dependence("driver_age")  # if present as a direct input
+diagnostic.export("output/explanations/weighted_member_raw")
+```
+
+If `g_m(x)` is a member's context-free log prediction, this diagnostic reconstructs
+`D(x) = sum(w_m * g_m(x))` using the fitted blend weights, with scoring exposure
+and offset removed. Its baseline is the weighted sum of native member baselines;
+its feature contributions are the weighted sum of **signed** native values.
+Coordinates absent from a member receive zero. Importance is computed after
+aggregation, so opposing member contributions can cancel. Weights are used as
+stored (in inference precision), never renormalized. If they sum to one,
+`exp(D(x))` is a weighted geometric mean of context-free member responses.
+
+This is useful for fast feature ranking, direction, dependence plots, and model
+audits. It does **not** explain `sum(w_m * exp(g_m(x)))`, its logarithm, or the
+public response prediction with exposure/offset. A high-response member can
+have more influence on the arithmetic blend than this fixed-weight log-score
+diagnostic reflects. There is no per-feature conversion of these contributions
+into exact response-blend SHAP values.
+
+The reference method is deliberately **tree-path-dependent**, using each fitted
+model's training tree statistics, to support native categorical splits without
+permutation SHAP. These references differ by member; the result is not SHAP of
+the ensemble under one common empirical background and one raw-feature game.
+Any `background` passed to `.explain()` is unused. The parent's `prediction_type`,
+`feature_space`, and `shap_kwargs` do not change this method's target or budget.
+Use `.shap(engine="permutation", ...)` for final-ensemble SHAP against a common
+raw-feature background, or `.member_shap(...)` for separate member diagnostics.
+
+By default, surviving one-hot column contributions are summed into their
+original variable for display, including indicators that are zero in a row.
+Native categorical contributions and grouped indicators then share that raw
+variable label. This preserves additive totals but generally differs from
+masking an original categorical variable as one indivisible SHAP player:
+independent indicator games can include invalid encoded combinations and
+allocate interaction credit differently. Set `group_one_hot=False` to retain
+indicators as member-qualified coordinates instead.
+
+PCA, PLS, UMAP, and other supported fitted reducer outputs stay in coordinates
+such as `member[0]::ages__pca_1`. They are never aligned by component name alone
+or redistributed using loadings. Different fitted bases remain separate. If
+age feeds PCA in one model and enters another directly, the diagnostic contains
+both a member-qualified component and direct age contribution. A zero direct-age
+contribution from the PCA member does not mean age is unused by that member.
+
+Options are `max_samples=1000` (None selects all records), `weights=None`
+(summary averaging weights aligned to the full original population, or
+`"uniform"`), and `group_one_hot=True`. `weights` does not override fitted model
+weights. Selection uses the report seed, and native calls use its `batch_size`
+and progress/cancellation callbacks. There are no permutations or repeats.
+Native SHAP remains potentially expensive for large/deep models and many rows.
+
+The method requires the `explain` extra and installed member backends. It rejects
+single models, stackers/custom combinations, Random Forest response-score
+members, invalid blend weights, and unsupported native output shapes/scales.
+It verifies native reconstruction, the wrapper's context-free intercept
+convention, and weighted-score reconstruction. Native failures raise; there is
+no automatic permutation fallback. Compact newly saved artifacts retain fitted
+LightGBM category maps. Legacy numeric artifacts work; a legacy native-category
+LightGBM artifact without its input adapter requires refitting/resaving rather
+than relearning category codes from scoring rows.
+
+The result is a normal `ShapResult` supporting summaries, segment summaries,
+dependence/importance/beeswarm/waterfall plots, and CSV/JSON/PNG/SVG export.
+`predictions["prediction"]` holds **D(x), not the ensemble response**. Settings
+record `explanation_target="weighted_member_raw"`, the score units, fixed weights,
+member coordinate mappings, references, baselines, intercept adjustments, and
+limitations. Plot titles and axes explicitly identify the raw-score diagnostic;
+the waterfall's final marker says "Diagnostic score".
+
+The standalone demo includes this diagnostic when run with `--shap --native`.
+The usage notebook contains an optional three-backend example with mixed PCA
+and direct inputs. To benchmark its different target alongside final-prediction
+permutation SHAP, run `examples/benchmark_shap.py --include-weighted` with the
+repository Python interpreter; contribution parity is checked only between the
+two final-prediction permutation paths, never across different targets.
+
 ## PDP, ICE, and ALE settings
 
 PDP accepts one or two variables, including categories and processed components.
@@ -415,6 +503,7 @@ PDP/ICE predictions still use all selected rows as the reference population.
 | `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None`, `optimize="auto"`, `cache_max_rows=10000` |
 | `report.inspect_shap(...)` | Same options/defaults as `shap`; inspect structural eligibility and nominal work |
 | `report.member_shap(...)` | `prediction_type="link"`, `feature_space="processed"`, plus `shap` options |
+| `report.weighted_member_shap(...)` | `max_samples=1000`, `weights=None`, `group_one_hot=True`; fixed boosted blends only; model-specific tree-path references |
 | `report.pdp(features, ...)` | One/two feature names; `grids=None`, `grid_size=20`, `percentiles=(.05, .95)`, `weights=None`, `max_samples=None` |
 | `report.ice(feature, ...)` | One name; `grid=None`, `grid_size=20`, `percentiles=(.05, .95)`, `centered=False`, `reference=None`, `display_rows=100`, `weights=None`, `max_samples=None` |
 | `report.ale(features, ...)` | One/two numeric names; `bins=None` (20 or 10 per axis), `edges=None`, `weights=None`, `max_samples=None`, `xlim=None` |
