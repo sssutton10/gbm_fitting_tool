@@ -574,7 +574,7 @@ class ExplanationReport:
             results[index] = result
         return results
 
-    def weighted_member_shap(self, *, max_samples=1000, weights=None, group_one_hot=True):
+    def weighted_member_shap(self, *, max_samples=1000, weights=None, group_one_hot=True, n_threads=None):
         """Fast weighted native raw-score diagnostic for a fixed boosted blend.
 
         Uses model-specific tree-path-dependent Tree SHAP, without an explicit
@@ -584,6 +584,14 @@ class ExplanationReport:
         explained records (default 1000; None selects all). ``group_one_hot``
         sums surviving original-variable indicators for display; False retains
         member-qualified indicator coordinates.
+
+        ``n_threads`` is a positive integer native thread count per member;
+        None preserves backend defaults. Members execute sequentially. Explicit
+        counts cover native SHAP, input construction, and native predictions.
+        Current wrappers also honor it for verification; legacy saved callbacks
+        retain their fitted verification thread settings (recorded in metadata).
+        Preprocessing/Polars pools are independent. Fitted model settings are
+        unchanged; XGBoost uses a temporary booster copy for an explicit count.
 
         This explicitly explains the weighted sum of member log scores with
         scoring exposure/offset removed, not the final arithmetic response blend
@@ -600,7 +608,7 @@ class ExplanationReport:
         """
         from .weighted import weighted_member_shap
         return weighted_member_shap(self, max_samples=max_samples, weights=weights,
-                                    group_one_hot=group_one_hot)
+                                    group_one_hot=group_one_hot, n_threads=n_threads)
 
     def _compute_shap(self, *, engine="auto", max_background=100, max_samples=None, n_permutations=20,
              n_repeats=1, weights=None, optimize="auto", cache_max_rows=10000):

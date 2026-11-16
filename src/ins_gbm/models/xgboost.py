@@ -140,7 +140,7 @@ class XGBoostModel:
         feature_names = list(data.feature_names)
         has_training_margin = base_margin is not None
 
-        def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
+        def _predict(pred_data: ModelData, prediction_type: str, *, n_threads=None, _native_model=None) -> pl.Series:
             """Predict from the fitted estimator on the requested scale.
 
             Args:
@@ -162,7 +162,7 @@ class XGBoostModel:
             )
 
             dtest_kwargs = {
-                "nthread": matrix_threads,
+                "nthread": matrix_threads if n_threads is None else n_threads,
                 "feature_names": feature_names,
                 "missing": _NUMERIC_FILL,
             }
@@ -174,7 +174,11 @@ class XGBoostModel:
                     else np.zeros(pred_data.n_rows, dtype=np.float32)
                 )
             dtest = xgb.DMatrix(X_pred, **dtest_kwargs)
-            link = booster.predict(dtest, output_margin=True)
+            prediction_model = booster if _native_model is None else _native_model
+            if n_threads is not None and _native_model is None:
+                prediction_model = booster.copy()
+                prediction_model.set_param({"nthread": n_threads})
+            link = prediction_model.predict(dtest, output_margin=True)
             if not has_training_margin and pred_margin is not None:
                 # A new offset adds to the learned intercept rather than
                 # replacing it through DMatrix.base_margin.

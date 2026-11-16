@@ -610,7 +610,8 @@ provides separate member diagnostics where supported, retaining each member's
 processed component coordinates. These do not explain the final blend.
 
 For an aggregated fast diagnostic of a fixed boosted blend, explicitly select
-`report.weighted_member_shap(max_samples=1000)`. It aligns and weights **signed**
+`report.weighted_member_shap(max_samples=1000, n_threads=8)` on an 8-core machine.
+It aligns and weights **signed**
 member log-score contributions, fills absent coordinates with zero, sums one-hot
 indicators for display, and keeps components as `member[0]::ages__pca_1`, etc.
 Different feature subsets, native/one-hot categories, different fitted bases,
@@ -623,6 +624,13 @@ grouping is not a recomputed original-category SHAP game. Only fixed
 LightGBM/XGBoost/CatBoost Poisson/Gamma blends are supported; stackers and Random
 Forest/mixed raw scales raise. See [weighted member diagnostics](explanations.md#weighted-member-raw-score-diagnostic)
 for options, interpretation, and export labels.
+
+`n_threads` controls native threading within each sequential member (None keeps
+backend defaults; otherwise use a positive integer), not OOF `n_jobs` or
+`threads_per_worker`. Native SHAP and verification calls in current wrappers
+honor it without changing fitted models; XGBoost uses a reusable temporary
+booster copy. Older saved callbacks retain their own verification thread policy,
+which is disclosed per member in settings. Preprocessing pools are independent.
 
 Use `feature_space="processed"` to explain component scores instead. In that
 mode, members must share compatible fitted input order, upstream transforms,

@@ -1536,6 +1536,13 @@ raw-feature ensemble game. These limitations are stored in settings and visible
 in plot labels. Native failures raise without permutation fallback. Newly saved
 LightGBM models retain their fitted native category input conversion in
 `FittedModel.native_input_fn`; legacy numeric artifacts have a numeric fallback.
+The diagnostic's `n_threads=None` preserves backend defaults; a positive integer
+sets per-member native SHAP/input/prediction thread counts with sequential member
+execution. LightGBM/CatBoost use per-call arguments and XGBoost uses one temporary
+booster copy, leaving fitted thread settings unchanged. Current verification
+callbacks honor this inference override; legacy callbacks keep their fitted
+verification policy and disclose it in member metadata. Preprocessing pools
+remain independent. This differs from ensemble fitting's worker-level threading.
 
 `explanation/results.py` provides Polars tables, summaries, plots, and separate
 CSV/JSON/PNG/SVG exports. These are independent of model persistence and

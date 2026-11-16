@@ -5,6 +5,7 @@ for SHAP of the final response blend on a common raw-feature/background game.
 """
 
 from dataclasses import replace
+from inspect import signature
 from time import perf_counter
 
 import numpy as np
@@ -19,7 +20,7 @@ from .adapter import PredictionAdapter
 from .results import ShapResult
 
 
-def _native_input(fitted, prepared):
+def _native_input(fitted, prepared, n_threads=None):
     names = fitted.feature_names
     if fitted.framework == "lightgbm":
         converter = getattr(fitted, "native_input_fn", None)
@@ -37,27 +38,51 @@ def _native_input(fitted, prepared):
         import xgboost as xgb
         return xgb.DMatrix(frame_to_fit_array(prepared.features, names), feature_names=names,
                            missing=_NUMERIC_FILL,
-                           nthread=fitted.params.get("nthread", fitted.params.get("n_jobs", -1)))
+                           nthread=(fitted.params.get("nthread", fitted.params.get("n_jobs", -1))
+                                    if n_threads is None else n_threads))
     from catboost import Pool
     from ins_gbm.models.catboost import _pool_matrix
     categorical = [names[i] for i in fitted.model.get_cat_feature_indices()]
+    thread_kwargs = {} if n_threads is None else {"thread_count": n_threads}
     return Pool(_pool_matrix(prepared.features, names, categorical),
-                feature_names=names, cat_features=categorical)
+                feature_names=names, cat_features=categorical, **thread_kwargs)
 
 
-def _native_raw(fitted, inputs):
+def _native_raw(fitted, inputs, n_threads=None, model=None):
+    model = fitted.model if model is None else model
     if fitted.framework == "lightgbm":
-        return fitted.model.predict(inputs, raw_score=True)
+        kwargs = {} if n_threads is None else {"num_threads": n_threads}
+        return model.predict(inputs, raw_score=True, **kwargs)
     if fitted.framework == "xgboost":
-        return fitted.model.predict(inputs, output_margin=True)
-    return fitted.model.predict(inputs, prediction_type="RawFormulaVal")
+        return model.predict(inputs, output_margin=True)
+    kwargs = {} if n_threads is None else {"thread_count": n_threads}
+    return model.predict(inputs, prediction_type="RawFormulaVal", **kwargs)
 
 
-def weighted_member_shap(report, *, max_samples, weights, group_one_hot):
+def _threaded_shap(fitted, inputs, model, n_threads):
+    """Native Tree SHAP entry points used by SHAP, with explicit thread knobs."""
+    if fitted.framework == "lightgbm":
+        output = model.predict(inputs, pred_contrib=True, num_threads=n_threads)
+    elif fitted.framework == "xgboost":
+        output = model.predict(inputs, pred_contribs=True, approx_contribs=False)
+    else:
+        output = model.get_feature_importance(inputs, type="ShapValues", thread_count=n_threads)
+    output = np.asarray(output, dtype=float)
+    if output.ndim != 2 or output.shape[1] != len(fitted.feature_names) + 1:
+        raise ValueError("Unsupported native threaded SHAP output shape")
+    if not np.allclose(output[:, -1], output[0, -1], atol=1e-6, rtol=2e-5):
+        raise ValueError("Native tree-path SHAP requires a constant member baseline")
+    return output[:, :-1], output[0, -1:]
+
+
+def weighted_member_shap(report, *, max_samples, weights, group_one_hot, n_threads=None):
     if type(report.adapter.ensemble) is not FittedBlendingEnsemble:
         raise ValueError("weighted_member_shap requires a fixed-weight blend, not stacking or a single model")
     if not isinstance(group_one_hot, bool):
         raise ValueError("group_one_hot must be a bool")
+    if n_threads is not None:
+        from .report import _positive_integer
+        n_threads = _positive_integer(n_threads, "n_threads")
     members = report.adapter.members
     if any(m.pipeline.fitted_model.framework not in {"lightgbm", "xgboost", "catboost"} for m in members):
         raise ValueError("weighted_member_shap requires boosted LightGBM/XGBoost/CatBoost members on raw log scales; "
@@ -75,7 +100,7 @@ def weighted_member_shap(report, *, max_samples, weights, group_one_hot):
         raise ImportError("SHAP explanations require ins_gbm[explain] (pip install 'ins_gbm[explain]')") from exc
 
     started = perf_counter()
-    report._event("weighted_member_shap", 0, len(members))
+    report._event("weighted_member_shap", 0, len(members), n_threads=n_threads)
     columns, metadata, contributions = {}, {}, {}
     baselines, predictions = np.zeros(len(indices)), np.zeros(len(indices))
     member_settings = []
@@ -117,26 +142,51 @@ def weighted_member_shap(report, *, max_samples, weights, group_one_hot):
                 metadata[label]["members"].append(index)
             metadata[label]["encoded_columns"].setdefault(str(index), []).append(model_column)
 
-        explainer = shap.TreeExplainer(fitted.model, model_output="raw",
-                                       feature_perturbation="tree_path_dependent",
-                                       feature_names=fitted.feature_names)
+        native_model = fitted.model
+        if n_threads is not None and fitted.framework == "xgboost":
+            # XGBoost's prediction API has no per-call thread argument. Copy
+            # once per diagnostic/member, never mutate a shared fitted booster.
+            native_model = fitted.model.copy()
+            native_model.set_param({"nthread": n_threads})
+        explainer = None if n_threads is not None else shap.TreeExplainer(
+            fitted.model, model_output="raw", feature_perturbation="tree_path_dependent",
+            feature_names=fitted.feature_names)
+        verification_kwargs = {}
+        verification_control = "backend_defaults"
+        if n_threads is not None:
+            params = signature(fitted.predict_fn).parameters
+            if "n_threads" in params:
+                verification_kwargs["n_threads"] = n_threads
+                if fitted.framework == "xgboost" and "_native_model" in params:
+                    verification_kwargs["_native_model"] = native_model
+                verification_control = "explicit"
+            else:
+                # Compact older artifacts pickle their original callbacks.
+                # Preserve compatibility, and disclose this small verification
+                # pass's inherited thread policy rather than ignoring it.
+                verification_control = "legacy_backend_defaults"
         adjustment = None
         member_bases = []
         for start in range(0, len(indices), report.batch_size):
             stop = min(start + report.batch_size, len(indices))
-            report._event("weighted_member_shap_batch", start, len(indices), member_index=index)
+            report._event("weighted_member_shap_batch", start, len(indices), member_index=index,
+                          n_threads=n_threads, verification_thread_control=verification_control)
             batch = slice_model_data(prepared, list(range(start, stop)))
-            inputs = _native_input(fitted, batch)
-            values = np.asarray(explainer.shap_values(inputs, check_additivity=True), dtype=float)
-            base = np.asarray(explainer.expected_value, dtype=float).reshape(-1)
+            inputs = _native_input(fitted, batch, n_threads)
+            if n_threads is not None:
+                values, base = _threaded_shap(fitted, inputs, native_model, n_threads)
+            else:
+                values = np.asarray(explainer.shap_values(inputs, check_additivity=True), dtype=float)
+                base = np.asarray(explainer.expected_value, dtype=float).reshape(-1)
             if values.shape != (stop - start, len(fitted.feature_names)) or base.size != 1:
                 raise ValueError(f"Unsupported native raw SHAP output for member {index}")
-            native = np.asarray(_native_raw(fitted, inputs), dtype=float).reshape(-1)
+            native = np.asarray(_native_raw(fitted, inputs, n_threads, native_model), dtype=float).reshape(-1)
             if not np.allclose(native, base[0] + values.sum(axis=1), atol=1e-6, rtol=2e-5):
                 raise ValueError(f"Native raw SHAP reconstruction failed for member {index}")
             # Match the wrapper's context-free intercept convention (XGBoost
             # training base margins can replace the native learned intercept).
-            actual = fitted.predict_fn(replace(batch, exposure=None, offset=None), "link").to_numpy().astype(float)
+            actual = fitted.predict_fn(replace(batch, exposure=None, offset=None), "link",
+                                       **verification_kwargs).to_numpy().astype(float)
             delta = actual - native
             if adjustment is None:
                 adjustment = float(delta[0])
@@ -151,6 +201,7 @@ def weighted_member_shap(report, *, max_samples, weights, group_one_hot):
             predictions[start:stop] += weight * actual
             member_bases.append(baseline)
         member_settings.append(dict(member_index=index, framework=fitted.framework,
+                                    n_threads=n_threads, verification_thread_control=verification_control,
                                     weight=float(weight), coordinate_mapping=mapping,
                                     raw_baselines_by_batch=member_bases,
                                     wrapper_intercept_adjustment=adjustment))
@@ -181,6 +232,7 @@ def weighted_member_shap(report, *, max_samples, weights, group_one_hot):
         background_distribution="Model-specific training tree paths; supplied background is not used",
         shap_version=shap.__version__, members=member_settings, blend_weights=blend_weights.tolist(),
         group_one_hot=group_one_hot, n_repeats=1, limitations=limits,
+        n_threads=n_threads, execution="sequential_members_native_threads",
         elapsed_seconds=perf_counter() - started,
     )
     table = pl.DataFrame(dict(repeat=np.zeros(len(indices) * len(names), dtype=int),

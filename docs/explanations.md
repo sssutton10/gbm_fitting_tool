@@ -367,7 +367,7 @@ For a fixed-weight Poisson/Gamma blend of LightGBM, XGBoost and/or CatBoost,
 
 ```python
 report = ensemble.explain(scoring_data)  # original ModelData; no background needed
-diagnostic = report.weighted_member_shap(max_samples=1000, group_one_hot=True)
+diagnostic = report.weighted_member_shap(max_samples=1000, group_one_hot=True, n_threads=8)
 print(diagnostic.summary())
 print(diagnostic.settings["limitations"])
 diagnostic.plot_waterfall(row=0)
@@ -422,6 +422,32 @@ Options are `max_samples=1000` (None selects all records), `weights=None`
 weights. Selection uses the report seed, and native calls use its `batch_size`
 and progress/cancellation callbacks. There are no permutations or repeats.
 Native SHAP remains potentially expensive for large/deep models and many rows.
+
+Use `n_threads=8` for an 8-core machine, or another positive integer for your
+native CPU thread budget. The default None preserves existing backend defaults;
+zero, negative values (including -1), booleans, and nonintegers raise. Members
+still execute sequentially: eight threads are shared over each native call,
+not eight parallel ensemble workers. More threads do not guarantee a speedup
+for small batches/models; compare 1, 2, 4, and 8 on the same selected rows.
+
+An explicit count is passed to LightGBM contribution/raw predictions, CatBoost
+SHAP/raw predictions and Pool construction, and XGBoost matrix construction.
+XGBoost predictions use one temporary booster copy per member with the requested
+`nthread`, reused across batches, because its prediction API lacks a per-call
+thread argument. Native calls use the same exact tree-path SHAP algorithm as
+the unconfigured path. No model is retrained and original fitted model thread
+configuration/parameters are not changed. This setting does not control
+PCA/PLS BLAS, Polars, UMAP, plotting, or other process-wide thread pools.
+
+Current fitted wrappers honor the count during the additional wrapper-score
+verification pass. Legacy saved prediction callbacks without thread support
+remain usable and retain their fitted verification thread policy; their bulk
+native SHAP/input/raw-prediction calls still honor `n_threads`. Each member's
+`verification_thread_control` records `explicit`, `backend_defaults`, or
+`legacy_backend_defaults`. The requested count is stored as `settings["n_threads"]`
+and in member settings and batch progress events. Using a newly fitted wrapper
+also makes verification obey the count; simply resaving an old callback does
+not upgrade its implementation.
 
 The method requires the `explain` extra and installed member backends. It rejects
 single models, stackers/custom combinations, Random Forest response-score
@@ -503,7 +529,7 @@ PDP/ICE predictions still use all selected rows as the reference population.
 | `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None`, `optimize="auto"`, `cache_max_rows=10000` |
 | `report.inspect_shap(...)` | Same options/defaults as `shap`; inspect structural eligibility and nominal work |
 | `report.member_shap(...)` | `prediction_type="link"`, `feature_space="processed"`, plus `shap` options |
-| `report.weighted_member_shap(...)` | `max_samples=1000`, `weights=None`, `group_one_hot=True`; fixed boosted blends only; model-specific tree-path references |
+| `report.weighted_member_shap(...)` | `max_samples=1000`, `weights=None`, `group_one_hot=True`, `n_threads=None`; fixed boosted blends only; model-specific tree-path references |
 | `report.pdp(features, ...)` | One/two feature names; `grids=None`, `grid_size=20`, `percentiles=(.05, .95)`, `weights=None`, `max_samples=None` |
 | `report.ice(feature, ...)` | One name; `grid=None`, `grid_size=20`, `percentiles=(.05, .95)`, `centered=False`, `reference=None`, `display_rows=100`, `weights=None`, `max_samples=None` |
 | `report.ale(features, ...)` | One/two numeric names; `bins=None` (20 or 10 per axis), `edges=None`, `weights=None`, `max_samples=None`, `xlim=None` |

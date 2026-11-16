@@ -31,7 +31,11 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("output/explanation_example"))
     parser.add_argument("--shap", action="store_true", help="Also calculate SHAP (requires explain extra)")
     parser.add_argument("--native", action="store_true", help="Use a native-categorical LightGBM ensemble member")
+    parser.add_argument("--native-threads", type=int, default=None,
+                        help="Native thread count for weighted raw diagnostic (--shap --native)")
     args = parser.parse_args()
+    if args.native_threads is not None and args.native_threads < 1:
+        parser.error("--native-threads must be positive")
     rng = np.random.default_rng(42)
     n = 240
     age, vehicle_age = rng.uniform(18, 80, n), rng.uniform(0, 20, n)
@@ -95,7 +99,8 @@ def main():
             preprocessing=[PreprocessingStep("ages", PCAReducer(1), ["driver_age", "vehicle_age"])],
         ).fit(training)
         boosted_blend = EnsemblePipeline([second, boosted_pca], blend_weights=[.6, .4]).run()
-        raw = boosted_blend.explain(population).weighted_member_shap(max_samples=12)
+        raw = boosted_blend.explain(population).weighted_member_shap(
+            max_samples=12, n_threads=args.native_threads)
         print("Weighted member raw-score diagnostic:", raw.summary())
         print("Limitations:", raw.settings["limitations"])
         raw.export(args.output / "weighted_member_raw")

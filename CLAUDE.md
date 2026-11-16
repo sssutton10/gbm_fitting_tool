@@ -96,6 +96,10 @@ src/ins_gbm/
   Require supported LightGBM/XGBoost/CatBoost members; no permutation fallback.
   Use fitted native category maps, never infer them from explanation rows.
   Record limitations in exports and label plots as raw-score diagnostics.
+  `n_threads` optionally sets positive native thread counts for sequential
+  members. Use per-call LightGBM/CatBoost knobs and a reusable XGBoost booster
+  copy; never mutate shared fitted settings. Current verification callbacks
+  accept this count; legacy callbacks retain their recorded thread policy.
 - Return `ShapResult`/`EffectResult` with Polars tables and independent exports.
   Model `.save()` and `EvaluationReport.export()` do not include explanations.
   SHAP imports lazily from the optional `explain` extra; PDP/ICE/ALE use core deps.

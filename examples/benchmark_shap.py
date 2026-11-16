@@ -60,7 +60,7 @@ def run(args):
         member.fitted_model.predict = counted_predict
     started = perf_counter()
     if args.mode == "weighted":
-        result = report.weighted_member_shap(max_samples=args.samples)
+        result = report.weighted_member_shap(max_samples=args.samples, n_threads=args.native_threads)
         # Native model calls bypass the ordinary prediction-counter wrapper.
         work["actual_member_rows"] = None
     else:
@@ -71,6 +71,7 @@ def run(args):
     stats = result.settings.get("cache_statistics", {})
     result.contributions.write_parquet(args.output / f"{args.mode}.parquet")
     return dict(mode=args.mode, seconds=elapsed,
+                native_threads=result.settings.get("n_threads"),
                 explanation_target=result.settings.get("explanation_target", "final_prediction"),
                 peak_process_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
                 **work, **stats)
@@ -87,10 +88,14 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("output/shap_benchmark"))
     parser.add_argument("--include-weighted", action="store_true",
                         help="Also time the different weighted member raw-score target; no SHAP parity comparison")
+    parser.add_argument("--native-threads", type=int, default=None,
+                        help="Native threads for weighted mode only; None preserves backend defaults")
     parser.add_argument("--mode", choices=["original", "optimized", "weighted"], help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.features < 4 or min(args.rows, args.samples, args.background, args.cycles, args.trees) < 1:
         parser.error("features must be at least 4; all row counts and cycles must be positive")
+    if args.native_threads is not None and args.native_threads < 1:
+        parser.error("--native-threads must be positive")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.mode:
         print(json.dumps(run(args)))

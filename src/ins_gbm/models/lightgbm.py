@@ -236,7 +236,7 @@ class LightGBMModel:
 
         feature_names = list(data.feature_names)
 
-        def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
+        def _predict(pred_data: ModelData, prediction_type: str, *, n_threads=None) -> pl.Series:
             """Predict from the fitted estimator on the requested scale.
 
             Args:
@@ -250,7 +250,8 @@ class LightGBMModel:
             # LightGBM's default prediction is already on the response scale.
             # Request the tree contribution on the link scale so exposure and
             # user offsets can be applied exactly once.
-            tree_link = booster.predict(X_pred, raw_score=True)
+            thread_kwargs = {} if n_threads is None else {"num_threads": n_threads}
+            tree_link = booster.predict(X_pred, raw_score=True, **thread_kwargs)
 
             offset = (
                 series_to_fit_array(pred_data.offset)

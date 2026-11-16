@@ -165,3 +165,105 @@ def test_native_categories_use_fitted_maps_and_prepare_once(monkeypatch):
     monkeypatch.setattr(fitted, "native_input_fn", None)
     with pytest.raises(ValueError, match="fitted native category input adapter"):
         report.weighted_member_shap(max_samples=2)
+
+
+@pytest.mark.parametrize("objective", ["poisson", "gamma"])
+@pytest.mark.parametrize("n_threads", [1, 2])
+def test_native_thread_counts_preserve_values_and_fitted_settings(objective, n_threads, tmp_path):
+    data = portfolio(objective)
+    ensemble = native_blend(data)
+    report = ensemble.explain(data, batch_size=5)
+    original = report.weighted_member_shap(max_samples=11)
+    booster = ensemble.base_pipelines[1].fitted_model.model
+    config = booster.save_config()
+    fitted_params = [dict(p.fitted_model.params) for p in ensemble.base_pipelines]
+    events = []
+    report.progress_callback = events.append
+    threaded = report.weighted_member_shap(max_samples=11, n_threads=n_threads)
+    np.testing.assert_allclose(threaded.contributions["contribution"], original.contributions["contribution"], atol=2e-6)
+    np.testing.assert_allclose(threaded.predictions["base_value"], original.predictions["base_value"], atol=2e-6)
+    np.testing.assert_allclose(threaded.predictions["residual"], 0, atol=2e-6)
+    assert booster.save_config() == config
+    assert [p.fitted_model.params for p in ensemble.base_pipelines] == fitted_params
+    assert threaded.settings["n_threads"] == n_threads
+    assert all(m["verification_thread_control"] == "explicit" for m in threaded.settings["members"])
+    assert all(e.payload["n_threads"] == n_threads for e in events if e.message == "weighted_member_shap_batch")
+    ensemble.save(str(tmp_path / "threaded"))
+    loaded = load_ensemble(str(tmp_path / "threaded"))
+    result = loaded.explain(data, batch_size=5).weighted_member_shap(max_samples=11, n_threads=n_threads)
+    np.testing.assert_allclose(result.contributions["contribution"], threaded.contributions["contribution"], atol=2e-6)
+
+
+def test_thread_counts_reach_native_shap_inputs_and_predictions(monkeypatch):
+    data = portfolio()
+    ensemble = native_blend(data)
+    import catboost
+    import lightgbm
+    import xgboost
+
+    calls = []
+
+    def track(cls, name, backend):
+        original = getattr(cls, name)
+
+        def wrapper(self, *args, **kwargs):
+            calls.append((backend, name, dict(kwargs)))
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, name, wrapper)
+
+    track(lightgbm.Booster, "predict", "lightgbm")
+    track(catboost.CatBoostRegressor, "get_feature_importance", "catboost")
+    track(catboost.CatBoostRegressor, "predict", "catboost")
+    track(catboost.Pool, "__init__", "catboost_pool")
+    track(xgboost.DMatrix, "__init__", "xgboost_matrix")
+    track(xgboost.Booster, "set_param", "xgboost_config")
+    original_booster = ensemble.base_pipelines[1].fitted_model.model
+    xgb_instances = []
+    predict = xgboost.Booster.predict
+
+    def xgb_predict(self, *args, **kwargs):
+        assert int(json.loads(self.save_config())["learner"]["generic_param"]["nthread"]) == 2
+        xgb_instances.append(self)
+        calls.append(("xgboost", "predict", dict(kwargs)))
+        return predict(self, *args, **kwargs)
+
+    monkeypatch.setattr(xgboost.Booster, "predict", xgb_predict)
+    result = ensemble.explain(data, batch_size=4).weighted_member_shap(max_samples=9, n_threads=2)
+    for backend, _, kwargs in calls:
+        if backend == "lightgbm":
+            assert kwargs["num_threads"] == 2
+        elif backend in {"catboost", "catboost_pool"}:
+            assert kwargs["thread_count"] == 2
+        elif backend == "xgboost_matrix":
+            assert kwargs["nthread"] == 2
+    assert any(b == "lightgbm" and k.get("pred_contrib") for b, _, k in calls)
+    assert any(b == "catboost" and k.get("type") == "ShapValues" for b, _, k in calls)
+    assert any(b == "xgboost" and k.get("pred_contribs") for b, _, k in calls)
+    assert xgb_instances and all(model is not original_booster for model in xgb_instances)
+    assert all(model is xgb_instances[0] for model in xgb_instances)  # one reusable copy
+    assert result.settings["execution"] == "sequential_members_native_threads"
+
+
+@pytest.mark.parametrize("n_threads", [0, -1, True, 1.5, "8"])
+def test_invalid_thread_counts(n_threads):
+    report = native_blend(portfolio()).explain(portfolio())
+    with pytest.raises(ValueError, match="n_threads must be a positive integer"):
+        report.weighted_member_shap(n_threads=n_threads)
+
+
+def test_legacy_callbacks_keep_native_thread_control_and_disclose_verification_policy():
+    data = portfolio()
+    ensemble = native_blend(data)
+    for member in ensemble.base_pipelines:
+        callback = member.fitted_model.predict_fn
+
+        def legacy(data, prediction_type, original=callback):
+            return original(data, prediction_type)
+
+        member.fitted_model.predict_fn = legacy
+    report = ensemble.explain(data)
+    baseline = report.weighted_member_shap(max_samples=5)
+    threaded = report.weighted_member_shap(max_samples=5, n_threads=2)
+    np.testing.assert_allclose(threaded.contributions["contribution"], baseline.contributions["contribution"], atol=2e-6)
+    assert all(m["verification_thread_control"] == "legacy_backend_defaults" for m in threaded.settings["members"])

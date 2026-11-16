@@ -281,7 +281,7 @@ class CatBoostModel:
         feature_names = list(data.feature_names)
         has_offset = _catboost_supports_offset()
 
-        def _predict(pred_data: ModelData, prediction_type: str) -> pl.Series:
+        def _predict(pred_data: ModelData, prediction_type: str, *, n_threads=None) -> pl.Series:
             """Predict from the fitted estimator on the requested scale.
 
             Args:
@@ -306,12 +306,14 @@ class CatBoostModel:
                 "data": X_pred,
                 "feature_names": feature_names,
             }
+            thread_kwargs = {} if n_threads is None else {"thread_count": n_threads}
+            pred_pool_kwargs.update(thread_kwargs)
             if categorical_names:
                 pred_pool_kwargs["cat_features"] = categorical_names
             if pred_baseline is not None:
                 pred_pool_kwargs["baseline"] = pred_baseline
             pred_pool = Pool(**pred_pool_kwargs)
-            link = model.predict(pred_pool, prediction_type="RawFormulaVal")
+            link = model.predict(pred_pool, prediction_type="RawFormulaVal", **thread_kwargs)
             response = np.exp(link)
 
             if objective == "poisson":

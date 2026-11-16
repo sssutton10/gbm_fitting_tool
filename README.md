@@ -333,7 +333,7 @@ For a faster, explicitly different diagnostic on a fixed LightGBM/XGBoost/CatBoo
 blend, use:
 
 ```python
-raw_diagnostic = ensemble.explain(training).weighted_member_shap(max_samples=1000)
+raw_diagnostic = ensemble.explain(training).weighted_member_shap(max_samples=1000, n_threads=8)
 print(raw_diagnostic.summary())
 print(raw_diagnostic.settings["limitations"])
 raw_diagnostic.export("output/explanations/weighted_member_raw")
@@ -347,6 +347,9 @@ features. It uses model-specific tree-path references without a supplied
 background, excludes scoring exposure/offset, and never falls back to permutation.
 Random Forest/mixed native scales and stackers are unsupported. Use `.shap()`
 for the actual final prediction; `.member_shap()` returns separate member results.
+`n_threads=8` requests eight native threads per sequential member on an 8-core
+machine; None preserves backend defaults. This is an inference-only setting,
+not a worker count or a process-wide limit on preprocessing pools.
 
 See the [complete guide](docs/explanations.md) for interpretation, sampling,
 weighting, saved models, output schemas, and troubleshooting. Keep the final
