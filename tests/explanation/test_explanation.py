@@ -607,3 +607,168 @@ def test_raw_pca_ensemble_categories_and_selected_one_hot():
     result = report.shap(max_samples=2, n_permutations=2)
     assert set(result.summary()["feature"]) == {"x", "z", "region"}
     np.testing.assert_allclose(result.predictions["residual"], 0, atol=2e-6)
+
+
+@pytest.mark.parametrize("scale", ["response", "rate"])
+def test_native_blend_different_feature_subsets(scale):
+    pytest.importorskip("shap")
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.),
+                   exposure=pl.Series(np.linspace(.4, 2, 16)))
+    members = [fit(data.select_features([name]), forest=True) for name in ["x", "z"]]
+    ensemble = blend(members)
+    ensemble.ensemble.weights = [.3, .7]
+    report = ensemble.explain(data, background=data, prediction_type=scale)
+    assert report.inspect_shap()["tree_eligible"]
+    native = report.shap(engine="tree", max_samples=3)
+    general = report.shap(engine="permutation", max_samples=3, n_permutations=1)
+    np.testing.assert_allclose(native.contributions["contribution"],
+                               general.contributions["contribution"], atol=3e-6)
+    np.testing.assert_allclose(native.predictions["base_value"],
+                               general.predictions["base_value"], atol=3e-6)
+    assert report.shap(max_samples=3).settings["engine"] == "tree"
+    assert not ensemble.explain(data, background=data, prediction_type="link").inspect_shap()["tree_eligible"]
+
+
+def test_native_blend_compatible_components_and_mixed_raw_rejection():
+    pytest.importorskip("shap")
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.))
+    pca = fit(data, forest=True, preprocessing=[PreprocessingStep("pc", PCAReducer(1), ["x", "z"])])
+    processed = blend([pca, pca]).explain(data, background=data, feature_space="processed")
+    tree = processed.shap(engine="tree", max_samples=3)
+    general = processed.shap(engine="permutation", max_samples=3, n_permutations=1)
+    np.testing.assert_allclose(tree.contributions["contribution"], general.contributions["contribution"], atol=2e-6)
+    mixed = blend([pca, fit(data, forest=True)]).explain(data, background=data)
+    assert "PCA" in mixed.inspect_shap()["fallback_reason"]
+    assert mixed.inspect_shap(engine="tree")["selected_engine"] is None
+    with pytest.raises(ValueError, match="component contributions"):
+        mixed.shap(engine="tree")
+
+
+def test_member_native_diagnostics_keep_component_coordinates():
+    pytest.importorskip("shap")
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.))
+    pca = fit(data, preprocessing=[PreprocessingStep("pc", PCAReducer(1), ["x", "z"])])
+    report = blend([pca, fit(data)]).explain(data, background=data)
+    inspection = report.inspect_shap(max_samples=2)
+    assert inspection["selected_engine"] == "permutation"
+    assert "response" in inspection["fallback_reason"]
+    members = report.member_shap(engine="tree", max_samples=2)
+    assert set(members[0].contributions["feature"]) == {"pc__pca_1"}
+    assert set(members[1].contributions["feature"]) == {"x", "z"}
+    for index, result in members.items():
+        assert result.settings["explanation_target"] == "member"
+        assert result.settings["member_index"] == index
+        assert result.settings["prediction_type"] == "link"
+        np.testing.assert_allclose(result.predictions["residual"], 0, atol=2e-6)
+
+
+@pytest.mark.parametrize("scale", ["response", "rate", "link"])
+@pytest.mark.parametrize("limit", [1, 10000])
+def test_optimized_permutation_matches_original_with_mixed_pca_and_categories(scale, limit):
+    pytest.importorskip("shap")
+    from ins_gbm import PLSReducer
+    data = population().with_features(population().features.with_columns(
+        pl.Series("region", ["A", "B"] * 8)))
+    data = replace(data, target=pl.Series(np.arange(16) + 1.), schema=None,
+                   exposure=pl.Series(np.linspace(.4, 2, 16)),
+                   offset=pl.Series(np.linspace(-.2, .2, 16)))
+    pca = fit(data, encoder=OneHotEncoder(), preprocessing=[
+        PreprocessingStep("pc", PCAReducer(1), ["x", "z"]),
+        PreprocessingStep("pls", PLSReducer(1), ["pc__pca_1", "region__A"])])
+    direct = fit(data.select_features(["x", "region"]), encoder=OneHotEncoder())
+    events = []
+    report = blend([pca, direct]).explain(data, background=data, prediction_type=scale,
+                                         batch_size=7, progress_callback=events.append)
+    options = dict(engine="permutation", max_samples=2, n_permutations=3, n_repeats=2,
+                   max_background=8)
+    original = report.shap(optimize=False, **options)
+    optimized = report.shap(optimize=True, cache_max_rows=limit, **options)
+    np.testing.assert_allclose(optimized.contributions["contribution"],
+                               original.contributions["contribution"], atol=3e-6)
+    np.testing.assert_allclose(optimized.predictions["base_value"],
+                               original.predictions["base_value"], atol=3e-6)
+    stats = optimized.settings["cache_statistics"]
+    assert stats["member_rows_evaluated"] < stats["member_rows_requested"]
+    assert stats["transform_rows_evaluated"] > 0
+    progress = [e for e in events if e.message == "shap_progress"]
+    assert progress[-1].current == progress[-1].total == 4
+    assert progress[-1].payload["estimated_remaining_seconds"] == 0
+    assert any(e.message == "shap_engine" and e.payload["fallback_reason"] is None for e in events)
+
+
+def test_unknown_transform_retains_original_inference():
+    pytest.importorskip("shap")
+    class CustomTransform:
+        def __init__(self, original):
+            self.original = original
+
+        def transform(self, frame):
+            return self.original.transform(frame)
+
+        def component_mapping(self):
+            return self.original.component_mapping()
+
+        def output_feature_names(self):
+            return self.original.output_feature_names()
+
+    data = replace(population(), target=pl.Series(np.arange(16) + 1.))
+    pca = fit(data, preprocessing=[PreprocessingStep("pc", PCAReducer(1), ["x", "z"])])
+    pca.preprocessors[0].fitted_preprocessor = CustomTransform(pca.preprocessors[0].fitted_preprocessor)
+    report = blend([pca, fit(data)]).explain(data, background=data)
+    original = report.shap(engine="permutation", optimize=False, max_samples=2, n_permutations=2)
+    optimized = report.shap(engine="permutation", max_samples=2, n_permutations=2)
+    np.testing.assert_allclose(optimized.contributions["contribution"], original.contributions["contribution"], atol=2e-6)
+    assert optimized.settings["cache_statistics"]["uncached_member_rows"] > 0
+
+
+@pytest.mark.parametrize("options", [{"optimize": 1}, {"cache_max_rows": 0}, {"cache_max_rows": True}])
+def test_shap_optimization_options_validated(options):
+    data = population()
+    report = analytic(data, lambda f: np.ones(f.height)).explain(data, background=data)
+    with pytest.raises(ValueError):
+        report.shap(**options)
+    with pytest.raises(ValueError):
+        report.inspect_shap(**options)
+
+
+@pytest.mark.parametrize("prefer_cached", [False, True])
+def test_auto_optimization_pilot_selects_path_without_changing_masks(monkeypatch, prefer_cached):
+    pytest.importorskip("shap")
+    data = population()
+    member = analytic(data, lambda f: 1 + f["x"].to_numpy() * f["z"].to_numpy())
+    report = blend([member, member]).explain(data, background=data)
+    original = report.shap(engine="permutation", optimize=False, max_samples=3, n_permutations=2)
+    evaluate = report._permutation_row
+    choices = []
+
+    def timed(*args, optimized):
+        choices.append(optimized)
+        result, _ = evaluate(*args, optimized=optimized)
+        return result, 1. if optimized == prefer_cached else 2.
+
+    monkeypatch.setattr(report, "_permutation_row", timed)
+    selected = report.shap(engine="permutation", max_samples=3, n_permutations=2)
+    assert choices == [True, False, prefer_cached, prefer_cached]
+    assert selected.settings["optimized_selected"] == prefer_cached
+    assert selected.settings["optimization_pilot"]["contributions_agree"]
+    np.testing.assert_allclose(selected.contributions["contribution"], original.contributions["contribution"], atol=1e-7)
+    single = report.shap(engine="permutation", max_samples=1, n_permutations=2)
+    assert single.settings["optimization_pilot"] is None
+    assert not single.settings["optimized_selected"]
+
+
+def test_optimized_member_dependency_cache_skips_unused_features():
+    from ins_gbm.explanation.cached import CachedRawPredictor
+    data = population()
+    members = [analytic(data.select_features([name]), lambda f, n=name: 1 + f[n].to_numpy())
+               for name in ["x", "z"]]
+    report = blend(members).explain(data, background=data)
+    stats = dict(member_rows_requested=0, member_rows_evaluated=0,
+                 transform_rows_evaluated=0, cache_hits=0, uncached_member_rows=0)
+    scorer = CachedRawPredictor(report, 0, report.frame, 10000, stats)
+    expected = report._predict(report.frame, np.zeros(16, dtype=int))
+    np.testing.assert_allclose(scorer(report.frame), expected)
+    assert stats["member_rows_evaluated"] == 8  # 4 distinct values per member, not 32 rows
+    np.testing.assert_allclose(scorer(report.frame), expected)
+    assert stats["member_rows_evaluated"] == 8
+    assert stats["member_rows_requested"] == 64

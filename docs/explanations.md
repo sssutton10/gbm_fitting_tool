@@ -125,8 +125,9 @@ have different fitted PCA bases, including identically named components.
 Only raw sources of final model features are attributed. Categorical variables
 remain whole, including when only selected one-hot levels enter a model.
 
-Raw SHAP uses the general permutation explainer; `engine="tree"` is ineligible.
-It can cost more because each evaluation replays fitted preprocessing. Raw
+Raw SHAP through fitted reducers uses the general permutation explainer;
+`engine="tree"` is ineligible for this interpretation. Eligible numeric
+Random Forest blends without reducers can also use Tree SHAP in raw space. Raw
 attributions are calculated from the complete prediction function, not allocated
 from component SHAP values using loadings. Predictions and output scales stay
 the same; baselines and attributions can differ from processed-space explanations.
@@ -225,17 +226,105 @@ diagnostics do not import SHAP. Defaults are:
 - All supplied explanation rows, or a seeded `max_samples` cap.
 - Twenty complete forward/reverse permutation cycles per row; use
   `n_permutations` to set the budget and `n_repeats` for independent seeded runs.
-- `engine="auto"`: use native interventional Tree SHAP only for eligible
-  individual-model coordinates and output scales, otherwise permutation SHAP.
+- `engine="auto"`: use native interventional Tree SHAP for eligible single
+  models or fixed-weight Random Forest blends, otherwise permutation SHAP.
+- `optimize="auto"`: for raw permutation SHAP with more than one row/run,
+  time cached and ordinary prediction on the first explained row using identical
+  seeds and masks. Select the faster compatible path for the remaining rows.
+  A single row uses ordinary inference without a pilot. Timing can change the
+  selected path across runs, while sampling and seeds remain fixed.
 
 Native acceleration supports numeric model columns with the same players and
 background semantics: supported GBMs on the log-response scale, and Random
 Forest on response/rate scales when clipping cannot intervene. Grouped one-hot
-or native categorical inputs use the general engine. Final ensembles always use
-the general engine. Explicit `engine="tree"` fails for unsupported cases;
+or native categorical inputs use the general engine. Fixed-weight Random Forest
+blends support response/rate Tree SHAP when members have compatible numeric
+players, references, and scales. Feature subsets may differ: absent features
+receive zero contribution, then signed contributions and baselines are weighted
+and summed. Shared processed component bases are allowed; raw explanations
+through reducers require permutation SHAP. Explicit `engine="tree"` fails for unsupported cases;
 `"permutation"` always requests the general engine. The selected engine and
 fallback reason are saved. Tree-path-dependent explanations are never silently
 substituted for the explicit empirical reference distribution.
+
+Fixed weights alone do not make a Poisson/Gamma boosted blend eligible. Native
+Tree SHAP explains raw/link scores, whereas the blend averages exponentiated
+response predictions. Summing weighted raw-score contributions does not explain
+that response blend, or its logarithm. Stacking also retains permutation SHAP.
+An ineligible request never silently changes output scale, reference method,
+or feature grouping.
+
+Inspect the decision before starting a large calculation:
+
+```python
+print(report.inspect_shap(max_samples=500, max_background=50, n_permutations=5))
+values = report.shap(engine="permutation", optimize="auto",
+                     max_samples=500, max_background=50, n_permutations=5)
+# Force bounded caches, or use optimize=False for the ordinary inference path.
+cached = report.shap(engine="permutation", optimize=True, cache_max_rows=10000,
+                     max_samples=500, max_background=50, n_permutations=5)
+```
+
+Inspection does not import SHAP or run explanations. Eligibility is structural;
+backend support, clipping, missing values, and reconstruction are additionally
+checked at execution. Its nominal prediction-work count precedes mask skipping
+and caching and is not a wall-clock estimate.
+
+Caching preserves raw-feature masking and the final prediction scale. Built-in
+one-hot blocks are prepared from the row/background bank. Member predictions
+are reused when their raw dependencies have not changed. PCA/PLS transforms
+are cached separately on each step's inputs, so a raw feature can feed PCA in
+one member and enter another directly. Chained targeted transforms, different
+fitted bases, and selected one-hot levels remain supported. No component SHAP
+values are spread across raw inputs. Unknown/custom and UMAP transforms use
+ordinary pipeline inference, preserving their batch behavior.
+
+Caches are discarded after each explained row/run. `cache_max_rows` bounds
+retained entries per member/transform cache; memory also depends on feature
+width, batch size, and the number of stages. Caching can cost more than ordinary
+inference for small models. Use the automatic pilot or benchmark both forced
+paths on your workload. Results record `optimized_selected`, `optimization_pilot`,
+`cache_statistics`, and elapsed calculation time. Pilot cache statistics include
+work performed while comparing the two paths.
+
+For fast member-level diagnostics, keep each model's native coordinates:
+
+```python
+members = report.member_shap(engine="tree", prediction_type="link", max_samples=500)
+for index, member_values in members.items():
+    print(index, member_values.summary())
+    member_values.export(f"output/member_{index}_shap")
+```
+
+This returns a dictionary of independent `ShapResult` objects. PCA/PLS outputs
+stay component coordinates. Native categorical/grouped one-hot restrictions
+still apply; `engine="tree"` raises, while `engine="auto"` can fall back to
+permutation for a member. These are member raw/link explanations, not an
+attribution of the final response blend. Each result records its member index,
+framework, coordinates, and scale.
+
+Compatible Tree SHAP removes permutation sampling noise while preserving the
+same attribution target. Background sampling uncertainty remains. Switching to
+member diagnostics changes the target; summing encoded-column attributions
+would change original-category grouping and is not silently substituted.
+
+Progress callbacks receive `shap_engine` with the selected engine and fallback
+reason, `shap_optimization` with pilot timings, and `shap_progress` after each
+permutation row. The latter includes `elapsed_seconds` and
+`estimated_remaining_seconds`; this is a running estimate, not a guarantee.
+Cancellation remains checked at row and prediction-batch boundaries.
+
+Run a reproducible three-backend benchmark with PCA/direct-input overlap:
+
+```bash
+.venv/bin/python examples/benchmark_shap.py --features 95 --samples 10 --trees 500
+```
+
+It checks contribution parity and writes timings, actual member rows evaluated,
+cache statistics, and independent-process peak RSS (including imports/fit) under
+`output/shap_benchmark/`. Change rows, background size, cycles, and tree counts
+to reflect your workload. Large explained populations remain expensive even
+when preprocessing and member inference are accelerated.
 
 `ShapResult` retains contributions and per-row prediction/reference/residual
 tables. `summary()` returns mean absolute contributions, signed means, and
@@ -323,7 +412,9 @@ PDP/ICE predictions still use all selected rows as the reference population.
 | Call | Main arguments and defaults |
 | --- | --- |
 | `fitted.explain(data, ...)` | `background=None`, `prediction_type="response"`, `seed=42`, `batch_size=1024`, `progress_callback=None`, `should_stop=None`, `shap_kwargs=None` |
-| `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None` |
+| `report.shap(...)` | `engine="auto"`, `max_background=100`, `max_samples=None`, `n_permutations=20`, `n_repeats=1`, `weights=None`, `optimize="auto"`, `cache_max_rows=10000` |
+| `report.inspect_shap(...)` | Same options/defaults as `shap`; inspect structural eligibility and nominal work |
+| `report.member_shap(...)` | `prediction_type="link"`, `feature_space="processed"`, plus `shap` options |
 | `report.pdp(features, ...)` | One/two feature names; `grids=None`, `grid_size=20`, `percentiles=(.05, .95)`, `weights=None`, `max_samples=None` |
 | `report.ice(feature, ...)` | One name; `grid=None`, `grid_size=20`, `percentiles=(.05, .95)`, `centered=False`, `reference=None`, `display_rows=100`, `weights=None`, `max_samples=None` |
 | `report.ale(features, ...)` | One/two numeric names; `bins=None` (20 or 10 per axis), `edges=None`, `weights=None`, `max_samples=None`, `xlim=None` |

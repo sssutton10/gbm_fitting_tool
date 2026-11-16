@@ -166,8 +166,8 @@ class PredictionAdapter:
                 columns[name] = value.rename(name)
         return pl.DataFrame(columns).select(self.names)
 
-    def predict(self, frame, indices):
-        """Score diagnostic rows with exposure/offset context from original row indices."""
+    def context(self, frame, indices):
+        """Attach the explained rows' fixed context to diagnostic inputs."""
         indices = np.asarray(indices, dtype=int).tolist()
         data = self.data
         context = replace(data, features=frame, feature_names=frame.columns,
@@ -176,6 +176,13 @@ class PredictionAdapter:
                           offset=None if data.offset is None else data.offset[indices],
                           weight=None if data.weight is None else data.weight[indices],
                           cv_fold=None, comparisons=None, schema=None)
+        return context
+
+    def predict(self, frame, indices):
+        """Score diagnostic rows with exposure/offset context from original row indices."""
+        context = self.context(frame, indices)
+        data = self.data
+        indices = np.asarray(indices, dtype=int).tolist()
         predictions = []
         if self.feature_space == "raw":
             # Keep required but unused pipeline inputs, then apply interventions.
@@ -199,6 +206,10 @@ class PredictionAdapter:
                 prepared = context.with_features(pl.DataFrame(columns))
                 scale = "response" if self.ensemble is not None else self.prediction_type
                 predictions.append(member.pipeline.fitted_model.predict(prepared, scale).to_numpy())
+        return self.combine(predictions, context)
+
+    def combine(self, predictions, context):
+        """Apply the exact fitted combination and requested output conversion."""
         matrix = np.column_stack(predictions)
         if self.ensemble is None:
             # Preserve wrapper-specific clipping/conversion exactly for single models.

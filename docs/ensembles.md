@@ -592,6 +592,23 @@ in one member and directly in another receives one attribution covering both
 paths. Different fitted PCA bases, including bagged or seed-averaged bases, are
 supported. SHAP uses the general permutation engine.
 
+Permutation SHAP automatically pilots cached versus ordinary inference on its
+first explained row, then uses the faster compatible path. Force either with
+`report.shap(optimize=True, ...)` or `optimize=False`. Built-in encoding,
+PCA/PLS transforms, and member predictions are cached within each explained row;
+members reuse predictions when their raw dependencies have not changed. Other
+transforms retain ordinary inference. This preserves the raw-variable game,
+including PCA/direct-input overlap and different fitted bases.
+
+Use `report.inspect_shap(...)` to preview engine eligibility and nominal work.
+Tree SHAP can combine eligible numeric fixed-weight Random Forest members on
+response/rate scales, aligning different feature subsets with zero contributions
+for absent features. Boosted Poisson/Gamma response blends still need permutation
+SHAP: native raw/link contributions do not explain averages of exponentiated
+predictions. `report.member_shap(engine="tree", prediction_type="link", ...)`
+provides separate member diagnostics where supported, retaining each member's
+processed component coordinates. These do not explain the final blend.
+
 Use `feature_space="processed"` to explain component scores instead. In that
 mode, members must share compatible fitted input order, upstream transforms,
 scaler, loadings, and output names/order. Different subsets of a shared basis

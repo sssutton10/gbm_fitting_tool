@@ -76,12 +76,18 @@ src/ins_gbm/
   Attribute PCA/PLS/UMAP outputs to processed coordinates. Never redistribute
   component importance to original variables or align components by name alone.
   Component-level ensembles require compatible fitted transformations; raw/PCA
-  mixtures and different fitted bases raise.
+  mixtures and different fitted bases raise only in processed space. Raw-space
+  ensembles support both by replaying each member's fitted chain.
 - Evaluate the actual final ensemble combination before converting scales.
   `link` means log final response, including applicable exposure/offset.
   Keep row exposure and offset fixed during interventions/masking. Native tree
   SHAP is allowed only when its feature game, reference, and scale agree;
-  ensembles use model-agnostic permutation SHAP. This SHAP engine is separate
+  eligible fixed-weight numeric Random Forest blends may combine native values.
+  Boosted response blends and raw explanations through reducers use permutation
+  SHAP. Its auto optimization pilots row-local encoder/PCA/PLS/member caches
+  against ordinary inference; custom/UMAP chains retain ordinary inference.
+  `inspect_shap()` previews eligibility; `member_shap()` keeps member scales and
+  component coordinates separate from final ensemble attributions. This engine is separate
   from the existing deviance-based permutation-importance diagnostic.
 - Return `ShapResult`/`EffectResult` with Polars tables and independent exports.
   Model `.save()` and `EvaluationReport.export()` do not include explanations.

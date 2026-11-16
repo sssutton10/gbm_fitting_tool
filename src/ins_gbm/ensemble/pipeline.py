@@ -83,7 +83,8 @@ class EnsembleResult:
             raises ``PipelineCancelled``.
         shap_kwargs : mapping, optional
             Options forwarded to ``report.shap()``: engine, max_background,
-            max_samples, n_permutations, n_repeats, and weights. A supplied mapping
+            max_samples, n_permutations, n_repeats, weights, optimize, and
+            cache_max_rows. A supplied mapping
             computes SHAP immediately and sets defaults for future SHAP calls.
             An empty mapping uses SHAP defaults, including all data rows. None
             keeps construction lazy. Background is required for eager SHAP.

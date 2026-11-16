@@ -3,6 +3,7 @@
 from itertools import product
 from inspect import signature
 from collections.abc import Mapping
+from time import perf_counter
 
 import numpy as np
 import polars as pl
@@ -97,11 +98,11 @@ class ExplanationReport:
         """Coordinate types, transform lineage, and fitted PCA descriptions."""
         return self.adapter.metadata
 
-    def _event(self, method, current=None, total=None):
+    def _event(self, method, current=None, total=None, **payload):
         if self.should_stop and self.should_stop():
             raise PipelineCancelled("Explanation cancelled")
         if self.progress_callback:
-            self.progress_callback(ProgressEvent("explain", method, current, total))
+            self.progress_callback(ProgressEvent("explain", method, current, total, payload))
 
     def _predict(self, frame, indices):
         output = []
@@ -451,8 +452,8 @@ class ExplanationReport:
         ----------
         engine : {'auto', 'tree', 'permutation'}, default='auto'
             'auto' tries native tree SHAP and falls back to permutation SHAP
-            when ineligible. 'tree' requires a supported single model, processed
-            numeric coordinates, and a compatible prediction scale; otherwise
+            when ineligible. 'tree' requires supported models, compatible numeric
+            coordinates, and a compatible prediction scale; otherwise
             raises ValueError. 'permutation' explains the complete prediction
             function and supports raw features and ensembles.
         max_background : int, default=100
@@ -474,6 +475,16 @@ class ExplanationReport:
             before sampling. None uses ``data.weight`` or equal weights if absent;
             'uniform' forces equal weights. Does not change individual
             contributions or the background reference distribution.
+        optimize : {'auto', True, False}, default='auto'
+            Cache raw-feature encoding, supported row-independent transforms
+            (PCA/PLS), and member predictions within each explained row. Unknown
+            transforms retain ordinary inference. Auto times both paths on the
+            first explained row and selects one for the remaining rows. A single
+            row uses ordinary inference without a pilot. True forces caching;
+            False uses the original path. Timing can select a different path on
+            different runs; the sampled rows, masks, and seeds are unchanged.
+        cache_max_rows : int, default=10000
+            Maximum retained entries per row-local transform/member cache.
 
         Returns
         -------
@@ -498,13 +509,81 @@ class ExplanationReport:
         self._shap_cache = (key, result)
         return result
 
+    def inspect_shap(self, **kwargs):
+        """Inspect engine eligibility and nominal work without computing SHAP.
+
+        Uses the same options/defaults as shap(). Eligibility is structural;
+        native backend support, missing values, clipping, and reconstruction are
+        additionally checked when running. Work estimates precede mask skipping
+        and caching; they are not runtime estimates.
+        """
+        options = {**self._shap_defaults, **kwargs}
+        bound = signature(self._compute_shap).bind(**options)
+        bound.apply_defaults()
+        options = bound.arguments
+        engine = options["engine"]
+        if engine not in {"auto", "tree", "permutation"}:
+            raise ValueError("engine must be auto, tree, or permutation")
+        if not isinstance(options["optimize"], bool) and options["optimize"] != "auto":
+            raise ValueError("optimize must be 'auto' or a bool")
+        _positive_integer(options["cache_max_rows"], "cache_max_rows")
+        n = len(self._rows(options["max_samples"]))
+        b = _positive_integer(options["max_background"], "max_background")
+        b = min(b, self.background.n_rows) if self.background is not None else b
+        cycles = _positive_integer(options["n_permutations"], "n_permutations")
+        repeats = _positive_integer(options["n_repeats"], "n_repeats")
+        reason = self._tree_reason()
+        selected = (None if engine == "tree" and reason else
+                    "permutation" if engine == "permutation" or reason else "tree")
+        return {"requested_engine": engine, "selected_engine": selected,
+                "tree_eligible": reason is None, "fallback_reason": reason,
+                "eligibility_requires_runtime_validation": True,
+                "background_supplied": self.background is not None,
+                "prediction_type": self.adapter.prediction_type,
+                "feature_space": self.adapter.feature_space,
+                "features": self.feature_names,
+                "feature_grouping": "Original categories remain whole variables",
+                "reference": "Uniform empirical interventional background",
+                "explained_rows": n, "background_rows": b,
+                "nominal_member_row_predictions": (
+                    n * repeats * cycles * (2 * len(self.feature_names) + 1) * b * len(self.adapter.members)
+                    if selected == "permutation" else None),
+                "optimization_requested": options["optimize"],
+                "optimization_pilot": options["optimize"] == "auto" and n * repeats > 1
+                                      and self.adapter.feature_space == "raw"}
+
+    def member_shap(self, *, prediction_type="link", feature_space="processed", **kwargs):
+        """Return {member_index: ShapResult} for independent member diagnostics.
+
+        These explain each member on its own coordinates and scale, not the
+        final ensemble. Processed PCA/PLS coordinates are retained, never spread
+        over source variables. Use engine='tree' to require native support or
+        feature_space='raw', engine='permutation' for original-variable effects.
+        Native categorical backend restrictions still apply.
+        """
+        results = {}
+        for index, member in enumerate(self.adapter.members):
+            report = member.pipeline.explain(
+                self.data, background=self.background, prediction_type=prediction_type,
+                feature_space=feature_space, seed=self.seed, batch_size=self.batch_size,
+                progress_callback=self.progress_callback, should_stop=self.should_stop)
+            result = report.shap(**kwargs)
+            result.settings.update(explanation_target="member", member_index=index,
+                                   member_framework=member.pipeline.fitted_model.framework)
+            results[index] = result
+        return results
+
     def _compute_shap(self, *, engine="auto", max_background=100, max_samples=None, n_permutations=20,
-             n_repeats=1, weights=None):
+             n_repeats=1, weights=None, optimize="auto", cache_max_rows=10000):
         """SHAP on the selected final prediction scale, with a deliberate background."""
+        started = perf_counter()
         if self.background is None:
             raise ValueError("Supply background=ModelData to explain() for SHAP")
         if engine not in {"auto", "tree", "permutation"}:
             raise ValueError("engine must be auto, tree, or permutation")
+        if not isinstance(optimize, bool) and optimize != "auto":
+            raise ValueError("optimize must be 'auto' or a bool")
+        cache_max_rows = _positive_integer(cache_max_rows, "cache_max_rows")
         try:
             import shap
         except ImportError as exc:
@@ -514,10 +593,11 @@ class ExplanationReport:
         frame = self.frame[indices.tolist()]
         w = self._weights(weights, indices)
         self.background.validate_for_prediction()
-        background = self.adapter.transform(self.background)
         cap = _positive_integer(max_background, "max_background")
-        background_indices = np.sort(np.random.default_rng(self.seed).choice(background.height, min(cap, background.height), replace=False))
-        background = background[background_indices.tolist()]
+        background_indices = np.sort(np.random.default_rng(self.seed).choice(
+            self.background.n_rows, min(cap, self.background.n_rows), replace=False))
+        from ins_gbm.data.model_data import slice_model_data
+        background = self.adapter.transform(slice_model_data(self.background, background_indices.tolist()))
         cycles = _positive_integer(n_permutations, "n_permutations")
         repeats = _positive_integer(n_repeats, "n_repeats")
         reason = None
@@ -532,10 +612,19 @@ class ExplanationReport:
                 if engine == "tree":
                     raise ValueError(f"Native tree SHAP is ineligible: {reason}") from exc
         selected_engine = "tree" if tree is not None else "permutation"
+        self._event("shap_engine", engine=selected_engine, requested_engine=engine,
+                    fallback_reason=reason, prediction_type=self.adapter.prediction_type,
+                    feature_space=self.adapter.feature_space)
         actual = self._predict(frame, indices)
         records, predictions = [], []
         if tree is None:
             encoded, reference, decode = self._encode(frame, background)
+        stats = dict(member_rows_requested=0, member_rows_evaluated=0, transform_rows_evaluated=0,
+                     cache_hits=0, uncached_member_rows=0)
+        optimized = (None if optimize == "auto" and frame.height * repeats > 1 else optimize is True)
+        if self.adapter.feature_space != "raw" or tree is not None:
+            optimized = False
+        pilot = None
         for repeat in range(repeats):
             if tree is not None:
                 contributions, baselines = tree
@@ -546,16 +635,29 @@ class ExplanationReport:
                 for row in range(frame.height):
                     self._event("shap", repeat * frame.height + row, repeats * frame.height)
                     context_index = int(indices[row])
-
-                    def predict(values):
-                        return self._predict(decode(values), np.full(len(values), context_index, dtype=int))
-
-                    explainer = shap.PermutationExplainer(predict, masker,
-                                                        seed=self.seed + repeat * frame.height + row,
-                                                        feature_names=self.adapter.names)
-                    explanation = explainer(encoded[row:row + 1], max_evals=cycles * (2 * encoded.shape[1] + 1), silent=True)
+                    seed = self.seed + repeat * frame.height + row
+                    args = (shap, masker, encoded[row:row + 1], reference, decode, context_index,
+                            seed, cycles, cache_max_rows, stats)
+                    if optimized is None:
+                        cached_result, cached_time = self._permutation_row(*args, optimized=True)
+                        ordinary_result, ordinary_time = self._permutation_row(*args, optimized=False)
+                        agrees = (np.allclose(cached_result.values, ordinary_result.values, atol=1e-6, rtol=2e-5)
+                                  and np.allclose(cached_result.base_values, ordinary_result.base_values, atol=1e-6, rtol=2e-5))
+                        optimized = agrees and cached_time < ordinary_time
+                        pilot = dict(cached_prediction_seconds=cached_time,
+                                     ordinary_prediction_seconds=ordinary_time,
+                                     contributions_agree=agrees, optimized_selected=optimized)
+                        explanation = cached_result if optimized else ordinary_result
+                        self._event("shap_optimization", **pilot)
+                    else:
+                        explanation, _ = self._permutation_row(*args, optimized=optimized)
                     contributions[row] = explanation.values[0]
                     baselines[row] = np.asarray(explanation.base_values).reshape(-1)[0]
+                    completed = repeat * frame.height + row + 1
+                    elapsed = perf_counter() - started
+                    self._event("shap_progress", completed, repeats * frame.height,
+                                elapsed_seconds=elapsed,
+                                estimated_remaining_seconds=elapsed / completed * (repeats * frame.height - completed))
             residual = actual - baselines - contributions.sum(axis=1)
             if not np.allclose(residual, 0, atol=1e-6, rtol=0) and not np.allclose(actual, baselines + contributions.sum(axis=1), atol=1e-6, rtol=2e-5):
                 raise ValueError("SHAP reconstruction failed on the selected prediction scale")
@@ -566,12 +668,40 @@ class ExplanationReport:
                 records.extend({"repeat": repeat, "row": row, "feature": name,
                                 "contribution": float(contributions[row, j])}
                                for j, name in enumerate(self.adapter.names))
+        if tree is not None:
+            self._event("shap_progress", repeats * frame.height, repeats * frame.height,
+                        elapsed_seconds=perf_counter() - started, estimated_remaining_seconds=0.)
         settings = self._settings("shap", indices, w, engine=selected_engine, requested_engine=engine,
                                   fallback_reason=reason, background_indices=background_indices.tolist(),
                                   background_distribution="Uniform empirical rows; averaging weights do not alter reference probabilities",
                                   n_permutations=cycles, n_repeats=repeats, shap_version=shap.__version__,
+                                  optimize=optimize, cache_max_rows=cache_max_rows, cache_statistics=stats,
+                                  optimized_selected=optimized, optimization_pilot=pilot,
+                                  elapsed_seconds=perf_counter() - started,
                                   perturbation="interventional", features=self.adapter.names)
         return ShapResult(pl.DataFrame(records), pl.DataFrame(predictions), frame, settings, w)
+
+    def _permutation_row(self, shap, masker, row, reference, decode, source, seed, cycles,
+                         cache_max_rows, stats, *, optimized):
+        setup = perf_counter()
+        if optimized:
+            from .cached import CachedRawPredictor
+            cached = CachedRawPredictor(self, source, decode(np.vstack([row, reference])),
+                                        cache_max_rows, stats)
+        prediction_seconds = perf_counter() - setup
+
+        def predict(values):
+            nonlocal prediction_seconds
+            started = perf_counter()
+            try:
+                frame = decode(values)
+                return cached(frame) if optimized else self._predict(frame, np.full(len(values), source, dtype=int))
+            finally:
+                prediction_seconds += perf_counter() - started
+
+        explainer = shap.PermutationExplainer(predict, masker, seed=seed, feature_names=self.adapter.names)
+        result = explainer(row, max_evals=cycles * (2 * row.shape[1] + 1), silent=True)
+        return result, prediction_seconds
 
     def _encode(self, frame, background):
         """Represent categories as reversible codes, keeping each variable one player."""
@@ -598,17 +728,74 @@ class ExplanationReport:
 
         return np.column_stack(arrays).astype(float), np.column_stack(references).astype(float), decode
 
-    def _tree(self, shap, frame, background, indices):
+    def _tree_reason(self):
+        """Structural checks shared by inspection and native execution."""
         if self.adapter.ensemble is not None:
-            raise ValueError("Final ensemble predictions require the general explainer")
+            from ins_gbm.ensemble.blending import FittedBlendingEnsemble
+            if type(self.adapter.ensemble) is not FittedBlendingEnsemble:
+                return "Only fixed-weight blends support combined tree SHAP; use the general explainer"
+            if self.adapter.prediction_type == "link":
+                return "Log final blended response requires the general explainer; it is not a sum of member raw scores"
+            if any(m.pipeline.fitted_model.framework != "random_forest" for m in self.adapter.members):
+                return ("The blend uses response predictions, but boosted native SHAP explains raw/link scores; "
+                        "use the general explainer or member_shap(prediction_type='link')")
+            if self.adapter.feature_space == "raw" and any(m.pipeline.preprocessors for m in self.adapter.members):
+                return ("Raw features through PCA/other preprocessing require the general explainer; "
+                        "component contributions cannot be assigned to raw variables")
+            if any(meta["kind"] != "numeric" for meta in self.adapter.metadata.values()):
+                return "Categorical/grouped one-hot coordinates require the general explainer"
+            weights = np.asarray(self.adapter.ensemble.weights, dtype=float)
+            if weights.shape != (len(self.adapter.members),) or not np.isfinite(weights).all():
+                return "Blend weights must be finite and align with members"
+            return None
         if self.adapter.feature_space == "raw":
-            raise ValueError("Raw-feature explanations require the general explainer")
+            return "Raw-feature explanations require the general explainer"
         member = self.adapter.members[0]
         fitted = member.pipeline.fitted_model
         if any(meta["kind"] != "numeric" for meta in self.adapter.metadata.values()):
-            raise ValueError("Categorical/grouped one-hot coordinates require the general explainer")
+            return "Categorical/grouped one-hot coordinates require the general explainer"
         if list(member.columns) != self.adapter.names:
-            raise ValueError("Model columns and diagnostic players differ")
+            return "Model columns and diagnostic players differ"
+        if fitted.framework == "random_forest":
+            if self.adapter.prediction_type == "link":
+                return "Log Random Forest predictions require the general explainer"
+        elif fitted.framework in {"lightgbm", "xgboost", "catboost"}:
+            if self.adapter.prediction_type != "link":
+                return "Exponentiated tree predictions require the general explainer on response/rate scales"
+        else:
+            return f"Unsupported native framework {fitted.framework}"
+        return None
+
+    def _tree_blend(self, shap, frame, background, indices):
+        contributions = np.zeros((frame.height, len(self.feature_names)))
+        baselines = np.zeros(frame.height)
+        for weight, member in zip(self.adapter.ensemble.weights, self.adapter.members):
+            self._event("shap_tree_member")
+            child = member.pipeline.explain(
+                self.data, background=self.background, prediction_type=self.adapter.prediction_type,
+                feature_space="processed", seed=self.seed, batch_size=self.batch_size,
+                progress_callback=self.progress_callback, should_stop=self.should_stop)
+            if set(child.feature_names) - set(self.feature_names):
+                raise ValueError("Member coordinates differ from blend players; use the general explainer")
+            child_frame = frame.select(child.feature_names)
+            child_background = background.select(child.feature_names)
+            values, base = child._tree(shap, child_frame, child_background, indices)
+            for j, name in enumerate(child.feature_names):
+                contributions[:, self.feature_names.index(name)] += float(weight) * values[:, j]
+            baselines += float(weight) * base
+        if not np.allclose(self._predict(frame, indices), baselines + contributions.sum(axis=1),
+                           atol=1e-6, rtol=2e-5):
+            raise ValueError("Combined native values do not reconstruct fitted blend predictions")
+        return contributions, baselines
+
+    def _tree(self, shap, frame, background, indices):
+        reason = self._tree_reason()
+        if reason:
+            raise ValueError(reason)
+        if self.adapter.ensemble is not None:
+            return self._tree_blend(shap, frame, background, indices)
+        member = self.adapter.members[0]
+        fitted = member.pipeline.fitted_model
         combined = np.vstack([frame.to_numpy(), background.to_numpy()]).astype(float)
         if not _valid_numeric(combined).all():
             raise ValueError("Missing values require the general explainer")
