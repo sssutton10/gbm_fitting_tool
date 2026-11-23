@@ -29,11 +29,11 @@ class EnsembleResult:
     base_pipelines: list[FittedPipeline]
     configuration: dict = field(default_factory=dict)
 
-    def save(self, output_dir: str) -> None:
-        """Persist members and the meta-model without training rows or OOF arrays."""
+    def save(self, output_dir: str, *, include_training_data: bool = False) -> None:
+        """Persist prediction dependencies, optionally including full training state."""
         from ins_gbm.persistence.ensemble_io import save_ensemble
 
-        save_ensemble(self, output_dir)
+        save_ensemble(self, output_dir, include_training_data=include_training_data)
 
     def predict(self, data: ModelData) -> pl.Series:
         """Return predicted rates for Poisson rate targets with exposure omitted.

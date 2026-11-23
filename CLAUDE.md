@@ -146,7 +146,14 @@ loaded_for_oof = load_pipeline(
 ```
 
 Compact loads support prediction, evaluation, and importance. Reattach the
-original rows in their original order for `train_data` or OOF ensembles.
+original rows in their original order for `train_data` or OOF ensembles; only
+the saved `input_feature_names` are required. Default saves prune unused inputs,
+encoder state, preprocessing branches, and selection diagnostics. Required
+component inputs are retained; opaque custom transforms keep their full input
+contract. Compact refits freeze retained feature selection. Use
+`result.save(path, include_training_data=True)` to preserve original training
+rows, the complete feature contract, and the original selection recipe. Full
+loads restore attached training rows automatically. Ensembles use the same flag.
 
 ## Test Fixtures
 

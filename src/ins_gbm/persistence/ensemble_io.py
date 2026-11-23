@@ -11,24 +11,28 @@ if TYPE_CHECKING:
 _ARTIFACT_VERSION = 1
 
 
-def save_ensemble(result: "EnsembleResult", output_dir: str) -> None:
-    """Save an ensemble without raw training rows or per-row OOF predictions.
+def save_ensemble(
+    result: "EnsembleResult", output_dir: str, *,
+    include_training_data: bool = False,
+) -> None:
+    """Save an ensemble's prediction dependencies by default.
 
     Writes ensemble.pkl and human-readable metadata.json. As with pipeline
     artifacts, only load trusted pickle files in a compatible environment.
     The original result retains its training data and diagnostics.
+    Set include_training_data=True to preserve full member training state and
+    per-row stacking OOF predictions as well.
     """
     import cloudpickle
 
     from ins_gbm.ensemble.stacking import FittedStackingEnsemble
+    from ins_gbm.persistence.compact import pipeline_for_save
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     members = [
         replace(
-            pipeline,
-            raw_train_data=None,
-            input_schema=pipeline._input_schema(),
+            pipeline_for_save(pipeline, include_training_data=include_training_data),
             fitted_model=replace(
                 pipeline.fitted_model,
                 # CatBoost materializes lazy importance during serialization.
@@ -43,7 +47,7 @@ def save_ensemble(result: "EnsembleResult", output_dir: str) -> None:
         for pipeline in result.ensemble.fitted_pipelines
     ]
     fitted = replace(result.ensemble, fitted_pipelines=members)
-    if isinstance(fitted, FittedStackingEnsemble):
+    if isinstance(fitted, FittedStackingEnsemble) and not include_training_data:
         fitted = replace(fitted, oof_predictions=None)
     compact = replace(result, ensemble=fitted, base_pipelines=members)
     metadata = {
@@ -71,7 +75,7 @@ def save_ensemble(result: "EnsembleResult", output_dir: str) -> None:
 def load_ensemble(output_dir: str) -> "EnsembleResult":
     """Load a trusted ensemble artifact for prediction and holdout evaluation.
 
-    Raw training rows and stacking OOF predictions are not restored.
+    Training rows and stacking OOF predictions are restored only for full saves.
     """
     import cloudpickle
 

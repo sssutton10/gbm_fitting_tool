@@ -55,6 +55,21 @@ restored = load_model("output/frequency_model")
 `ModelPipeline(data, recipe).run()` and the original persistence functions remain
 supported. The shorter methods delegate to the same implementation.
 
+Model and ensemble saves retain only prediction dependencies by default. They
+omit training rows, unused input features and one-hot state, unused preprocessing
+branches, and feature-selection diagnostics. Loaded models accept raw data with
+only the retained `input_feature_names`; inputs contributing to a retained
+PCA/PLS/UMAP component are still required. Custom transforms whose dependencies
+are unknown retain their full input contract.
+
+Use `fitted.save(path, include_training_data=True)` (also supported by
+`save_pipeline`, `save_ensemble`, and ensemble `.save()`) to preserve the original
+training rows, full feature contract, recipe, and selection diagnostics. Loading
+such an artifact restores its attached training data automatically. For default
+saves, `load_model(path, training_data=data)` reattaches rows using only the saved
+input features. Refitting a default artifact freezes the retained feature
+selection; use a full save to repeat selection over the original candidate pool.
+
 ## Native categorical features in LightGBM
 
 `LightGBMModel` uses LightGBM's native categorical splits by default. With

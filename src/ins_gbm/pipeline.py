@@ -386,15 +386,17 @@ class FittedPipeline:
             comparison_predictions=comparison_predictions,
         )
 
-    def save(self, output_dir: str) -> None:
+    def save(self, output_dir: str, *, include_training_data: bool = False) -> None:
         """Persist this fitted pipeline.
 
         Args:
             output_dir (str): Directory for saved artifacts.
+            include_training_data (bool): Include original rows and the full
+                training feature contract instead of prediction dependencies only.
         """
         from ins_gbm.persistence.io import save_pipeline
 
-        save_pipeline(self, output_dir)
+        save_pipeline(self, output_dir, include_training_data=include_training_data)
 
     def retune(
         self,
